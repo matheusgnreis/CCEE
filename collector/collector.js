@@ -2,50 +2,33 @@ require("dotenv").config();
 const fetch = require("node-fetch");
 const { Pool } = require("pg");
 
-// 🔥 banco
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgres://postgres:123456@localhost:5432/ccee"
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
-// 🔥 config BI
-const URL = "https://wabi-brazil-south-b-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true";
+// 🔥 função para buscar da sua API (ou futura API interna)
+async function buscarAgente(nome) {
 
-const RESOURCE_KEY = "f6267020-1b73-4885-8920-19a9d09f1395";
-const MODEL_ID = 7427061;
+  const encoded = encodeURIComponent(nome);
 
-// 🔥 headers
-function headers() {
-  return {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "X-PowerBI-ResourceKey": RESOURCE_KEY
-  };
-}
+  const url = `http://localhost:3001/inteligencia/${encoded}`;
 
-// 🔁 pegar dados (simplificado - SALITRE)
-async function getDadosAgente(agente) {
+  console.log("🔎 buscando:", url);
 
-  // 👉 aqui você depois pode colocar seu body completo
-  return {
-    agente,
-    cnpj: "43.066.666/0001-55",
-    tipoConsumidor: "Consumidor Livre",
-    aderido: "Aderido",
-    consumo: 25.4,
-    compra: 26.11,
-    mcp: 179777,
-    resultado: 119091,
-    resultadoMCP: 114166,
-    balancoEnergetico: 0.71,
-    mes: "01/2026"
-  };
+  const res = await fetch(url);
+  const data = await res.json();
+
+  console.log("📥 retorno:", data);
+
+  return data;
 }
 
 // 💾 salvar no banco
 async function salvar(dado) {
 
   const query = `
-    INSERT INTO ccee_dados 
+    INSERT INTO ccee_dados
     (agente, cnpj, tipo_consumidor, aderido, balanco_energetico, consumo, compra, mcp, resultado, resultado_mcp, mes)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     ON CONFLICT (agente, mes) DO NOTHING
@@ -71,17 +54,34 @@ async function salvar(dado) {
 // 🚀 execução
 async function run() {
 
-  console.log("🚀 rodando collector...");
+  console.log("🚀 rodando collector REAL...");
 
-  const agente = "SALITRE FERTILIZANTES";
+  const agentes = [
+    "SALITRE FERTILIZANTES LTDA."
+  ];
 
-  const dados = await getDadosAgente(agente);
+  for (const agente of agentes) {
 
-  console.log("📊 dados:", dados);
+    try {
 
-  await salvar(dados);
+      const dados = await buscarAgente(agente);
 
-  console.log("💾 salvo no banco");
+      if (!dados || dados.erro) {
+        console.log("⚠️ erro no agente:", agente);
+        continue;
+      }
+
+      await salvar(dados);
+
+      console.log("💾 salvo:", agente);
+
+    } catch (e) {
+      console.error("❌ erro:", agente, e.message);
+    }
+
+  }
+
+  console.log("✅ collector finalizado");
 }
 
 run();
