@@ -11,7 +11,7 @@ const CONCEITOS = [
     icon: "⚡",
     titulo: "Ambiente de Contratação Livre",
     texto:
-      "Consumidores com demanda ≥ 500 kW podem negociar energia diretamente com geradores ou comercializadores, escolhendo preço, prazo e fonte de geração.",
+      "Consumidores da média tensão podem negociar energia diretamente com geradores ou comercializadores, escolhendo preço, prazo e fonte de geração.",
   },
   {
     icon: "📊",
