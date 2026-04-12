@@ -36,7 +36,7 @@ const CONCEITOS = [
 const VANTAGENS = [
   { num: "01", titulo: "Preço competitivo", texto: "Negociação direta com fornecedores permite capturar preços abaixo da tarifa cativa." },
   { num: "02", titulo: "Gestão de risco",   texto: "Contratos de curto, médio e longo prazo permitem proteger orçamentos contra volatilidade." },
-  { num: "03", titulo: "Origem da energia", texto: "Possibilidade de garantir 100% de energia renovável com certificados I-REC." },
+  { num: "03", titulo: "Origem da energia", texto: "Possibilidade de garantir 100% de energia renovável com certificados de energia renováveis." },
 ];
 
 export default function Home() {
