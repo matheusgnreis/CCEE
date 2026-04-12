@@ -17,6 +17,33 @@ const METRICAS = [
   { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2" },
 ];
 
+const GRAFICOS = [
+  {
+    titulo: "Consumo e Compra",
+    unidade: "MWm",
+    linhas: [
+      { key: "consumo", label: "Consumo", color: "#2563eb" },
+      { key: "compra",  label: "Compra",  color: "#16a34a" },
+    ],
+  },
+  {
+    titulo: "Balanço Energético",
+    unidade: "MWm",
+    linhas: [
+      { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2" },
+    ],
+  },
+  {
+    titulo: "MCP · Resultado · Resultado MCP",
+    unidade: "R$",
+    linhas: [
+      { key: "mcp",           label: "MCP",           color: "#d97706" },
+      { key: "resultado",     label: "Resultado",     color: "#dc2626" },
+      { key: "resultado_mcp", label: "Resultado MCP", color: "#7c3aed" },
+    ],
+  },
+];
+
 function fmt(v) {
   if (v === null || v === undefined) return "—";
   return Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
@@ -179,37 +206,56 @@ export default function AgenteDashboard() {
             </div>
 
             <div style={s.grid}>
-              {METRICAS.map(m => (
-                <div key={m.key} style={s.card}>
-                  <p style={s.cardLabel}>{m.label}</p>
-                  <p style={{ ...s.cardValue, color: loadingMes ? "#d1d5db" : m.color }}>
-                    {loadingMes ? "—" : fmt(dadosMes?.[m.key])}
-                  </p>
-                </div>
-              ))}
+              {METRICAS.map(m => {
+                const val      = dadosMes?.[m.key];
+                const negativo = !loadingMes
+                  && ["mcp", "resultado", "resultado_mcp"].includes(m.key)
+                  && Number(val) < 0;
+                const cor = loadingMes ? "#d1d5db" : negativo ? "#dc2626" : m.color;
+
+                return (
+                  <div key={m.key} style={{ ...s.card, ...(negativo ? s.cardAlerta : {}) }}>
+                    <p style={s.cardLabel}>{m.label}</p>
+                    <p style={{ ...s.cardValue, color: cor }}>
+                      {loadingMes ? "—" : fmt(val)}
+                      {negativo && <span style={s.alertaIcon} title="Aporte necessário na CCEE">⚠</span>}
+                    </p>
+                  </div>
+                );
+              })}
             </div>
 
-            {/* ── Gráfico histórico ─────────────────────────────── */}
-            {historico.length > 0 && (
-              <div style={s.chartBox}>
-                <h2 style={s.chartTitle}>Histórico mensal</h2>
-                <ResponsiveContainer width="100%" height={380}>
-                  <LineChart data={historico} margin={{ top: 10, right: 24, left: 10, bottom: 0 }}>
+            {/* ── Gráficos históricos ───────────────────────────── */}
+            {historico.length > 0 && GRAFICOS.map(g => (
+              <div key={g.titulo} style={s.chartBox}>
+                <h2 style={s.chartTitle}>{g.titulo}</h2>
+                <ResponsiveContainer width="100%" height={280}>
+                  <LineChart data={historico} margin={{ top: 10, right: 24, left: 16, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#9ca3af" }} />
-                    <YAxis tick={{ fontSize: 11, fill: "#9ca3af" }} />
+                    <YAxis
+                      tick={{ fontSize: 11, fill: "#9ca3af" }}
+                      label={{
+                        value: g.unidade,
+                        angle: -90,
+                        position: "insideLeft",
+                        offset: 10,
+                        style: { fontSize: 11, fill: "#9ca3af" }
+                      }}
+                      width={60}
+                    />
                     <Tooltip
                       contentStyle={{ borderRadius: 8, fontSize: 13, border: "1px solid #e2e8f0" }}
-                      formatter={(v, name) => [fmt(v), name]}
+                      formatter={(v, name) => [`${fmt(v)} ${g.unidade}`, name]}
                     />
-                    <Legend wrapperStyle={{ fontSize: 13, paddingTop: 16 }} />
-                    {METRICAS.map(m => (
+                    <Legend wrapperStyle={{ fontSize: 13, paddingTop: 12 }} />
+                    {g.linhas.map(l => (
                       <Line
-                        key={m.key}
+                        key={l.key}
                         type="monotone"
-                        dataKey={m.key}
-                        name={m.label}
-                        stroke={m.color}
+                        dataKey={l.key}
+                        name={l.label}
+                        stroke={l.color}
                         strokeWidth={2}
                         dot={{ r: 3 }}
                         activeDot={{ r: 5 }}
@@ -219,7 +265,7 @@ export default function AgenteDashboard() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-            )}
+            ))}
           </>
         )}
 
@@ -260,10 +306,12 @@ const s = {
   mesLoading: { fontSize: 12, color: "#94a3b8" },
 
   grid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 },
-  card: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "18px 20px" },
-  cardLabel: { fontSize: 12, color: "#6b7280", margin: "0 0 6px", fontWeight: 600 },
-  cardValue: { fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: -0.5, transition: "color 0.2s" },
+  card:       { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "18px 20px" },
+  cardAlerta: { border: "1px solid #fecaca", background: "#fff7f7" },
+  cardLabel:  { fontSize: 12, color: "#6b7280", margin: "0 0 6px", fontWeight: 600 },
+  cardValue:  { fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: -0.5, transition: "color 0.2s", display: "flex", alignItems: "center", gap: 8 },
+  alertaIcon: { fontSize: 18, lineHeight: 1 },
 
-  chartBox:   { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 24px 12px" },
-  chartTitle: { fontSize: 15, fontWeight: 700, color: "#374151", margin: "0 0 20px" },
+  chartBox:   { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 24px 12px", marginBottom: 20 },
+  chartTitle: { fontSize: 15, fontWeight: 700, color: "#374151", margin: "0 0 16px" },
 };
