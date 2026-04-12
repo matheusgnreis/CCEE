@@ -64,7 +64,7 @@ export default function Home() {
       {/* ── Hero ───────────────────────────────────────────────── */}
       <section style={s.hero}>
         <div style={s.heroInner}>
-          <span style={s.badge}>Consolidade de dados abertos</span>
+          <span style={s.badge}>Consolidado de dados abertos</span>
           <h1 style={s.h1}>
             Inteligência para o<br />
             Mercado Livre de Energia
