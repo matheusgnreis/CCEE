@@ -1,9 +1,10 @@
 require("dotenv").config();
 
-const express = require("express");
-const { Pool } = require("pg");
-const fetch = require("node-fetch");
-const cors = require("cors");
+const express   = require("express");
+const { Pool }  = require("pg");
+const fetch     = require("node-fetch");
+const cors      = require("cors");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 
@@ -12,6 +13,28 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+
+// Limite geral: 60 req/min por IP (leitura normal do banco)
+const limiteGeral = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Muitas requisições. Tente novamente em alguns segundos." }
+});
+
+// Limite estrito: 10 req/min por IP (endpoints que podem acionar o Power BI)
+const limitePowerBI = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Limite de consultas atingido. Aguarde 1 minuto." }
+});
+
+app.use(limiteGeral);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -582,7 +605,7 @@ app.get("/health", async (_req, res) => {
 
 // GET /inteligencia/:agente — dados do mês + metadados
 // Query param opcional: ?mes=YYYY-MM (default: mês recente)
-app.get("/inteligencia/:agente", async (req, res) => {
+app.get("/inteligencia/:agente", limitePowerBI, async (req, res) => {
   const agenteRaw = decodeURIComponent(req.params.agente);
   if (!agenteRaw || agenteRaw.trim().length < 2)
     return res.status(400).json({ error: "Nome de agente inválido" });
@@ -648,7 +671,7 @@ app.get("/inteligencia/:agente/historico", async (req, res) => {
 });
 
 // POST /inteligencia/:agente/refresh — força busca no Power BI
-app.post("/inteligencia/:agente/refresh", async (req, res) => {
+app.post("/inteligencia/:agente/refresh", limitePowerBI, async (req, res) => {
   const agenteRaw = decodeURIComponent(req.params.agente);
   if (!agenteRaw || agenteRaw.trim().length < 2)
     return res.status(400).json({ error: "Nome de agente inválido" });
