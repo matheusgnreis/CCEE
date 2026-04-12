@@ -57,21 +57,21 @@ export default function Home() {
       {/* ── Navbar ─────────────────────────────────────────────── */}
       <nav style={s.nav}>
         <div style={s.navInner}>
-          <span style={s.logo}>⚡ CCEE Monitor</span>
+          <span style={s.logo}>⚡Monitoramento Mercado Livre</span>
         </div>
       </nav>
 
       {/* ── Hero ───────────────────────────────────────────────── */}
       <section style={s.hero}>
         <div style={s.heroInner}>
-          <span style={s.badge}>Câmara de Comercialização de Energia Elétrica</span>
+          <span style={s.badge}>Consolidade de dados abertos</span>
           <h1 style={s.h1}>
             Inteligência para o<br />
             Mercado Livre de Energia
           </h1>
           <p style={s.heroSub}>
             Acompanhe consumo, compra, resultado e balanço energético de agentes
-            registrados na CCEE. Dados atualizados diretamente da câmara de comercialização.
+            registrados na CCEE. Dados atualizados diretamente dos dados abertos da CCEE.
           </p>
           <form onSubmit={handleBusca} style={s.searchForm}>
             <input
@@ -91,7 +91,7 @@ export default function Home() {
             rel="noopener noreferrer"
             style={s.heroLink}
           >
-            Site oficial da CCEE ↗
+            Informação oficial no site da CCEE ↗
           </a>
         </div>
       </section>
@@ -172,9 +172,9 @@ export default function Home() {
       {/* ── Footer ─────────────────────────────────────────────── */}
       <footer style={s.footer}>
         <div style={s.footerInner}>
-          <span style={s.logo}>⚡ CCEE Monitor</span>
+          <span style={s.logo}>⚡Monitoramento Mercado Livre</span>
           <p style={s.footerText}>
-            Dados abertos via Câmara de Comercialização de Energia Elétrica — uso não oficial
+            Dados abertos renderizados com amor — uso não oficial
           </p>
         </div>
       </footer>
