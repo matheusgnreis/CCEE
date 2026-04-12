@@ -4,10 +4,8 @@ const fetch = require("node-fetch");
 
 const API_URL = process.env.API_URL || "http://localhost:3001";
 
-// Lista de agentes a coletar — adicione mais conforme necessário
-const AGENTES = [
-  "SALITRE FERTILIZANTES LTDA."
-];
+// Lista de agentes a coletar — adicione conforme necessário
+const AGENTES = [];
 
 async function coletarAgente(nome) {
   const encoded = encodeURIComponent(nome);
