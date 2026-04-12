@@ -1,5 +1,5 @@
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -35,7 +35,11 @@ export default function AgenteDashboard() {
   const [loadingMes,     setLoadingMes]     = useState(false);
   const [error,          setError]          = useState(null);
 
-  // ── 1. Busca histórico completo quando o agente muda ──────────────
+  // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
+  // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
+  const fetchedMesRef = useRef(null);
+
+  // ── 1. Busca histórico; se vazio, dispara Power BI (primeiro acesso) ──
   useEffect(() => {
     if (!agente) return;
 
@@ -44,23 +48,46 @@ export default function AgenteDashboard() {
     setHistorico([]);
     setDadosMes(null);
     setMesSelecionado(null);
+    fetchedMesRef.current = null;
 
-    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/historico`)
+    const encoded = encodeURIComponent(agente);
+
+    fetch(`${API_URL}/inteligencia/${encoded}/historico`)
       .then(r => r.json())
-      .then(json => {
+      .then(async json => {
         if (json.error) throw new Error(json.error);
-        setHistorico(json);
-        // Seleciona o mês mais recente por padrão
-        if (json.length > 0) setMesSelecionado(json[json.length - 1].mes);
+
+        if (json.length > 0) {
+          // Agente já existe no banco — fluxo normal
+          setHistorico(json);
+          setMesSelecionado(json[json.length - 1].mes);
+        } else {
+          // Primeiro acesso — busca no Power BI (sem filtro de mês = mais recente)
+          const r2    = await fetch(`${API_URL}/inteligencia/${encoded}`);
+          const dados = await r2.json();
+          if (dados.error) throw new Error(dados.error);
+
+          fetchedMesRef.current = dados.mes; // marca para não re-buscar
+          setDadosMes(dados);
+          setMesSelecionado(dados.mes);
+
+          // Re-busca histórico (agora já salvo no banco)
+          const r3   = await fetch(`${API_URL}/inteligencia/${encoded}/historico`);
+          const hist = await r3.json();
+          if (Array.isArray(hist)) setHistorico(hist);
+        }
       })
       .catch(err => setError(err.message))
       .finally(() => setLoadingHist(false));
   }, [agente]);
 
-  // ── 2. Busca dados completos do mês selecionado ──────────────────
+  // ── 2. Busca dados do mês quando o usuário troca o seletor ───────────
   useEffect(() => {
-    if (!agente || !mesSelecionado) return;
+    if (!agente || !mesSelecionado || loadingHist) return;
+    // Pula se os dados desse mês já foram carregados pelo efeito anterior
+    if (fetchedMesRef.current === mesSelecionado) return;
 
+    fetchedMesRef.current = mesSelecionado;
     setLoadingMes(true);
     setDadosMes(null);
 
@@ -72,7 +99,7 @@ export default function AgenteDashboard() {
       })
       .catch(err => setError(err.message))
       .finally(() => setLoadingMes(false));
-  }, [agente, mesSelecionado]);
+  }, [agente, mesSelecionado, loadingHist]);
 
   // Metadados vêm do mês atual ou do primeiro registro do histórico
   const meta = dadosMes ?? (historico.length > 0 ? historico[0] : null);

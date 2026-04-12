@@ -174,7 +174,7 @@ export default function Home() {
         <div style={s.footerInner}>
           <span style={s.logo}>⚡ CCEE Monitor</span>
           <p style={s.footerText}>
-            Dados via Câmara de Comercialização de Energia Elétrica — uso não oficial
+            Dados abertos via Câmara de Comercialização de Energia Elétrica — uso não oficial
           </p>
         </div>
       </footer>
