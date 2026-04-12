@@ -1,87 +1,43 @@
 require("dotenv").config();
+
 const fetch = require("node-fetch");
-const { Pool } = require("pg");
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+const API_URL = process.env.API_URL || "http://localhost:3001";
 
-// 🔥 função para buscar da sua API (ou futura API interna)
-async function buscarAgente(nome) {
+// Lista de agentes a coletar — adicione mais conforme necessário
+const AGENTES = [
+  "SALITRE FERTILIZANTES LTDA."
+];
 
+async function coletarAgente(nome) {
   const encoded = encodeURIComponent(nome);
+  const url = `${API_URL}/inteligencia/${encoded}`;
 
-  const url = `http://localhost:3001/inteligencia/${encoded}`;
-
-  console.log("🔎 buscando:", url);
+  console.log("Coletando:", nome);
 
   const res = await fetch(url);
   const data = await res.json();
 
-  console.log("📥 retorno:", data);
+  if (!res.ok || data.error) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
 
   return data;
 }
 
-// 💾 salvar no banco
-async function salvar(dado) {
-
-  const query = `
-    INSERT INTO ccee_dados
-    (agente, cnpj, tipo_consumidor, aderido, balanco_energetico, consumo, compra, mcp, resultado, resultado_mcp, mes)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-    ON CONFLICT (agente, mes) DO NOTHING
-  `;
-
-  const values = [
-    dado.agente,
-    dado.cnpj,
-    dado.tipoConsumidor,
-    dado.aderido,
-    dado.balancoEnergetico,
-    dado.consumo,
-    dado.compra,
-    dado.mcp,
-    dado.resultado,
-    dado.resultadoMCP,
-    dado.mes
-  ];
-
-  await pool.query(query, values);
-}
-
-// 🚀 execução
 async function run() {
+  console.log("Iniciando collector...");
 
-  console.log("🚀 rodando collector REAL...");
-
-  const agentes = [
-    "SALITRE FERTILIZANTES LTDA."
-  ];
-
-  for (const agente of agentes) {
-
+  for (const agente of AGENTES) {
     try {
-
-      const dados = await buscarAgente(agente);
-
-      if (!dados || dados.erro) {
-        console.log("⚠️ erro no agente:", agente);
-        continue;
-      }
-
-      await salvar(dados);
-
-      console.log("💾 salvo:", agente);
-
+      const dados = await coletarAgente(agente);
+      console.log("OK:", agente, "| consumo:", dados.consumo);
     } catch (e) {
-      console.error("❌ erro:", agente, e.message);
+      console.error("Erro:", agente, "-", e.message);
     }
-
   }
 
-  console.log("✅ collector finalizado");
+  console.log("Collector finalizado");
 }
 
 run();

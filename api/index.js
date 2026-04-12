@@ -6,254 +6,673 @@ const fetch = require("node-fetch");
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : "*"
+}));
+
+app.use(express.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000
 });
 
+pool.on("error", (err) => {
+  console.error("Erro no pool de conexões:", err.message);
+});
 
-// 🔥 normalização do nome
+// Estimativa do mês de referência baseada na data atual
+// Usada apenas como fallback quando não há dados históricos disponíveis
+// O valor real sempre vem do último mês do histórico retornado pelo Power BI
+function mesReferencia() {
+  const hoje = new Date();
+  const offset = hoje.getDate() <= 5 ? 3 : 2;
+  const ref = new Date(hoje.getFullYear(), hoje.getMonth() - offset, 1);
+  const ano = ref.getFullYear();
+  const mes = String(ref.getMonth() + 1).padStart(2, "0");
+  return `${ano}-${mes}`;
+}
+
+// Remove sufixos jurídicos, espaços extras e converte para maiúsculo
 function normalizarAgente(nome) {
   return nome
-    .replace(" LTDA.", "")
-    .replace(" LTDA", "")
+    .replace(/\s*(LTDA\.?|S\.?A\.?|ME|EPP|EIRELI)\s*$/i, "")
     .trim()
     .toUpperCase();
 }
 
+// Converte "YYYY-MM" → "YYYY/MM" para o filtro do Power BI
+function filtroMesAno(mes) {
+  return mes === mesReferencia() ? "'(mais recente)'" : `'${mes.replace("-", "/")}'`;
+}
 
-// 🔥 FUNÇÃO PRINCIPAL → POWER BI
-async function buscarPowerBI(agente) {
+// ─── Mapeamento de resultados ──────────────────────────────────────────────────
 
-  console.log("🌐 buscando Power BI:", agente);
+// json.jobIds[i] sempre corresponde à query i, independente da ordem em results[]
+// Retorna { financeiro, historico, metadados } com o result correto para cada query
+function mapearResultados(json) {
+  const jobIds  = json?.jobIds  || [];
+  const results = json?.results || [];
+
+  const porJobId = {};
+  results.forEach(r => { porJobId[r.jobId] = r; });
+
+  return {
+    financeiro:       porJobId[jobIds[0]] || null, // Query 0
+    historico:        porJobId[jobIds[1]] || null, // Query 1
+    metadados:        porJobId[jobIds[2]] || null, // Query 2
+    recursoRequisito: porJobId[jobIds[3]] || null  // Query 3
+  };
+}
+
+// ─── Extratores DSR ────────────────────────────────────────────────────────────
+
+// Extrai dados financeiros — estrutura PH[1].DM1 com DS_ACR/VL_ACR
+function extrairDados(result, agente, mes) {
+  const dsr = result?.result?.data?.dsr?.DS?.[0];
+  if (!dsr) throw new Error("Resposta inválida do Power BI: sem DSR (dados)");
+
+  const dm = dsr?.PH?.[1]?.DM1;
+  if (!dm || !Array.isArray(dm)) throw new Error("Resposta inválida do Power BI: sem DM1");
+
+  const map = {};
+  dm.forEach(x => {
+    if (Array.isArray(x.C) && x.C.length >= 2) {
+      map[x.C[0]] = x.C[1];
+    }
+  });
+
+  return {
+    agente,
+    consumo:            Number(map["Consumo"])               || 0,
+    compra:             Number(map["Compra"])                || 0,
+    mcp:                Number(map["MCP"])                   || 0,
+    resultado:          Number(map["Resultado com Ajustes"]) || 0,
+    resultado_mcp:      Number(map["Resultado do MCP"])      || 0,
+    balanco_energetico: Number(map["Balanço Energético"])    || 0,
+    mes
+  };
+}
+
+// Extrai série histórica genérica — estrutura PH[0].DM0 com delta compression + ValueDicts
+// Colunas: [ANO, MES_NOME(D0), MES_ANO(D1), campoA, campoB]
+// O último item tem o mês mais recente disponível no Power BI
+function extrairSerieDSR(result, agente, campoA, campoB) {
+  const dsr = result?.result?.data?.dsr?.DS?.[0];
+  if (!dsr) return [];
+
+  const dm = dsr?.PH?.[0]?.DM0;
+  if (!dm || !Array.isArray(dm)) return [];
+
+  const meses = dsr?.ValueDicts?.D1 || [];
+  const rows  = [];
+  let prev    = [];
+
+  for (const item of dm) {
+    const R    = typeof item.R === "number" ? item.R : 0;
+    const C    = item.C || [];
+    const full = [...prev.slice(0, R), ...C];
+    prev = full;
+
+    const mesVal = typeof full[2] === "number" ? meses[full[2]] : full[2];
+    if (!mesVal || typeof mesVal !== "string") continue;
+
+    const mes = mesVal.replace("/", "-");
+    if (!/^\d{4}-\d{2}$/.test(mes)) continue;
+
+    rows.push({ agente, mes, [campoA]: Number(full[3]) || 0, [campoB]: Number(full[4]) || 0 });
+  }
+
+  return rows;
+}
+
+// Merge de duas séries históricas por mês
+function mergeHistorico(serieA, serieB) {
+  const map = {};
+  serieA.forEach(r => { map[r.mes] = { ...r }; });
+  serieB.forEach(r => {
+    if (map[r.mes]) Object.assign(map[r.mes], r);
+    else map[r.mes] = { ...r };
+  });
+  return Object.values(map).sort((a, b) => a.mes.localeCompare(b.mes));
+}
+
+// Extrai metadados estáticos — estrutura PH[0].DM0 com ValueDicts (G0-G4 + M0)
+function extrairMetadados(result, agente) {
+  const dsr = result?.result?.data?.dsr?.DS?.[0];
+  if (!dsr) {
+    console.warn("Metadados não retornados pelo Power BI");
+    return null;
+  }
+
+  const dm = dsr?.PH?.[0]?.DM0;
+  if (!dm || !Array.isArray(dm) || dm.length === 0) return null;
+
+  const row   = dm[0];
+  const C     = row.C || [];
+  const dicts = dsr.ValueDicts || {};
+
+  // Power BI pode retornar valor direto (string) ou índice numérico no ValueDict
+  const d = (key, idx) => {
+    if (typeof idx === "string") return idx;
+    return dicts[key] ? (dicts[key][idx] ?? null) : null;
+  };
+
+  return {
+    agente,
+    classe:         d("D0", C[0]) || null,
+    razao_social:   d("D1", C[1]) || null,
+    sigla:          d("D2", C[2]) || null,
+    cnpj:           d("D3", C[3]) || null,
+    situacao:       d("D4", C[4]) || null,
+    capital_social: Number(C[5])  || 0
+  };
+}
+
+// ─── Power BI ─────────────────────────────────────────────────────────────────
+
+async function buscarPowerBI(agente, mes) {
+  mes = mes || mesReferencia();
+  console.log("Buscando no Power BI:", agente, "| mês:", mes);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
 
   const body = {
     version: "1.0.0",
     queries: [
+      // Query 0 — dados financeiros do mês (Consumo, Compra, MCP, Resultado...)
       {
         Query: {
-          Commands: [
-            {
-              SemanticQueryDataShapeCommand: {
-                Query: {
-                  Version: 2,
-                  From: [
-                    { Name: "s", Entity: "SEGURANCA_MERCADO", Type: 0 },
-                    { Name: "t", Entity: "TabelaBusca", Type: 0 },
-                    { Name: "c", Entity: "CALENDARIO", Type: 0 }
-                  ],
-                  Select: [
-                    {
-                      Column: {
-                        Expression: { SourceRef: { Source: "s" } },
-                        Property: "DS_ACR"
-                      }
-                    },
-                    {
-                      Aggregation: {
-                        Expression: {
-                          Column: {
-                            Expression: { SourceRef: { Source: "s" } },
-                            Property: "VL_ACR"
-                          }
-                        },
-                        Function: 0
-                      }
-                    }
-                  ],
-                  Where: [
-                    {
-                      Condition: {
-                        In: {
-                          Expressions: [
-                            {
-                              Column: {
-                                Expression: { SourceRef: { Source: "t" } },
-                                Property: "Valor"
-                              }
-                            }
-                          ],
-                          Values: [
-                            [
-                              {
-                                Literal: {
-                                  Value: `'${agente}'`
-                                }
-                              }
-                            ]
-                          ]
-                        }
-                      }
-                    },
-                    {
-                      Condition: {
-                        In: {
-                          Expressions: [
-                            {
-                              Column: {
-                                Expression: { SourceRef: { Source: "t" } },
-                                Property: "Tipo"
-                              }
-                            }
-                          ],
-                          Values: [
-                            [
-                              { Literal: { Value: "'Agente'" } }
-                            ]
-                          ]
-                        }
-                      }
-                    },
-                    {
-                      Condition: {
-                        In: {
-                          Expressions: [
-                            {
-                              Column: {
-                                Expression: { SourceRef: { Source: "c" } },
-                                Property: "FiltroMesAno"
-                              }
-                            }
-                          ],
-                          Values: [
-                            [
-                              { Literal: { Value: "'(mais recente)'" } }
-                            ]
-                          ]
-                        }
-                      }
-                    }
-                  ]
-                }
+          Commands: [{
+            SemanticQueryDataShapeCommand: {
+              Query: {
+                Version: 2,
+                From: [
+                  { Name: "s", Entity: "SEGURANCA_MERCADO", Type: 0 },
+                  { Name: "t", Entity: "TabelaBusca",       Type: 0 },
+                  { Name: "c", Entity: "CALENDARIO",        Type: 0 }
+                ],
+                Select: [
+                  { Column:      { Expression: { SourceRef: { Source: "s" } }, Property: "DS_ACR" } },
+                  { Aggregation: { Expression: { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "VL_ACR" } }, Function: 0 } }
+                ],
+                Where: [
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`       } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"           } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: filtroMesAno(mes)   } }]] } } }
+                ]
               }
             }
-          ]
+          }]
+        }
+      },
+      // Query 1 — histórico mensal (Balanço Energético + MCP, ~2 anos)
+      {
+        Query: {
+          Commands: [{
+            SemanticQueryDataShapeCommand: {
+              Query: {
+                Version: 2,
+                From: [
+                  { Name: "c", Entity: "CALENDARIO",        Type: 0 },
+                  { Name: "m", Entity: "MEDIDAS_CALCULADAS", Type: 0 },
+                  { Name: "t", Entity: "TabelaBusca",        Type: 0 }
+                ],
+                Select: [
+                  { Column:      { Expression: { SourceRef: { Source: "c" } }, Property: "ANO"                 } },
+                  { Column:      { Expression: { SourceRef: { Source: "c" } }, Property: "MES_NOME"             } },
+                  { Aggregation: { Expression: { Column: { Expression: { SourceRef: { Source: "c" } }, Property: "MES_ANO_FORMATADO" } }, Function: 3 } },
+                  { Measure:     { Expression: { SourceRef: { Source: "m" } }, Property: "Balanco_Energetico"   } },
+                  { Measure:     { Expression: { SourceRef: { Source: "m" } }, Property: "MCP"                  } }
+                ],
+                Where: [
+                  { Condition: { In:      { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"  } }], Values: [[{ Literal: { Value: "'Agente'"    } }]] } } },
+                  { Condition: { In:      { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor" } }], Values: [[{ Literal: { Value: `'${agente}'` } }]] } } },
+                  { Condition: { Between: {
+                    Expression:  { Column: { Expression: { SourceRef: { Source: "c" } }, Property: "DATA" } },
+                    LowerBound:  { DateSpan: { Expression: { DateAdd: { Expression: { DateAdd: { Expression: { Now: {} }, Amount: 1, TimeUnit: 0 } }, Amount: -2, TimeUnit: 3 } }, TimeUnit: 0 } },
+                    UpperBound:  { DateSpan: { Expression: { Now: {} }, TimeUnit: 0 } }
+                  } } }
+                ],
+                OrderBy: [{ Direction: 1, Expression: { Aggregation: { Expression: { Column: { Expression: { SourceRef: { Source: "c" } }, Property: "MES_ANO_FORMATADO" } }, Function: 3 } } }]
+              },
+              Binding: {
+                Primary: { Groupings: [{ Projections: [0, 1, 2, 3, 4] }] },
+                DataReduction: { DataVolume: 4, Primary: { Window: { Count: 1000 } } },
+                SuppressedJoinPredicates: [2],
+                Version: 1
+              }
+            }
+          }]
+        }
+      },
+      // Query 2 — metadados estáticos (CNPJ, razão social, classe, situação)
+      {
+        Query: {
+          Commands: [{
+            SemanticQueryDataShapeCommand: {
+              Query: {
+                Version: 2,
+                From: [
+                  { Name: "s", Entity: "SEGURANCA_MERCADO",  Type: 0 },
+                  { Name: "m", Entity: "MEDIDAS_CALCULADAS", Type: 0 },
+                  { Name: "t", Entity: "TabelaBusca",        Type: 0 },
+                  { Name: "c", Entity: "CALENDARIO",         Type: 0 }
+                ],
+                Select: [
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "NM_CSSE"        } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "NM_RZOA_SOCI"   } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "SG_AGEN"        } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "CNPJ_Formatado" } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "DS_STAT_AGEN"   } },
+                  { Measure: { Expression: { SourceRef: { Source: "m" } }, Property: "Capital Social" } }
+                ],
+                Where: [
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: "'(mais recente)'" } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`      } }]] } } }
+                ]
+              },
+              Binding: {
+                Primary: { Groupings: [{ Projections: [0, 1, 2, 3, 4, 5] }] },
+                DataReduction: { DataVolume: 3, Primary: { Window: { Count: 500 } } },
+                Version: 1
+              }
+            }
+          }]
+        }
+      },
+      // Query 3 — histórico mensal (Recurso=Compra + Requisito=Consumo, ~2 anos)
+      {
+        Query: {
+          Commands: [{
+            SemanticQueryDataShapeCommand: {
+              Query: {
+                Version: 2,
+                From: [
+                  { Name: "c", Entity: "CALENDARIO",         Type: 0 },
+                  { Name: "m", Entity: "MEDIDAS_CALCULADAS", Type: 0 },
+                  { Name: "t", Entity: "TabelaBusca",        Type: 0 }
+                ],
+                Select: [
+                  { Column:      { Expression: { SourceRef: { Source: "c" } }, Property: "ANO"                 } },
+                  { Column:      { Expression: { SourceRef: { Source: "c" } }, Property: "MES_NOME"             } },
+                  { Aggregation: { Expression: { Column: { Expression: { SourceRef: { Source: "c" } }, Property: "MES_ANO_FORMATADO" } }, Function: 3 } },
+                  { Measure:     { Expression: { SourceRef: { Source: "m" } }, Property: "Recurso"              } },
+                  { Measure:     { Expression: { SourceRef: { Source: "m" } }, Property: "Requisito"            } }
+                ],
+                Where: [
+                  { Condition: { In:      { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"  } }], Values: [[{ Literal: { Value: "'Agente'"    } }]] } } },
+                  { Condition: { In:      { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor" } }], Values: [[{ Literal: { Value: `'${agente}'` } }]] } } },
+                  { Condition: { Between: {
+                    Expression:  { Column: { Expression: { SourceRef: { Source: "c" } }, Property: "DATA" } },
+                    LowerBound:  { DateSpan: { Expression: { DateAdd: { Expression: { DateAdd: { Expression: { Now: {} }, Amount: 1, TimeUnit: 0 } }, Amount: -2, TimeUnit: 3 } }, TimeUnit: 0 } },
+                    UpperBound:  { DateSpan: { Expression: { Now: {} }, TimeUnit: 0 } }
+                  } } }
+                ],
+                OrderBy: [{ Direction: 1, Expression: { Aggregation: { Expression: { Column: { Expression: { SourceRef: { Source: "c" } }, Property: "MES_ANO_FORMATADO" } }, Function: 3 } } }]
+              },
+              Binding: {
+                Primary: { Groupings: [{ Projections: [0, 1, 2, 3, 4] }] },
+                DataReduction: { DataVolume: 4, Primary: { Window: { Count: 1000 } } },
+                SuppressedJoinPredicates: [2],
+                Version: 1
+              }
+            }
+          }]
         }
       }
     ],
     modelId: Number(process.env.POWERBI_MODEL_ID)
   };
 
-  const res = await fetch(
-    "https://wabi-brazil-south-b-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-PowerBI-ResourceKey": process.env.POWERBI_RESOURCE_KEY
+  try {
+    const res = await fetch(
+      "https://wabi-brazil-south-b-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-PowerBI-ResourceKey": process.env.POWERBI_RESOURCE_KEY
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      }
+    );
+
+    clearTimeout(timer);
+
+    if (!res.ok) throw new Error(`Power BI retornou HTTP ${res.status}`);
+
+    const json = await res.json();
+    console.log("Resposta Power BI recebida | results:", json?.results?.length);
+
+    const { financeiro, historico, metadados, recursoRequisito } = mapearResultados(json);
+
+    const serieBalMcp    = extrairSerieDSR(historico,        agente, "balanco_energetico", "mcp");
+    const serieCompCons  = extrairSerieDSR(recursoRequisito, agente, "compra",             "consumo");
+    const hist           = mergeHistorico(serieBalMcp, serieCompCons);
+
+    // Usa o último mês do histórico como mês de referência real
+    // Mais confiável do que calcular pelo dia de hoje
+    const mesEfetivo = (hist.length > 0 && mes === mesReferencia())
+      ? hist[hist.length - 1].mes
+      : mes;
+
+    const dados = extrairDados(financeiro, agente, mesEfetivo);
+    const meta  = extrairMetadados(metadados, agente);
+
+    return { dados, historico: hist, metadados: meta };
+
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError") throw new Error("Timeout ao buscar Power BI (>15s)");
+    throw err;
+  }
+}
+
+// Busca apenas Q0 (financeiro) + Q2 (metadados) — usado quando a linha já existe
+// no banco mas resultado IS NULL (histórico salvo, dados financeiros ainda faltam)
+async function buscarPowerBISimples(agente, mes) {
+  console.log("Buscando Q0+Q2 no Power BI:", agente, "| mês:", mes);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  const body = {
+    version: "1.0.0",
+    queries: [
+      // Query 0 — dados financeiros do mês
+      {
+        Query: {
+          Commands: [{
+            SemanticQueryDataShapeCommand: {
+              Query: {
+                Version: 2,
+                From: [
+                  { Name: "s", Entity: "SEGURANCA_MERCADO", Type: 0 },
+                  { Name: "t", Entity: "TabelaBusca",       Type: 0 },
+                  { Name: "c", Entity: "CALENDARIO",        Type: 0 }
+                ],
+                Select: [
+                  { Column:      { Expression: { SourceRef: { Source: "s" } }, Property: "DS_ACR" } },
+                  { Aggregation: { Expression: { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "VL_ACR" } }, Function: 0 } }
+                ],
+                Where: [
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`     } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: filtroMesAno(mes) } }]] } } }
+                ]
+              }
+            }
+          }]
+        }
       },
-      body: JSON.stringify(body)
-    }
-  );
+      // Query 1 — metadados estáticos
+      {
+        Query: {
+          Commands: [{
+            SemanticQueryDataShapeCommand: {
+              Query: {
+                Version: 2,
+                From: [
+                  { Name: "s", Entity: "SEGURANCA_MERCADO",  Type: 0 },
+                  { Name: "m", Entity: "MEDIDAS_CALCULADAS", Type: 0 },
+                  { Name: "t", Entity: "TabelaBusca",        Type: 0 },
+                  { Name: "c", Entity: "CALENDARIO",         Type: 0 }
+                ],
+                Select: [
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "NM_CSSE"        } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "NM_RZOA_SOCI"   } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "SG_AGEN"        } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "CNPJ_Formatado" } },
+                  { Column:  { Expression: { SourceRef: { Source: "s" } }, Property: "DS_STAT_AGEN"   } },
+                  { Measure: { Expression: { SourceRef: { Source: "m" } }, Property: "Capital Social" } }
+                ],
+                Where: [
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: "'(mais recente)'" } }]] } } },
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`      } }]] } } }
+                ]
+              },
+              Binding: {
+                Primary: { Groupings: [{ Projections: [0, 1, 2, 3, 4, 5] }] },
+                DataReduction: { DataVolume: 3, Primary: { Window: { Count: 500 } } },
+                Version: 1
+              }
+            }
+          }]
+        }
+      }
+    ],
+    modelId: Number(process.env.POWERBI_MODEL_ID)
+  };
 
-  const json = await res.json();
+  try {
+    const res = await fetch(
+      "https://wabi-brazil-south-b-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-PowerBI-ResourceKey": process.env.POWERBI_RESOURCE_KEY
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      }
+    );
 
-  console.log("📥 resposta Power BI recebida");
+    clearTimeout(timer);
 
-  // 🔥 EXTRAÇÃO DO DSR
-  const dsr = json?.results?.[0]?.result?.data?.dsr?.DS?.[0];
+    if (!res.ok) throw new Error(`Power BI retornou HTTP ${res.status}`);
 
-  if (!dsr) throw new Error("sem DSR");
+    const json = await res.json();
+    const jobIds   = json?.jobIds  || [];
+    const results  = json?.results || [];
+    const porJobId = {};
+    results.forEach(r => { porJobId[r.jobId] = r; });
 
-  const dm = dsr?.PH?.[1]?.DM1;
+    const dados = extrairDados(porJobId[jobIds[0]] || null, agente, mes);
+    const meta  = extrairMetadados(porJobId[jobIds[1]] || null, agente);
 
-  if (!dm) throw new Error("sem DM1");
+    return { dados, metadados: meta };
 
-  const map = {};
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError") throw new Error("Timeout ao buscar Power BI (>15s)");
+    throw err;
+  }
+}
 
-  dm.forEach(x => {
-    if (x.C) {
-      map[x.C[0]] = x.C[1];
-    }
-  });
+// ─── Persistência ─────────────────────────────────────────────────────────────
 
-  console.log("📊 dados extraídos:", {
-    agente,
-    consumo: Number(map["Consumo"]),
-    compra: Number(map["Compra"]),
-    mcp: Number(map["MCP"]),
-    resultado: Number(map["Resultado com Ajustes"]),
-    resultadoMCP: Number(map["Resultado do MCP"]),
-    balancoEnergetico: Number(map["Balanço Energético"]),
-    mes: "mais_recente"
-  });
+async function salvarAgente(meta) {
+  if (!meta) return;
+  await pool.query(`
+    INSERT INTO ccee_agentes (agente, razao_social, sigla, cnpj, classe, situacao, capital_social)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (agente) DO UPDATE SET
+      razao_social   = EXCLUDED.razao_social,
+      sigla          = EXCLUDED.sigla,
+      cnpj           = EXCLUDED.cnpj,
+      classe         = EXCLUDED.classe,
+      situacao       = EXCLUDED.situacao,
+      capital_social = EXCLUDED.capital_social,
+      updated_at     = NOW()
+  `, [meta.agente, meta.razao_social, meta.sigla, meta.cnpj, meta.classe, meta.situacao, meta.capital_social]);
+}
 
+// Salva histórico em batch — ON CONFLICT DO NOTHING para não sobrescrever dados completos (Q0)
+async function salvarHistorico(rows) {
+  if (!rows.length) return;
+  await pool.query(`
+    INSERT INTO ccee_dados (agente, mes, balanco_energetico, mcp, compra, consumo)
+    SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[])
+    ON CONFLICT (agente, mes) DO NOTHING
+  `, [
+    rows.map(r => r.agente),
+    rows.map(r => r.mes),
+    rows.map(r => r.balanco_energetico ?? 0),
+    rows.map(r => r.mcp               ?? 0),
+    rows.map(r => r.compra             ?? 0),
+    rows.map(r => r.consumo            ?? 0)
+  ]);
+  console.log(`Histórico: ${rows.length} meses salvos para ${rows[0]?.agente}`);
+}
+
+async function salvarDados(dado) {
+  await pool.query(`
+    INSERT INTO ccee_dados
+      (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, mes)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (agente, mes) DO UPDATE SET
+      consumo            = EXCLUDED.consumo,
+      compra             = EXCLUDED.compra,
+      mcp                = EXCLUDED.mcp,
+      resultado          = EXCLUDED.resultado,
+      resultado_mcp      = EXCLUDED.resultado_mcp,
+      balanco_energetico = EXCLUDED.balanco_energetico,
+      created_at         = NOW()
+  `, [dado.agente, dado.consumo, dado.compra, dado.mcp, dado.resultado, dado.resultado_mcp, dado.balanco_energetico, dado.mes]);
+}
+
+async function fetchSalvarRetornar(agente, mes) {
+  const { dados, historico, metadados } = await buscarPowerBI(agente, mes);
+  await salvarAgente(metadados);    // deve vir primeiro (FK)
+  await salvarHistorico(historico); // ON CONFLICT DO NOTHING — não sobrescreve Q0
+  await salvarDados(dados);         // ON CONFLICT DO UPDATE — sempre atualiza o mês consultado
+  return combinarResposta(dados, metadados);
+}
+
+// Variante leve: só Q0+Q2, usada quando o mês já existe no banco mas resultado é NULL
+async function fetchSalvarRetornarSimples(agente, mes) {
+  const { dados, metadados } = await buscarPowerBISimples(agente, mes);
+  await salvarAgente(metadados); // atualiza metadados se necessário
+  await salvarDados(dados);      // preenche os campos financeiros que estavam NULL
+  return combinarResposta(dados, metadados);
+}
+
+function combinarResposta(dados, meta) {
   return {
-    agente,
-    consumo: Number(map["Consumo"]),
-    compra: Number(map["Compra"]),
-    mcp: Number(map["MCP"]),
-    resultado: Number(map["Resultado com Ajustes"]),
-    resultadoMCP: Number(map["Resultado do MCP"]),
-    balancoEnergetico: Number(map["Balanço Energético"]),
-    mes: "mais_recente"
+    ...dados,
+    razao_social:   meta?.razao_social  ?? null,
+    sigla:          meta?.sigla         ?? null,
+    cnpj:           meta?.cnpj          ?? null,
+    classe:         meta?.classe        ?? null,
+    situacao:       meta?.situacao      ?? null,
+    capital_social: meta?.capital_social ?? null
   };
 }
 
+// ─── Endpoints ────────────────────────────────────────────────────────────────
 
-// 💾 salvar no banco
-async function salvar(dado) {
-
-  await pool.query(`
-    INSERT INTO ccee_dados
-    (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, mes)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    ON CONFLICT (agente, mes) DO NOTHING
-  `, [
-    dado.agente,
-    dado.consumo,
-    dado.compra,
-    dado.mcp,
-    dado.resultado,
-    dado.resultadoMCP,
-    dado.balancoEnergetico,
-    dado.mes
-  ]);
-}
-
-
-// 🚀 ENDPOINT PRINCIPAL
-app.get("/inteligencia/:agente", async (req, res) => {
-
-  const agenteRaw = decodeURIComponent(req.params.agente);
-  const agente = normalizarAgente(agenteRaw);
-
-  console.log("🔎 agente:", agente);
-
+app.get("/health", async (_req, res) => {
   try {
-
-    // 🟢 1. busca no banco
-    const r = await pool.query(`
-      SELECT *
-      FROM ccee_dados
-      WHERE agente = $1
-      ORDER BY created_at DESC
-      LIMIT 1
-    `, [agente]);
-
-    if (r.rows.length > 0) {
-      console.log("✅ veio do banco");
-      return res.json(r.rows[0]);
-    }
-
-    // 🔴 2. fallback → Power BI
-    console.log("⚠️ não encontrado, buscando externo");
-
-    const dados = await buscarPowerBI(agente);
-
-    await salvar(dados);
-
-    return res.json(dados);
-
+    await pool.query("SELECT 1");
+    res.json({ status: "ok", db: "connected", ts: new Date().toISOString() });
   } catch (e) {
-    console.error("❌ erro:", e.message);
-    res.status(500).json({ erro: "erro interno" });
+    res.status(503).json({ status: "error", db: "disconnected", error: e.message });
   }
 });
 
+// GET /inteligencia/:agente — dados do mês + metadados
+// Query param opcional: ?mes=YYYY-MM (default: mês recente)
+app.get("/inteligencia/:agente", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
 
-app.listen(3001, () => {
-  console.log("API rodando em http://localhost:3001");
+  const agente = normalizarAgente(agenteRaw);
+  const mes    = req.query.mes || mesReferencia();
+
+  if (!/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Formato de mês inválido (esperado: YYYY-MM)" });
+
+  console.log("Consultando agente:", agente, "| mês:", mes);
+
+  try {
+    const r = await pool.query(`
+      SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
+      FROM ccee_dados d
+      LEFT JOIN ccee_agentes a USING (agente)
+      WHERE d.agente = $1 AND d.mes = $2
+      LIMIT 1
+    `, [agente, mes]);
+
+    if (r.rows.length > 0) {
+      const row = r.rows[0];
+      if (row.resultado !== null) {
+        console.log("Dado retornado do banco");
+        return res.json(row);
+      }
+      // Linha existe mas dados financeiros ausentes (só histórico salvo) — busca apenas Q0+Q2
+      console.log("Dados incompletos no banco, buscando Q0+Q2 no Power BI...");
+      return res.json(await fetchSalvarRetornarSimples(agente, mes));
+    }
+
+    console.log("Não encontrado no banco, buscando Power BI...");
+    return res.json(await fetchSalvarRetornar(agente, mes));
+  } catch (e) {
+    console.error("Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/historico — todos os meses do agente com metadados
+app.get("/inteligencia/:agente/historico", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+
+  try {
+    const r = await pool.query(`
+      SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
+      FROM ccee_dados d
+      LEFT JOIN ccee_agentes a USING (agente)
+      WHERE d.agente = $1
+      ORDER BY d.mes ASC
+    `, [agente]);
+
+    return res.json(r.rows);
+  } catch (e) {
+    console.error("Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /inteligencia/:agente/refresh — força busca no Power BI
+app.post("/inteligencia/:agente/refresh", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+  const mes    = req.query.mes || mesReferencia();
+  console.log("Refresh forçado para:", agente, "| mês:", mes);
+
+  try {
+    return res.json(await fetchSalvarRetornar(agente, mes));
+  } catch (e) {
+    console.error("Erro no refresh:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Pinga o banco a cada 6h para evitar pausa por inatividade (Aiven free tier)
+setInterval(() => {
+  pool.query("SELECT 1").catch(err =>
+    console.error("Keep-alive falhou:", err.message)
+  );
+}, 6 * 60 * 60 * 1000);
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`API rodando em http://localhost:${PORT}`);
 });

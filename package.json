@@ -6,7 +6,8 @@
     "api": "node api/index.js",
     "collector": "node collector/collector.js",
     "db:init": "node db/init.js",
-    "web": "next dev web"
+    "web": "next dev web",
+    "build:web": "next build web"
   },
   "dependencies": {
     "cors": "^2.8.5",
