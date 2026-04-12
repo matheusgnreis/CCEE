@@ -76,7 +76,7 @@ export default function Home() {
           <form onSubmit={handleBusca} style={s.searchForm}>
             <input
               type="text"
-              placeholder="Nome do agente (ex: SALITRE FERTILIZANTES)"
+              placeholder="Nome do agente"
               value={busca}
               onChange={e => setBusca(e.target.value)}
               style={s.searchInput}
