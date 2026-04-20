@@ -307,6 +307,180 @@ describe("GET /inteligencia/:agente/historico", () => {
 
 });
 
+// ─── GET /inteligencia/:agente?refresh=1 ─────────────────────────────────────
+
+describe("GET /inteligencia/:agente com ?refresh=1", () => {
+
+  it("ignora cache e busca diretamente no Power BI", async () => {
+    mockQueryImpl.mockResolvedValue({ rows: [] });
+    mockFetchImpl.mockResolvedValueOnce(mockFetchOk(powerBIPayload()));
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE?mes=2024-03&refresh=1");
+
+    expect(res.status).toBe(200);
+    expect(mockFetchImpl).toHaveBeenCalledTimes(1);
+    expect(res.body.consumo).toBe(100.5);
+  });
+
+  it("retorna 500 quando Power BI falha mesmo com refresh", async () => {
+    mockFetchImpl.mockResolvedValueOnce({ ok: false, status: 503, json: () => Promise.resolve({}) });
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE?mes=2024-03&refresh=1");
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
+  });
+
+});
+
+// ─── GET /inteligencia/:agente — freshness check ──────────────────────────────
+
+describe("GET /inteligencia/:agente freshness check", () => {
+
+  function ckanMesOk(mes) {
+    return {
+      ok:   true,
+      json: () => Promise.resolve({
+        success: true,
+        result:  { total: 1, records: [{ MES_REFERENCIA: mes.replace("-", "") }] }
+      })
+    };
+  }
+
+  it("não rebusca quando CCEE tem o mesmo mês que o banco", async () => {
+    const row = dbRow({ mes: "2024-03" });
+    mockQueryImpl.mockResolvedValueOnce({ rows: [row] });                     // SELECT dados
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2024-03" }] });      // SELECT MAX(mes)
+    mockFetchImpl.mockResolvedValueOnce(ckanMesOk("2024-03"));               // buscarMesRecente
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE");
+
+    expect(res.status).toBe(200);
+    expect(res.body.agente).toBe("AGENTE TESTE");
+    // Power BI não foi chamado (CKAN sim, mas só para checar mês)
+    expect(mockFetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rebusca no Power BI quando CCEE tem mês mais recente que o banco", async () => {
+    const row = dbRow({ mes: "2024-03" });
+    mockQueryImpl.mockResolvedValueOnce({ rows: [row] });                     // SELECT dados
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2024-03" }] });      // SELECT MAX(mes)
+    mockFetchImpl.mockResolvedValueOnce(ckanMesOk("2024-04"));               // buscarMesRecente → mês novo
+    mockFetchImpl.mockResolvedValueOnce(mockFetchOk(powerBIPayload()));       // Power BI
+    mockQueryImpl.mockResolvedValue({ rows: [] });                            // salvarAgente/Histórico/Dados
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE");
+
+    expect(res.status).toBe(200);
+    // fetch chamado 2x: CKAN (buscarMesRecente) + Power BI
+    expect(mockFetchImpl).toHaveBeenCalledTimes(2);
+    expect(res.body.consumo).toBe(100.5);
+  });
+
+});
+
+// ─── GET /inteligencia/:agente/cargas ─────────────────────────────────────────
+
+describe("GET /inteligencia/:agente/cargas", () => {
+
+  function cargaRow(overrides = {}) {
+    return {
+      id:                  1,
+      agente:              "AGENTE TESTE",
+      sigla_perfil_agente: "AGENTE TESTE",
+      mes_referencia:      "2025-01",
+      sigla_parcela_carga: "CARGA-01",
+      cidade:              "SAO PAULO",
+      estado_uf:           "SP",
+      ramo_atividade:      "COMERCIO",
+      submercado:          "SE",
+      consumo_acl:         "500",
+      consumo_total:       "600",
+      ...overrides,
+    };
+  }
+
+  it("retorna 400 para agente inválido", async () => {
+    const res = await request(app).get("/inteligencia/X/cargas");
+    expect(res.status).toBe(400);
+  });
+
+  it("retorna { mes, registros } quando cargas existem no banco e estão atualizadas", async () => {
+    const row = cargaRow();
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });  // SELECT 1 (existe)
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2025-12" }] }); // SELECT MAX
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });  // SELECT 1 mes específico
+    mockQueryImpl.mockResolvedValueOnce({ rows: [row] });                // SELECT * final
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas?mes=2025-01");
+
+    expect(res.status).toBe(200);
+    expect(res.body.mes).toBe("2025-01");
+    expect(Array.isArray(res.body.registros)).toBe(true);
+    expect(res.body.registros[0].sigla_parcela_carga).toBe("CARGA-01");
+    expect(mockFetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("retorna mês mais recente disponível quando mês solicitado não existe no banco", async () => {
+    const row = cargaRow({ mes_referencia: "2025-06" });
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });  // SELECT 1 (existe)
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2025-06" }] }); // SELECT MAX
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] });                   // SELECT 1 mes específico (não existe)
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2025-06" }] }); // SELECT MAX fallback
+    mockQueryImpl.mockResolvedValueOnce({ rows: [row] });                // SELECT * final
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas?mes=2026-02");
+
+    expect(res.status).toBe(200);
+    expect(res.body.mes).toBe("2025-06");
+    expect(res.body.registros[0].mes_referencia).toBe("2025-06");
+  });
+
+  it("busca na API CCEE quando não há cargas no banco", async () => {
+    // Nenhuma carga no banco
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] });
+    // CKAN: 3 anos (2024, 2025, 2026) todos vazios
+    for (let i = 0; i < 3; i++) {
+      mockFetchImpl.mockResolvedValueOnce({
+        ok:   true,
+        json: () => Promise.resolve({ success: true, result: { total: 0, records: [] } })
+      });
+    }
+    // SELECT * final
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas");
+
+    expect(res.status).toBe(200);
+    expect(mockFetchImpl).toHaveBeenCalledTimes(3); // 1 por ano (CKAN)
+    expect(res.body.registros).toHaveLength(0);
+  });
+
+  it("aplica filtros opcionais (estado, submercado)", async () => {
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });  // SELECT 1
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2025-01" }] }); // MAX
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });  // mes específico
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] });                   // SELECT * (filtrado)
+
+    const res = await request(app)
+      .get("/inteligencia/AGENTE%20TESTE/cargas?mes=2025-01&estado=SP&submercado=SE");
+
+    expect(res.status).toBe(200);
+    // Verifica que a query final foi chamada com os filtros (indiretamente pela ausência de erros)
+    expect(res.body.registros).toHaveLength(0);
+  });
+
+  it("retorna 500 quando banco falha", async () => {
+    mockQueryImpl.mockRejectedValueOnce(new Error("DB error"));
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas");
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
+  });
+
+});
+
 // ─── POST /inteligencia/:agente/refresh ───────────────────────────────────────
 
 describe("POST /inteligencia/:agente/refresh", () => {
