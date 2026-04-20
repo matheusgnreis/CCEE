@@ -689,13 +689,17 @@ app.post("/inteligencia/:agente/refresh", limitePowerBI, async (req, res) => {
 });
 
 // Pinga o banco a cada 6h para evitar pausa por inatividade (Aiven free tier)
-setInterval(() => {
-  pool.query("SELECT 1").catch(err =>
-    console.error("Keep-alive falhou:", err.message)
-  );
-}, 6 * 60 * 60 * 1000);
+if (process.env.NODE_ENV !== "test") {
+  setInterval(() => {
+    pool.query("SELECT 1").catch(err =>
+      console.error("Keep-alive falhou:", err.message)
+    );
+  }, 6 * 60 * 60 * 1000);
+}
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`API rodando em http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`API rodando em http://localhost:${PORT}`));
+}
+
+module.exports = app;

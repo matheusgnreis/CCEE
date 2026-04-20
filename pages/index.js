@@ -61,9 +61,7 @@ export default function Home() {
           .cta-section  { padding: 48px 16px !important; }
         }
         @media (max-width: 480px) {
-          .search-form  { flex-direction: column !important; border-radius: 12px !important; overflow: visible !important; }
-          .search-input { border-radius: 10px !important; border: 1.5px solid rgba(255,255,255,0.15) !important; }
-          .search-btn   { border-radius: 10px !important; width: 100% !important; padding: 14px !important; }
+          .search-input { font-size: 13px !important; padding: 14px 12px !important; }
         }
       `}</style>
 
@@ -91,7 +89,7 @@ export default function Home() {
               type="text"
               placeholder="Nome do agente"
               value={busca}
-              onChange={e => setBusca(e.target.value)}
+              onChange={e => setBusca(e.target.value.toUpperCase())}
               className="search-input"
               style={s.searchInput}
               autoComplete="off"
