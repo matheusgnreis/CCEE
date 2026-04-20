@@ -6,7 +6,7 @@ process.env.NODE_ENV = "test";
 let mockFetchImpl = jest.fn();
 jest.mock("node-fetch", () => (...args) => mockFetchImpl(...args));
 
-const { buscaDados, anosDisponiveis, normalizarMes } = require("../api/ccee-abertos");
+const { buscarMcp, anosDisponiveis, normalizarMes } = require("../api/ccee-abertos/mcp");
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -78,9 +78,9 @@ describe("anosDisponiveis", () => {
   });
 });
 
-// ─── buscaDados ───────────────────────────────────────────────────────────────
+// ─── buscarMcp ───────────────────────────────────────────────────────────────
 
-describe("buscaDados", () => {
+describe("buscarMcp", () => {
 
   it("busca todos os anos quando nenhum filtro é passado", async () => {
     const anosTotal = anosDisponiveis().length;
@@ -91,7 +91,7 @@ describe("buscaDados", () => {
       );
     }
 
-    const resultado = await buscaDados("TST");
+    const resultado = await buscarMcp("TST");
 
     expect(mockFetchImpl).toHaveBeenCalledTimes(anosTotal);
     expect(resultado).toHaveLength(anosTotal);
@@ -100,7 +100,7 @@ describe("buscaDados", () => {
   it("converte sigla para maiúsculo", async () => {
     mockFetchImpl.mockResolvedValue(ckanOk([]));
 
-    await buscaDados("tst", { anos: [2024] });
+    await buscarMcp("tst", { anos: [2024] });
 
     const url = mockFetchImpl.mock.calls[0][0];
     expect(url).toContain("SIGLA_AGENTE");
@@ -112,7 +112,7 @@ describe("buscaDados", () => {
       ckanOk(registrosMCP("IFG", ["2024-03"]))
     );
 
-    const resultado = await buscaDados("IFG", { mes: "2024-03" });
+    const resultado = await buscarMcp("IFG", { mes: "2024-03" });
 
     expect(mockFetchImpl).toHaveBeenCalledTimes(1);
     expect(resultado).toHaveLength(1);
@@ -124,7 +124,7 @@ describe("buscaDados", () => {
       ckanOk(registrosMCP("IFG", ["2024-03"]))
     );
 
-    const resultado = await buscaDados("IFG", { mes: "202403" });
+    const resultado = await buscarMcp("IFG", { mes: "202403" });
 
     expect(mockFetchImpl).toHaveBeenCalledTimes(1);
     expect(resultado[0].mes_referencia).toBe("2024-03");
@@ -135,7 +135,7 @@ describe("buscaDados", () => {
       .mockResolvedValueOnce(ckanOk(registrosMCP("IFG", ["2024-01"])))
       .mockResolvedValueOnce(ckanOk(registrosMCP("IFG", ["2025-01"])));
 
-    const resultado = await buscaDados("IFG", { anos: [2024, 2025] });
+    const resultado = await buscarMcp("IFG", { anos: [2024, 2025] });
 
     expect(mockFetchImpl).toHaveBeenCalledTimes(2);
     expect(resultado).toHaveLength(2);
@@ -146,7 +146,7 @@ describe("buscaDados", () => {
       ckanOk([{ _id: 1, SIGLA_AGENTE: "IFG", MES_REFERENCIA: "202401", VL_MCP: 500 }])
     );
 
-    const resultado = await buscaDados("IFG", { anos: [2024] });
+    const resultado = await buscarMcp("IFG", { anos: [2024] });
 
     expect(resultado[0]).toHaveProperty("sigla_agente", "IFG");
     expect(resultado[0]).toHaveProperty("mes_referencia", "2024-01");
@@ -159,7 +159,7 @@ describe("buscaDados", () => {
       ckanOk(registrosMCP("IFG", ["2024-03", "2024-01", "2024-02"]))
     );
 
-    const resultado = await buscaDados("IFG", { anos: [2024] });
+    const resultado = await buscarMcp("IFG", { anos: [2024] });
 
     expect(resultado[0].mes_referencia).toBe("2024-01");
     expect(resultado[1].mes_referencia).toBe("2024-02");
@@ -179,7 +179,7 @@ describe("buscaDados", () => {
       .mockResolvedValueOnce(ckanOk(pag1, 1100)) // offset 0
       .mockResolvedValueOnce(ckanOk(pag2, 1100)); // offset 1000
 
-    const resultado = await buscaDados("BIG", { anos: [2024] });
+    const resultado = await buscarMcp("BIG", { anos: [2024] });
 
     expect(mockFetchImpl).toHaveBeenCalledTimes(2);
     expect(resultado).toHaveLength(1100);
@@ -196,7 +196,7 @@ describe("buscaDados", () => {
       .mockResolvedValueOnce(ckanOk(registrosMCP("IFG", ["2024-01"])))
       .mockResolvedValue(ckanOk([]));
 
-    const resultado = await buscaDados("IFG");
+    const resultado = await buscarMcp("IFG");
 
     // Não lança exceção, retorna o que foi possível buscar
     expect(Array.isArray(resultado)).toBe(true);
@@ -206,19 +206,19 @@ describe("buscaDados", () => {
   it("retorna array vazio quando nenhum registro é encontrado", async () => {
     mockFetchImpl.mockResolvedValue(ckanOk([]));
 
-    const resultado = await buscaDados("NAOEXISTE");
+    const resultado = await buscarMcp("NAOEXISTE");
 
     expect(resultado).toHaveLength(0);
   });
 
   it("lança erro para ano não mapeado no filtro de mês", async () => {
-    await expect(buscaDados("IFG", { mes: "2020-01" }))
+    await expect(buscarMcp("IFG", { mes: "2020-01" }))
       .rejects
       .toThrow(/2020/);
   });
 
   it("lança erro quando todos os anos solicitados são inválidos", async () => {
-    await expect(buscaDados("IFG", { anos: [2019, 2020] }))
+    await expect(buscarMcp("IFG", { anos: [2019, 2020] }))
       .rejects
       .toThrow();
   });
@@ -238,7 +238,7 @@ describe("buscaDados", () => {
 
     const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
 
-    const resultado = await buscaDados("IFG", { anos: [2024, 2025] });
+    const resultado = await buscarMcp("IFG", { anos: [2024, 2025] });
 
     // Não lança — retorna o que foi possível coletar
     expect(Array.isArray(resultado)).toBe(true);
