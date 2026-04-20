@@ -8,6 +8,8 @@ import {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
+const SUBMERCADOS = ["SE", "S", "NE", "N"];
+
 const METRICAS = [
   { key: "consumo",            label: "Consumo",            color: "#2563eb" },
   { key: "compra",             label: "Compra",             color: "#16a34a" },
@@ -61,6 +63,14 @@ export default function AgenteDashboard() {
   const [loadingHist,    setLoadingHist]    = useState(true);
   const [loadingMes,     setLoadingMes]     = useState(false);
   const [error,          setError]          = useState(null);
+
+  const [cargas,         setCargas]         = useState([]);
+  const [mesCargas,      setMesCargas]      = useState(null);
+  const [loadingCargas,  setLoadingCargas]  = useState(false);
+  const [filtroEstado,   setFiltroEstado]   = useState("");
+  const [filtroCidade,   setFiltroCidade]   = useState("");
+  const [filtroRamo,     setFiltroRamo]     = useState("");
+  const [filtroSub,      setFiltroSub]      = useState("");
 
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
@@ -127,6 +137,27 @@ export default function AgenteDashboard() {
       .catch(err => setError(err.message))
       .finally(() => setLoadingMes(false));
   }, [agente, mesSelecionado, loadingHist]);
+
+  // ── 3. Busca cargas quando o agente ou mês selecionado mudar ─────
+  useEffect(() => {
+    if (!agente || !mesSelecionado) return;
+    const params = new URLSearchParams();
+    params.set("mes", mesSelecionado);
+    if (filtroEstado) params.set("estado",     filtroEstado);
+    if (filtroCidade) params.set("cidade",     filtroCidade);
+    if (filtroRamo)   params.set("ramo",       filtroRamo);
+    if (filtroSub)    params.set("submercado", filtroSub);
+
+    setLoadingCargas(true);
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/cargas?${params}`)
+      .then(r => r.json())
+      .then(json => {
+        if (json.error) setError(`Cargas: ${json.error}`);
+        else { setCargas(json.registros); setMesCargas(json.mes); }
+      })
+      .catch(err => setError(`Cargas: ${err.message}`))
+      .finally(() => setLoadingCargas(false));
+  }, [agente, mesSelecionado, filtroEstado, filtroCidade, filtroRamo, filtroSub]);
 
   // Metadados vêm do mês atual ou do primeiro registro do histórico
   const meta = dadosMes ?? (historico.length > 0 ? historico[0] : null);
@@ -238,15 +269,19 @@ export default function AgenteDashboard() {
             </div>
 
             {/* ── Gráficos históricos ───────────────────────────── */}
-            {historico.length > 0 && GRAFICOS.map(g => (
+            {historico.length > 0 && GRAFICOS.map(g => {
+              const dadosGrafico = historico;
+
+              return (
               <div key={g.titulo} style={s.chartBox}>
                 <h2 style={s.chartTitle}>{g.titulo}</h2>
                 <ResponsiveContainer width="100%" height={280}>
-                  <LineChart data={historico} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <LineChart data={dadosGrafico} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#9ca3af" }} />
                     <YAxis
                       tick={{ fontSize: 11, fill: "#9ca3af" }}
+                      domain={[0, 'auto']}
                       label={{
                         value: g.unidade,
                         angle: -90,
@@ -277,8 +312,117 @@ export default function AgenteDashboard() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-            ))}
+            ); })}
           </>
+        )}
+
+        {/* ── Parcelas de Carga ────────────────────────────────── */}
+        {!loadingHist && (
+          <div style={s.chartBox}>
+            <div style={s.cargasHeader}>
+              <h2 style={s.chartTitle}>
+                Parcelas de Carga
+                {mesCargas && mesCargas !== mesSelecionado && (
+                  <span style={{ fontSize: 12, fontWeight: 400, color: "#94a3b8", marginLeft: 10 }}>
+                    (dados mais recentes disponíveis: {mesCargas})
+                  </span>
+                )}
+              </h2>
+              {loadingCargas && <span style={s.mesLoading}>carregando...</span>}
+            </div>
+
+            {/* Filtros */}
+            <div style={s.filtros}>
+              <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} style={s.filtroSelect}>
+                <option value="">Todos os estados</option>
+                {[...new Set(cargas.map(c => c.estado_uf).filter(Boolean))].sort().map(e => (
+                  <option key={e} value={e}>{e}</option>
+                ))}
+              </select>
+              <input
+                placeholder="Cidade"
+                value={filtroCidade}
+                onChange={e => setFiltroCidade(e.target.value)}
+                style={s.filtroInput}
+              />
+              <input
+                placeholder="Ramo de atividade"
+                value={filtroRamo}
+                onChange={e => setFiltroRamo(e.target.value)}
+                style={s.filtroInput}
+              />
+              <select value={filtroSub} onChange={e => setFiltroSub(e.target.value)} style={s.filtroSelect}>
+                <option value="">Todos submercados</option>
+                {SUBMERCADOS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+
+            {/* Cards resumo */}
+            {cargas.length > 0 && (() => {
+              const totalConsumo    = cargas.reduce((s, c) => s + (Number(c.consumo_total) || 0), 0);
+              const totalConsumACL  = cargas.reduce((s, c) => s + (Number(c.consumo_acl)   || 0), 0);
+              const porSub          = cargas.reduce((acc, c) => {
+                acc[c.submercado || "—"] = (acc[c.submercado || "—"] || 0) + 1;
+                return acc;
+              }, {});
+              return (
+                <div style={s.cargasResumo}>
+                  <div style={s.resumoCard}>
+                    <p style={s.cardLabel}>Total de parcelas</p>
+                    <p style={{ ...s.cardValue, color: "#2563eb" }}>{cargas.length}</p>
+                  </div>
+                  <div style={s.resumoCard}>
+                    <p style={s.cardLabel}>Consumo Total (MWh)</p>
+                    <p style={{ ...s.cardValue, color: "#16a34a" }}>{fmt(totalConsumo)}</p>
+                  </div>
+                  <div style={s.resumoCard}>
+                    <p style={s.cardLabel}>Consumo ACL (MWh)</p>
+                    <p style={{ ...s.cardValue, color: "#0891b2" }}>{fmt(totalConsumACL)}</p>
+                  </div>
+                  {Object.entries(porSub).map(([sub, n]) => (
+                    <div key={sub} style={s.resumoCard}>
+                      <p style={s.cardLabel}>Submercado {sub}</p>
+                      <p style={{ ...s.cardValue, color: "#7c3aed" }}>{n}</p>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+
+            {/* Tabela */}
+            {cargas.length === 0 && !loadingCargas ? (
+              <p style={{ fontSize: 14, color: "#94a3b8", textAlign: "center", padding: "24px 0" }}>
+                Nenhuma parcela de carga encontrada.
+              </p>
+            ) : (
+              <div style={s.tableWrap}>
+                <table style={s.table}>
+                  <thead>
+                    <tr>
+                      {["Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Capacidade (kW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cargas.map((c, i) => (
+                      <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                        <td style={s.td}>{c.sigla_parcela_carga || "—"}</td>
+                        <td style={s.td}>{c.mes_referencia || "—"}</td>
+                        <td style={s.td}>{c.cidade || "—"}</td>
+                        <td style={s.td}>{c.estado_uf || "—"}</td>
+                        <td style={s.td}>{c.ramo_atividade || "—"}</td>
+                        <td style={s.td}>{c.submercado || "—"}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(c.capacidade_carga)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(c.consumo_acl)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(c.consumo_total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
 
       </div>
@@ -326,4 +470,18 @@ const s = {
 
   chartBox:   { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 24px 12px", marginBottom: 20, overflow: "hidden", minWidth: 0 },
   chartTitle: { fontSize: 15, fontWeight: 700, color: "#374151", margin: "0 0 16px" },
+
+  cargasHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
+  filtros:      { display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 },
+  filtroSelect: { fontSize: 13, padding: "7px 10px", border: "1.5px solid #e2e8f0", borderRadius: 7, background: "#fff", color: "#374151", cursor: "pointer" },
+  filtroInput:  { fontSize: 13, padding: "7px 10px", border: "1.5px solid #e2e8f0", borderRadius: 7, color: "#374151", outline: "none", minWidth: 160 },
+
+  cargasResumo: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 20 },
+  resumoCard:   { background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "14px 18px", minWidth: 140 },
+
+  tableWrap: { overflowX: "auto" },
+  table:     { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  th:        { padding: "10px 12px", textAlign: "left", background: "#f1f5f9", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "1px solid #e2e8f0" },
+  td:        { padding: "9px 12px", color: "#374151", borderBottom: "1px solid #f1f5f9", whiteSpace: "nowrap" },
+  trEven:    { background: "#fafbfc" },
 };
