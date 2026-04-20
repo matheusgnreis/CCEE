@@ -6,6 +6,9 @@ const fetch     = require("node-fetch");
 const cors      = require("cors");
 const rateLimit = require("express-rate-limit");
 
+const { buscarCargas }      = require("./ccee-abertos/cargas");
+const { buscarMesRecente }  = require("./ccee-abertos/mcp");
+
 const app = express();
 
 app.use(cors({
@@ -16,10 +19,13 @@ app.use(express.json());
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 
+const isTest = process.env.NODE_ENV === "test";
+
 // Limite geral: 60 req/min por IP (leitura normal do banco)
 const limiteGeral = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
+  skip: () => isTest,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Muitas requisições. Tente novamente em alguns segundos." }
@@ -29,6 +35,7 @@ const limiteGeral = rateLimit({
 const limitePowerBI = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  skip: () => isTest,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Limite de consultas atingido. Aguarde 1 minuto." }
@@ -536,16 +543,30 @@ async function salvarHistorico(rows) {
   await pool.query(`
     INSERT INTO ccee_dados (agente, mes, balanco_energetico, mcp, compra, consumo)
     SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[])
-    ON CONFLICT (agente, mes) DO NOTHING
+    ON CONFLICT (agente, mes) DO UPDATE SET
+      balanco_energetico = EXCLUDED.balanco_energetico,
+      mcp                = EXCLUDED.mcp,
+      compra             = COALESCE(EXCLUDED.compra,  ccee_dados.compra),
+      consumo            = COALESCE(EXCLUDED.consumo, ccee_dados.consumo)
   `, [
     rows.map(r => r.agente),
     rows.map(r => r.mes),
     rows.map(r => r.balanco_energetico ?? 0),
     rows.map(r => r.mcp               ?? 0),
-    rows.map(r => r.compra             ?? 0),
-    rows.map(r => r.consumo            ?? 0)
+    rows.map(r => r.compra  || null),
+    rows.map(r => r.consumo || null),
   ]);
-  console.log(`Histórico: ${rows.length} meses salvos para ${rows[0]?.agente}`);
+
+  // Converte zeros legados para NULL para não distorcer o gráfico
+  const agente = rows[0]?.agente;
+  await pool.query(`
+    UPDATE ccee_dados
+    SET compra  = CASE WHEN compra  = 0 THEN NULL ELSE compra  END,
+        consumo = CASE WHEN consumo = 0 THEN NULL ELSE consumo END
+    WHERE agente = $1 AND resultado IS NULL
+  `, [agente]);
+
+  console.log(`Histórico: ${rows.length} meses salvos para ${agente}`);
 }
 
 async function salvarDados(dado) {
@@ -592,6 +613,58 @@ function combinarResposta(dados, meta) {
   };
 }
 
+async function salvarCargas(agente, siglaPerfilAgente, registros) {
+  if (!registros.length) return;
+
+  const parseDate = (v) => {
+    if (!v) return null;
+    const s = v.toString().trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    if (/^\d{8}$/.test(s)) return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+    return null;
+  };
+
+  await pool.query(`
+    INSERT INTO ccee_cargas (
+      agente, sigla_perfil_agente, mes_referencia,
+      cod_perf_agente, nome_empresarial, cod_parcela_carga, sigla_parcela_carga,
+      cnpj_carga, cidade, estado_uf, ramo_atividade, submercado, data_migracao,
+      cod_perf_agente_conectado, sigla_perfil_agente_conectado,
+      capacidade_carga, consumo_acl, consumo_cativo_parc_livre, consumo_total
+    )
+    SELECT * FROM UNNEST(
+      $1::text[], $2::text[], $3::char(7)[],
+      $4::text[], $5::text[], $6::text[], $7::text[],
+      $8::text[], $9::text[], $10::char(2)[], $11::text[], $12::text[], $13::date[],
+      $14::text[], $15::text[],
+      $16::numeric[], $17::numeric[], $18::numeric[], $19::numeric[]
+    )
+    ON CONFLICT (sigla_parcela_carga, mes_referencia) DO NOTHING
+  `, [
+    registros.map(() => agente),
+    registros.map(() => siglaPerfilAgente),
+    registros.map(r => r.mes_referencia),
+    registros.map(r => r.cod_perf_agente              || null),
+    registros.map(r => r.nome_empresarial              || null),
+    registros.map(r => r.cod_parcela_carga             || null),
+    registros.map(r => r.sigla_parcela_carga           || null),
+    registros.map(r => r.cnpj_carga                    || null),
+    registros.map(r => r.cidade                        || null),
+    registros.map(r => r.estado_uf                     || null),
+    registros.map(r => r.ramo_atividade                || null),
+    registros.map(r => r.submercado                    || null),
+    registros.map(r => parseDate(r.data_migracao)),
+    registros.map(r => r.cod_perf_agente_conectado     || null),
+    registros.map(r => r.sigla_perfil_agente_conectado || null),
+    registros.map(r => r.capacidade_carga              != null ? Number(r.capacidade_carga)           : null),
+    registros.map(r => r.consumo_acl                   != null ? Number(r.consumo_acl)                : null),
+    registros.map(r => r.consumo_cativo_parc_livre     != null ? Number(r.consumo_cativo_parc_livre)  : null),
+    registros.map(r => r.consumo_total                 != null ? Number(r.consumo_total)              : null),
+  ]);
+
+  console.log(`Cargas: ${registros.length} registros salvos para ${agente}`);
+}
+
 // ─── Endpoints ────────────────────────────────────────────────────────────────
 
 app.get("/health", async (_req, res) => {
@@ -627,13 +700,31 @@ app.get("/inteligencia/:agente", limitePowerBI, async (req, res) => {
       LIMIT 1
     `, [agente, mes]);
 
+    if (req.query.refresh) {
+      console.log("Refresh forçado via GET para:", agente, "| mês:", mes);
+      return res.json(await fetchSalvarRetornar(agente, mes));
+    }
+
     if (r.rows.length > 0) {
       const row = r.rows[0];
+
+      // Verifica se há mês mais recente disponível na API aberta
+      if (!req.query.mes) {
+        const mesMaxDB  = await pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente]);
+        const mesDB     = mesMaxDB.rows[0]?.mes;
+        const mesRecente = await buscarMesRecente(agente);
+        console.log(`Freshness check | banco="${mesDB}" | CCEE="${mesRecente}"`);
+
+        if (mesRecente && mesDB && mesRecente > mesDB) {
+          console.log(`Dados desatualizados — buscando mês ${mesRecente} no Power BI...`);
+          return res.json(await fetchSalvarRetornar(agente, mesRecente));
+        }
+      }
+
       if (row.resultado !== null) {
         console.log("Dado retornado do banco");
         return res.json(row);
       }
-      // Linha existe mas dados financeiros ausentes (só histórico salvo) — busca apenas Q0+Q2
       console.log("Dados incompletos no banco, buscando Q0+Q2 no Power BI...");
       return res.json(await fetchSalvarRetornarSimples(agente, mes));
     }
@@ -666,6 +757,78 @@ app.get("/inteligencia/:agente/historico", async (req, res) => {
     return res.json(r.rows);
   } catch (e) {
     console.error("Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/cargas — parcelas de carga (banco ou API aberta CCEE)
+// Query params opcionais: ?estado=SP&cidade=SAO+PAULO&ramo=INDUSTRIA&submercado=SE
+app.get("/inteligencia/:agente/cargas", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+  const { estado, cidade, ramo, submercado, mes } = req.query;
+
+  try {
+    // Verifica se já existe no banco
+    const existe = await pool.query(
+      "SELECT 1 FROM ccee_cargas WHERE agente = $1 LIMIT 1",
+      [agente]
+    );
+
+    const maxCargasDB = existe.rows.length > 0
+      ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = $1", [agente])).rows[0]?.mes
+      : null;
+
+    const precisaAtualizar = !maxCargasDB || (mes && mes > maxCargasDB);
+
+    if (precisaAtualizar) {
+      console.log(`[cargas] Buscando na API aberta | banco="${maxCargasDB}" | solicitado="${mes}"...`);
+      const registros = await buscarCargas(agente);
+      console.log(`[cargas] API retornou ${registros.length} registros`);
+      if (registros.length > 0) await salvarCargas(agente, agente, registros);
+    } else {
+      console.log(`[cargas] Banco atualizado até "${maxCargasDB}", sem necessidade de rebuscar`);
+    }
+
+    // Resolve o mês a usar: se solicitado mas sem dados, cai pro mais recente disponível
+    let mesEfetivo = mes || null;
+    if (mesEfetivo) {
+      const check = await pool.query(
+        "SELECT 1 FROM ccee_cargas WHERE agente = $1 AND mes_referencia = $2 LIMIT 1",
+        [agente, mesEfetivo]
+      );
+      if (check.rows.length === 0) {
+        const ultimo = await pool.query(
+          "SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = $1",
+          [agente]
+        );
+        mesEfetivo = ultimo.rows[0]?.mes || null;
+      }
+    }
+
+    // Monta query com filtros opcionais
+    const conditions = ["agente = $1"];
+    const params     = [agente];
+    let   idx        = 2;
+
+    if (mesEfetivo)  { conditions.push(`mes_referencia = $${idx++}`);      params.push(mesEfetivo); }
+    if (estado)      { conditions.push(`estado_uf = $${idx++}`);           params.push(estado.toUpperCase()); }
+    if (cidade)      { conditions.push(`cidade ILIKE $${idx++}`);          params.push(cidade); }
+    if (ramo)        { conditions.push(`ramo_atividade ILIKE $${idx++}`);  params.push(ramo); }
+    if (submercado)  { conditions.push(`submercado ILIKE $${idx++}`);      params.push(submercado); }
+
+    const r = await pool.query(`
+      SELECT * FROM ccee_cargas
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY mes_referencia DESC, sigla_parcela_carga ASC
+    `, params);
+
+    return res.json({ mes: mesEfetivo, registros: r.rows });
+  } catch (e) {
+    console.error("Erro em /cargas:", e.message);
     return res.status(500).json({ error: e.message });
   }
 });
