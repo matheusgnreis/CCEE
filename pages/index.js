@@ -53,16 +53,29 @@ export default function Home() {
 
   return (
     <div style={s.page}>
+      <style jsx>{`
+        @media (max-width: 768px) {
+          .nav-inner    { padding: 0 16px !important; }
+          .hero-section { padding: 64px 16px 48px !important; }
+          .section-pad  { padding: 48px 16px !important; }
+          .cta-section  { padding: 48px 16px !important; }
+        }
+        @media (max-width: 480px) {
+          .search-form  { flex-direction: column !important; border-radius: 12px !important; overflow: visible !important; }
+          .search-input { border-radius: 10px !important; border: 1.5px solid rgba(255,255,255,0.15) !important; }
+          .search-btn   { border-radius: 10px !important; width: 100% !important; padding: 14px !important; }
+        }
+      `}</style>
 
       {/* ── Navbar ─────────────────────────────────────────────── */}
       <nav style={s.nav}>
-        <div style={s.navInner}>
+        <div className="nav-inner" style={s.navInner}>
           <span style={s.logo}>⚡Monitoramento Mercado Livre</span>
         </div>
       </nav>
 
       {/* ── Hero ───────────────────────────────────────────────── */}
-      <section style={s.hero}>
+      <section className="hero-section" style={s.hero}>
         <div style={s.heroInner}>
           <span style={s.badge}>Consolidado de dados abertos</span>
           <h1 style={s.h1}>
@@ -73,17 +86,18 @@ export default function Home() {
             Acompanhe consumo, compra, resultado e balanço energético de agentes
             registrados na CCEE. Dados atualizados diretamente dos dados abertos da CCEE.
           </p>
-          <form onSubmit={handleBusca} style={s.searchForm}>
+          <form onSubmit={handleBusca} className="search-form" style={s.searchForm}>
             <input
               type="text"
               placeholder="Nome do agente"
               value={busca}
               onChange={e => setBusca(e.target.value)}
+              className="search-input"
               style={s.searchInput}
               autoComplete="off"
               spellCheck={false}
             />
-            <button type="submit" style={s.searchBtn}>Buscar →</button>
+            <button type="submit" className="search-btn" style={s.searchBtn}>Buscar →</button>
           </form>
           <a
             href="https://www.ccee.org.br"
@@ -97,7 +111,7 @@ export default function Home() {
       </section>
 
       {/* ── Como funciona ──────────────────────────────────────── */}
-      <section style={s.section}>
+      <section className="section-pad" style={s.section}>
         <div style={s.inner}>
           <p style={s.eyebrow}>Conceitos essenciais</p>
           <h2 style={s.h2}>Como funciona o mercado livre</h2>
@@ -114,7 +128,7 @@ export default function Home() {
       </section>
 
       {/* ── Vantagens ──────────────────────────────────────────── */}
-      <section style={{ ...s.section, background: "#f0f9ff" }}>
+      <section className="section-pad" style={{ ...s.section, background: "#f0f9ff" }}>
         <div style={s.inner}>
           <p style={s.eyebrow}>Por que migrar?</p>
           <h2 style={s.h2}>Vantagens do ACL</h2>
@@ -131,7 +145,7 @@ export default function Home() {
       </section>
 
       {/* ── PLD ────────────────────────────────────────────────── */}
-      <section style={s.section}>
+      <section className="section-pad" style={s.section}>
         <div style={s.inner}>
           <p style={s.eyebrow}>Mercado de curto prazo</p>
           <h2 style={s.h2}>PLD — Preço de Liquidação das Diferenças</h2>
@@ -159,7 +173,7 @@ export default function Home() {
       </section>
 
       {/* ── CTA final ──────────────────────────────────────────── */}
-      <section style={s.ctaSection}>
+      <section className="cta-section" style={s.ctaSection}>
         <div style={{ ...s.inner, textAlign: "center" }}>
           <h2 style={{ ...s.h2, color: "#fff" }}>Analise seus dados agora</h2>
           <p style={{ ...s.sectionSub, color: "#93c5fd", marginBottom: 32 }}>
@@ -190,6 +204,7 @@ const s = {
     color: "#0f172a",
     background: "#fff",
     margin: 0,
+    overflowX: "hidden",
   },
 
   /* Navbar */

@@ -135,22 +135,34 @@ export default function AgenteDashboard() {
 
   return (
     <div style={s.page}>
+      <style jsx>{`
+        @media (max-width: 768px) {
+          .nav-inner   { padding: 0 16px !important; }
+          .page-inner  { padding: 24px 16px !important; }
+          .metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .agent-name  { font-size: 20px !important; }
+        }
+        @media (max-width: 480px) {
+          .metrics-grid { grid-template-columns: 1fr 1fr !important; }
+          .card-value   { font-size: 18px !important; }
+        }
+      `}</style>
 
       {/* ── Navbar ──────────────────────────────────────────────── */}
       <nav style={s.nav}>
-        <div style={s.navInner}>
+        <div className="nav-inner" style={s.navInner}>
           <Link href="/" style={s.navBack}>← Início</Link>
           <span style={s.logo}>⚡ CCEE Monitor</span>
           <div style={{ width: 80 }} /> {/* spacer */}
         </div>
       </nav>
 
-      <div style={s.inner}>
+      <div className="page-inner" style={s.inner}>
 
         {/* ── Header do agente ────────────────────────────────── */}
         <div style={s.header}>
           <div style={{ flex: 1 }}>
-            <h1 style={s.agenteName}>{agente}</h1>
+            <h1 className="agent-name" style={s.agenteName}>{agente}</h1>
             {meta && (
               <div style={s.metaBadges}>
                 {meta.razao_social && <span style={s.tag}>{meta.razao_social}</span>}
@@ -205,7 +217,7 @@ export default function AgenteDashboard() {
               {loadingMes && <span style={s.mesLoading}>carregando...</span>}
             </div>
 
-            <div style={s.grid}>
+            <div className="metrics-grid" style={s.grid}>
               {METRICAS.map(m => {
                 const val      = dadosMes?.[m.key];
                 const negativo = !loadingMes
@@ -216,7 +228,7 @@ export default function AgenteDashboard() {
                 return (
                   <div key={m.key} style={{ ...s.card, ...(negativo ? s.cardAlerta : {}) }}>
                     <p style={s.cardLabel}>{m.label}</p>
-                    <p style={{ ...s.cardValue, color: cor }}>
+                    <p className="card-value" style={{ ...s.cardValue, color: cor }}>
                       {loadingMes ? "—" : fmt(val)}
                       {negativo && <span style={s.alertaIcon} title="Aporte necessário na CCEE">⚠</span>}
                     </p>
@@ -230,7 +242,7 @@ export default function AgenteDashboard() {
               <div key={g.titulo} style={s.chartBox}>
                 <h2 style={s.chartTitle}>{g.titulo}</h2>
                 <ResponsiveContainer width="100%" height={280}>
-                  <LineChart data={historico} margin={{ top: 10, right: 24, left: 16, bottom: 0 }}>
+                  <LineChart data={historico} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#9ca3af" }} />
                     <YAxis
@@ -276,7 +288,7 @@ export default function AgenteDashboard() {
 
 /* ── Estilos ─────────────────────────────────────────────────────── */
 const s = {
-  page:    { background: "#f8fafc", minHeight: "100vh", fontFamily: "system-ui, -apple-system, sans-serif" },
+  page:    { background: "#f8fafc", minHeight: "100vh", fontFamily: "system-ui, -apple-system, sans-serif", overflowX: "hidden" },
 
   nav:     { background: "#fff", borderBottom: "1px solid #e2e8f0" },
   navInner: { maxWidth: 1100, margin: "0 auto", padding: "0 32px", height: 60, display: "flex", alignItems: "center", justifyContent: "space-between" },
@@ -312,6 +324,6 @@ const s = {
   cardValue:  { fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: -0.5, transition: "color 0.2s", display: "flex", alignItems: "center", gap: 8 },
   alertaIcon: { fontSize: 18, lineHeight: 1 },
 
-  chartBox:   { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 24px 12px", marginBottom: 20 },
+  chartBox:   { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 24px 12px", marginBottom: 20, overflow: "hidden", minWidth: 0 },
   chartTitle: { fontSize: 15, fontWeight: 700, color: "#374151", margin: "0 0 16px" },
 };
