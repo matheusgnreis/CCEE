@@ -1622,15 +1622,27 @@ async function processarMesModulacao(agente, mes) {
 async function dispararModulacaoBackground(agente) {
   if (modulacaoEmAndamento.has(agente)) return;
 
-  const [calculados, todos] = await Promise.all([
+  const [calculados, todos, maxPorMesRows] = await Promise.all([
     pool.query("SELECT mes_referencia FROM ccee_modulacao WHERE agente = $1", [agente]),
-    pool.query("SELECT mes FROM ccee_dados WHERE agente = $1 ORDER BY mes DESC", [agente])
+    pool.query("SELECT mes FROM ccee_dados WHERE agente = $1 ORDER BY mes DESC", [agente]),
+    pool.query("SELECT mes_referencia, MAX(periodo) AS max_periodo FROM ccee_consumo_horario WHERE agente = $1 GROUP BY mes_referencia", [agente]),
   ]);
 
   const calculadosSet = new Set(calculados.rows.map(r => r.mes_referencia));
+  const maxPorMes     = {};
+  maxPorMesRows.rows.forEach(r => { maxPorMes[r.mes_referencia] = Number(r.max_periodo); });
+
   const mesesPendentes = todos.rows
     .map(r => r.mes)
-    .filter(m => m >= PRIMEIRO_MES_PLD && !calculadosSet.has(m));
+    .filter(m => {
+      if (m < PRIMEIRO_MES_PLD) return false;
+      if (!calculadosSet.has(m)) return true; // ainda não calculado
+      // Já calculado — verifica se período está errado (indexação base 0 antiga)
+      const [ano, mesNum] = m.split("-").map(Number);
+      const maxEsperado   = new Date(ano, mesNum, 0).getDate() * 24;
+      const maxAtual      = maxPorMes[m] || 0;
+      return maxAtual > 0 && maxAtual < maxEsperado;
+    });
 
   if (!mesesPendentes.length) return;
 
