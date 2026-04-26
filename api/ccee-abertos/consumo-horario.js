@@ -190,8 +190,9 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes) {
 
     encontrou = true;
 
-    // Período: CSV usa hora-do-dia (1–24); PLD usa hora-do-mês (1–744).
-    // Converte: periodo_mes = (dia_do_mes - 1) * 24 + hora_dia
+    // Período: CSV usa hora-do-dia base 0 (0–23); PLD usa hora-do-mês base 1 (1–744).
+    // Converte: periodo_mes = (dia_do_mes - 1) * 24 + hora_dia + 1
+    // O +1 alinha com a indexação do PLD: hora 0 do dia 1 → período 1, hora 23 do dia 31 → período 744
     const horaDia = parseInt(row.PERIODO_COMERCIALIZACAO, 10);
     const dataStr = (row.DATA || "").trim(); // "YYYY-MM-DD" ou "DD/MM/YYYY"
     let diaMes = 1;
@@ -200,7 +201,7 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes) {
     } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(dataStr)) {
       diaMes = parseInt(dataStr.slice(0, 2), 10);
     }
-    const periodo = (diaMes - 1) * 24 + horaDia;
+    const periodo = (diaMes - 1) * 24 + horaDia + 1;
 
     const subBruto  = (row.SUBMERCADO || "").trim().toUpperCase();
     if (subBrutoAmostra.size < 5) subBrutoAmostra.add(subBruto);

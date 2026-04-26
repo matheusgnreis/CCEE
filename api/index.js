@@ -1348,56 +1348,60 @@ async function salvarConsumoHorario(agente, registros) {
 
 /**
  * Calcula o custo de modulação por submercado.
- * custo_modulacao_rs_mwh = (soma_curva - soma_flat) / total_consumo
- *   soma_curva = Σ (consumo_j × pld_j)
- *   soma_flat  = (total_consumo / n_horas) × Σ pld_j
  *
- * @param {Array<{periodo, submercado, consumo_mwh}>} consumo
- * @param {Object} pldMapa - { "periodo|SUBMERCADO": pld_rs_mwh }
- * @param {string} submercadoFiltro - submercado a calcular (ex: "SE")
+ * soma_curva = Σ (consumo_j × pld_j)  — só horas com consumo
+ * soma_flat  = (consumo_total / n_horas_pld) × Σ pld_j  — usa TODOS os períodos do PLD
+ *
+ * O PLD tem 744 períodos (ex: mês de 31 dias); o consumo tem 743 porque a última
+ * hora do mês não consta no arquivo CCEE (aparece no mês seguinte). O flat deve
+ * usar os 744 períodos do PLD para ser metodologicamente correto.
  */
 function calcularModulacaoPorSub(consumo, pldMapa, submercadoFiltro) {
   const registros = consumo.filter(r => r.submercado === submercadoFiltro);
   if (!registros.length) return null;
 
+  // soma_curva: só os períodos que têm consumo E PLD
   let totalConsumo = 0;
   let somaCurva    = 0;
-  let somaPld      = 0;
-  let nHoras       = 0;
   const periodosSemPld = [];
 
   for (const r of registros) {
     const consumoMwh = Number(r.consumo_mwh) || 0;
     const pld        = pldMapa[`${r.periodo}|${submercadoFiltro}`];
-
     if (pld == null) { periodosSemPld.push(r.periodo); continue; }
-
     totalConsumo += consumoMwh;
     somaCurva    += consumoMwh * pld;
-    somaPld      += pld;
-    nHoras++;
   }
 
-  console.log(`[calc-mod] sub=${submercadoFiltro}: ${registros.length} períodos de consumo | ${nHoras} com PLD | ${periodosSemPld.length} sem PLD`);
+  // soma_flat: usa TODOS os períodos do PLD para o submercado (inclui última hora do mês)
+  let somaPldTotal = 0;
+  let nHorasPld    = 0;
+  for (const [key, pld] of Object.entries(pldMapa)) {
+    if (key.endsWith(`|${submercadoFiltro}`)) {
+      somaPldTotal += pld;
+      nHorasPld++;
+    }
+  }
 
-  if (!nHoras || !totalConsumo) {
-    console.warn(`[calc-mod] sub=${submercadoFiltro}: nHoras=${nHoras} totalConsumo=${totalConsumo} → retornando null`);
+  console.log(`[calc-mod] sub=${submercadoFiltro}: ${registros.length} consumo | ${nHorasPld} PLD | ${periodosSemPld.length} sem match`);
+
+  if (!nHorasPld || !totalConsumo) {
+    console.warn(`[calc-mod] sub=${submercadoFiltro}: nHorasPld=${nHorasPld} totalConsumo=${totalConsumo} → null`);
     return null;
   }
 
-  const flat        = totalConsumo / nHoras;
-  const somaFlat    = flat * somaPld;
-  const custoModulacao = (somaCurva - somaFlat) / totalConsumo;
-
   if (periodosSemPld.length) {
-    const amostra = periodosSemPld.slice(0, 5).join(",");
-    console.warn(`[calc-mod] ${periodosSemPld.length} períodos sem PLD para sub=${submercadoFiltro} (amostra: ${amostra})`);
+    console.warn(`[calc-mod] ${periodosSemPld.length} períodos de consumo sem PLD (amostra: ${periodosSemPld.slice(0, 5).join(",")})`);
   }
+
+  const flat           = totalConsumo / nHorasPld;
+  const somaFlat       = flat * somaPldTotal;
+  const custoModulacao = (somaCurva - somaFlat) / totalConsumo;
 
   return {
     submercado:              submercadoFiltro,
     consumo_total_mwh:       Number(totalConsumo.toFixed(4)),
-    n_horas:                 nHoras,
+    n_horas:                 nHorasPld,
     soma_curva_rs:           Number(somaCurva.toFixed(4)),
     soma_flat_rs:            Number(somaFlat.toFixed(4)),
     custo_modulacao_rs_mwh:  Number(custoModulacao.toFixed(4)),
@@ -1507,25 +1511,31 @@ const modulacaoEmAndamento = new Set(); // evita batch duplo por agente
 async function processarMesModulacao(agente, mes) {
   console.log(`\n[modulacao] ── Iniciando ${agente} | ${mes} ──────────────────────`);
 
-  // Verifica se há consumo no banco em formato antigo (max_periodo <= 24 = hora-do-dia, não hora-do-mês)
+  // Detecta períodos salvos com indexação errada (base 0 em vez de base 1)
+  // max_periodo correto: dias_no_mês × 24  (ex: 744 para janeiro, 672 para fevereiro)
+  const [ano, mesNum] = mes.split("-").map(Number);
+  const diasNoMes     = new Date(ano, mesNum, 0).getDate();
+  const maxEsperado   = diasNoMes * 24;
+
   const formatoCheck = await pool.query(
     "SELECT MAX(periodo) AS max_periodo FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2",
     [agente, mes]
   );
   const maxPeriodoCheck = Number(formatoCheck.rows[0]?.max_periodo || 0);
-  const formatoAntigo   = maxPeriodoCheck > 0 && maxPeriodoCheck <= 24;
+  const periodoErrado   = maxPeriodoCheck > 0 && maxPeriodoCheck < maxEsperado;
 
   const jaCalculado = await pool.query(
     "SELECT 1 FROM ccee_modulacao WHERE agente = $1 AND mes_referencia = $2 LIMIT 1",
     [agente, mes]
   );
-  if (jaCalculado.rows.length > 0 && !formatoAntigo) {
-    console.log(`[modulacao] ${mes}: já calculado, pulando`);
+  if (jaCalculado.rows.length > 0 && !periodoErrado) {
+    console.log(`[modulacao] ${mes}: já calculado (max_periodo=${maxPeriodoCheck}/${maxEsperado}), pulando`);
     return "already_done";
   }
-  if (formatoAntigo) {
-    console.warn(`[modulacao] ⚠ Modulação e consumo em formato antigo — recalculando ${mes}`);
-    await pool.query("DELETE FROM ccee_modulacao WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+  if (periodoErrado) {
+    console.warn(`[modulacao] ⚠ Períodos descasados (max=${maxPeriodoCheck}, esperado=${maxEsperado}) — deletando e recalculando`);
+    await pool.query("DELETE FROM ccee_modulacao     WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+    await pool.query("DELETE FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
   }
 
   const existeConsumo = await pool.query(
@@ -1536,16 +1546,16 @@ async function processarMesModulacao(agente, mes) {
   const maxPeriodoDB  = Number(existeConsumo.rows[0].max_periodo || 0);
   console.log(`[modulacao] Consumo horário no banco: ${nConsumoDB} períodos | max_periodo=${maxPeriodoDB}`);
 
-  // Se max_periodo <= 24 os dados foram salvos com o formato antigo (hora-do-dia, não hora-do-mês)
-  if (nConsumoDB > 0 && maxPeriodoDB <= 24) {
-    console.warn(`[modulacao] ⚠ Dados no formato antigo (max_periodo=${maxPeriodoDB}) — deletando para re-baixar`);
+  // Se max_periodo < esperado, os dados estão com indexação errada — deleta e re-baixa
+  if (nConsumoDB > 0 && maxPeriodoDB < maxEsperado) {
+    console.warn(`[modulacao] ⚠ Consumo com períodos errados (max=${maxPeriodoDB}, esperado=${maxEsperado}) — deletando`);
     await pool.query(
       "DELETE FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2",
       [agente, mes]
     );
   }
 
-  if (nConsumoDB === 0 || maxPeriodoDB <= 24) {
+  if (nConsumoDB === 0 || maxPeriodoDB < maxEsperado) {
     console.log(`[modulacao] Baixando consumo horário da CCEE...`);
     try {
       const registros = await buscarConsumoHorario(agente, mes);
