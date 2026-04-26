@@ -125,8 +125,51 @@ async function fetchMesRecente(datasetId, filtros) {
   }
 }
 
+const CKAN_SQL_URL = "https://dadosabertos.ccee.org.br/api/3/action/datastore_search_sql";
+
+async function fetchTodasPaginasSql(sql) {
+  const PAGE   = 5000;
+  const result = [];
+  let   offset = 0;
+
+  while (true) {
+    const paginada  = `${sql} LIMIT ${PAGE} OFFSET ${offset}`;
+    const url       = `${CKAN_SQL_URL}?sql=${encodeURIComponent(paginada)}`;
+    const controller = new AbortController();
+    const timer      = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    let records;
+    try {
+      const res = await fetch(url, {
+        signal:  controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; CCEEMonitor/1.0)" },
+      });
+      if (!res.ok) {
+        const corpo = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}${corpo ? ` — ${corpo.slice(0, 120)}` : ""}`);
+      }
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || JSON.stringify(json.error));
+      records = json.result?.records || [];
+    } catch (err) {
+      if (err.name === "AbortError") throw new Error(`Timeout (>${TIMEOUT_MS}ms) na query SQL`);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    result.push(...records);
+    if (records.length < PAGE) break;
+    offset += PAGE;
+    await delay(PAGE_DELAY_MS);
+  }
+
+  return result;
+}
+
 module.exports = {
   CKAN_SEARCH_URL,
+  CKAN_SQL_URL,
   PAGE_SIZE,
   YEAR_DELAY_MS,
   PAGE_DELAY_MS,
@@ -136,5 +179,6 @@ module.exports = {
   normalizarRegistro,
   fetchPagina,
   fetchTodasPaginas,
+  fetchTodasPaginasSql,
   fetchMesRecente,
 };

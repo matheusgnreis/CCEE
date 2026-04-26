@@ -58,7 +58,7 @@ async function buscarMcp(sigla, { mes = null, anos = null } = {}) {
 
   for (let i = 0; i < entradas.length; i++) {
     const [ano, datasetId] = entradas[i];
-    console.log(`  📅 Buscando ${ano}...`);
+    console.log(`  📅 Buscando mcp ${ano}...`);
 
     try {
       const registros = await fetchTodasPaginas(datasetId, filtros);

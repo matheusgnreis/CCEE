@@ -1,10 +1,12 @@
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+} from "recharts";
 
-// URL da página de PLD da CCEE — substitua pelo endereço exato que você encontrar
-// em https://www.ccee.org.br (ex: aba "Dados do Mercado" > PLD)
-const CCEE_PLD_URL = "https://www.ccee.org.br";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
 
 const CONCEITOS = [
   {
@@ -39,9 +41,30 @@ const VANTAGENS = [
   { num: "03", titulo: "Origem da energia", texto: "Possibilidade de garantir 100% de energia renovável com certificados de energia renováveis." },
 ];
 
+function fmtR(v) {
+  if (v == null) return "—";
+  return `R$ ${Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtMes(m) {
+  if (!m) return "";
+  const [ano, mes] = m.split("-");
+  const nomes = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
+  return `${nomes[Number(mes) - 1]}/${ano}`;
+}
+
 export default function Home() {
   const router = useRouter();
   const [busca, setBusca] = useState("");
+  const [pld,   setPld]   = useState(null);
+  const [pldErr, setPldErr] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API_URL}/pld/resumo?submercado=SE`)
+      .then(r => r.json())
+      .then(json => { if (json.error) throw new Error(json.error); setPld(json); })
+      .catch(e => setPldErr(e.message));
+  }, []);
 
   function handleBusca(e) {
     e.preventDefault();
@@ -54,6 +77,7 @@ export default function Home() {
   return (
     <div style={s.page}>
       <style jsx>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 768px) {
           .nav-inner    { padding: 0 16px !important; }
           .hero-section { padding: 64px 16px 48px !important; }
@@ -145,28 +169,125 @@ export default function Home() {
       {/* ── PLD ────────────────────────────────────────────────── */}
       <section className="section-pad" style={s.section}>
         <div style={s.inner}>
-          <p style={s.eyebrow}>Mercado de curto prazo</p>
-          <h2 style={s.h2}>PLD — Preço de Liquidação das Diferenças</h2>
-          <p style={s.sectionSub}>
-            O PLD é calculado semanalmente pela CCEE com base no custo marginal de operação do
-            Sistema Interligado Nacional (SIN). Ele define o custo de liquidar sobras e déficits
-            de energia no mercado de curto prazo.
+          <p style={s.eyebrow}>Mercado de curto prazo · Todos os submercados</p>
+          <h2 style={{ ...s.h2, marginBottom: 12 }}>PLD — Preço de Liquidação das Diferenças</h2>
+          <p style={{ ...s.sectionSub, marginBottom: 36 }}>
+            PLD horário do dia atual e médias do mês vigente e anterior. Comparação entre submercados.
           </p>
-          <div style={s.iframeWrap}>
-            <iframe
-              src={CCEE_PLD_URL}
-              title="PLD CCEE"
-              style={s.iframe}
-              frameBorder="0"
-              loading="lazy"
-            />
-          </div>
-          <p style={s.iframeFallback}>
-            Se a visualização não aparecer,{" "}
-            <a href={CCEE_PLD_URL} target="_blank" rel="noopener noreferrer" style={s.link}>
-              acesse diretamente no site da CCEE ↗
-            </a>
-          </p>
+
+          {/* Loading */}
+          {!pld && !pldErr && (
+            <div style={s.pldLoading}>
+              <div style={s.spinner} />
+              <span style={{ fontSize: 14, color: "#64748b" }}>Carregando dados de PLD...</span>
+            </div>
+          )}
+
+          {/* Erro */}
+          {pldErr && (
+            <p style={{ color: "#dc2626", fontSize: 14 }}>Erro ao carregar PLD: {pldErr}</p>
+          )}
+
+          {/* Conteúdo */}
+          {pld && (
+            <>
+              {/* Cards */}
+              <div style={s.pldGrid}>
+                {/* Média hoje */}
+                <div style={s.pldCard}>
+                  <p style={s.pldCardLabel}>Média PLD hoje</p>
+                  <p style={s.pldCardSub}>{pld.hoje.data}</p>
+                  <p style={s.pldCardValue}>{fmtR(pld.hoje.media)}</p>
+                  <p style={s.pldCardUnit}>R$/MWh</p>
+                </div>
+
+                {/* Média mês atual */}
+                <div style={s.pldCard}>
+                  <p style={s.pldCardLabel}>Média PLD {fmtMes(pld.mes_atual.mes)}</p>
+                  <p style={s.pldCardSub}>do dia 01 até hoje</p>
+                  <p style={s.pldCardValue}>{fmtR(pld.mes_atual.media)}</p>
+                  <p style={s.pldCardUnit}>R$/MWh</p>
+                </div>
+
+                {/* Média mês anterior */}
+                <div style={s.pldCard}>
+                  <p style={s.pldCardLabel}>Média PLD {fmtMes(pld.mes_anterior.mes)}</p>
+                  <p style={s.pldCardSub}>mês completo</p>
+                  <p style={s.pldCardValue}>{fmtR(pld.mes_anterior.media)}</p>
+                  <p style={s.pldCardUnit}>R$/MWh</p>
+                </div>
+
+                {/* Variação mês atual vs anterior */}
+                <div style={s.pldCard}>
+                  <p style={s.pldCardLabel}>{fmtMes(pld.mes_atual.mes)} vs {fmtMes(pld.mes_anterior.mes)}</p>
+                  <p style={s.pldCardSub}>variação no PLD médio</p>
+                  {pld.variacao != null ? (
+                    <>
+                      <p style={{ ...s.pldCardValue, color: pld.variacao >= 0 ? "#dc2626" : "#16a34a" }}>
+                        {pld.variacao >= 0 ? "▲" : "▼"} {fmtR(Math.abs(pld.variacao))}
+                      </p>
+                      <p style={s.pldCardUnit}>R$/MWh</p>
+                    </>
+                  ) : (
+                    <p style={s.pldCardValue}>—</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Comparação outros submercados */}
+              {pld.outros_submercados && (() => {
+                const labels = { sul: "Sul", nordeste: "Nordeste", norte: "Norte" };
+                const entries = Object.entries(pld.outros_submercados)
+                  .filter(([, v]) => v.media_mes != null);
+                if (!entries.length) return null;
+                return (
+                  <div style={{ marginBottom: 28 }}>
+                    <p style={{ ...s.eyebrow, marginBottom: 14 }}>
+                      Outros submercados — média {fmtMes(pld.mes_atual.mes)} vs SE/CO
+                    </p>
+                    <div style={s.pldGrid}>
+                      {entries.map(([key, v]) => {
+                        const diff    = v.diff_seco_mes;
+                        const subindo = diff > 0;
+                        const cor     = diff == null ? "#0f172a" : subindo ? "#dc2626" : "#16a34a";
+                        return (
+                          <div key={key} style={s.pldCard}>
+                            <p style={s.pldCardLabel}>{labels[key]}</p>
+                            <p style={s.pldCardSub}>média {fmtMes(pld.mes_atual.mes)}</p>
+                            <p style={s.pldCardValue}>{fmtR(v.media_mes)}</p>
+                            {diff != null && (
+                              <p style={{ ...s.pldCardUnit, color: cor, fontWeight: 600 }}>
+                                {subindo ? "▲" : "▼"} {fmtR(Math.abs(diff))} vs SE/CO
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Gráfico horário do dia */}
+              {pld.hoje.chart.length > 0 && (
+                <div style={s.pldChartBox}>
+                  <p style={s.pldChartTitle}>PLD horário — {pld.hoje.data} · Sudeste</p>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <LineChart data={pld.hoje.chart} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                      <XAxis dataKey="hora" tick={{ fontSize: 11, fill: "#94a3b8" }} interval={3} />
+                      <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} tickFormatter={v => `${v}`} width={52} />
+                      <Tooltip
+                        contentStyle={{ borderRadius: 8, fontSize: 13, border: "1px solid #e2e8f0" }}
+                        formatter={v => [`R$ ${Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`, "PLD"]}
+                      />
+                      <Line type="monotone" dataKey="pld" stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </section>
 
@@ -356,26 +477,33 @@ const s = {
   vNum:    { fontSize: 13, fontWeight: 800, color: "#2563eb", display: "block", marginBottom: 12 },
   vTitulo: { fontSize: 17, fontWeight: 700, color: "#0f172a", margin: "0 0 10px" },
 
-  /* PLD iframe */
-  iframeWrap: {
-    width: "100%",
-    borderRadius: 14,
-    overflow: "hidden",
-    border: "1px solid #e2e8f0",
-    background: "#f8fafc",
-  },
-  iframe: {
-    display: "block",
-    width: "100%",
-    height: 520,
-    border: "none",
-  },
-  iframeFallback: {
-    fontSize: 13,
-    color: "#94a3b8",
-    marginTop: 12,
-  },
   link: { color: "#2563eb", textDecoration: "none", fontWeight: 600 },
+
+  /* PLD */
+  pldLoading: { display: "flex", alignItems: "center", gap: 12, padding: "48px 0" },
+  spinner: {
+    width: 24, height: 24, borderRadius: "50%",
+    border: "3px solid #e2e8f0", borderTopColor: "#2563eb",
+    animation: "spin 0.8s linear infinite",
+  },
+  pldGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gap: 16,
+    marginBottom: 28,
+  },
+  pldCard: {
+    background: "#f8fafc",
+    border: "1px solid #e2e8f0",
+    borderRadius: 14,
+    padding: "20px 20px 16px",
+  },
+  pldCardLabel: { fontSize: 12, fontWeight: 700, color: "#2563eb", margin: "0 0 2px", textTransform: "uppercase", letterSpacing: 0.5 },
+  pldCardSub:   { fontSize: 11, color: "#94a3b8", margin: "0 0 10px" },
+  pldCardValue: { fontSize: 22, fontWeight: 800, color: "#0f172a", margin: "0 0 2px", letterSpacing: -0.5 },
+  pldCardUnit:  { fontSize: 11, color: "#94a3b8", margin: 0 },
+  pldChartBox:  { background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 14, padding: "20px 20px 12px" },
+  pldChartTitle: { fontSize: 13, fontWeight: 700, color: "#374151", margin: "0 0 16px" },
 
   /* CTA final */
   ctaSection: {

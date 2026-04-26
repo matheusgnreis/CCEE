@@ -11,21 +11,34 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 const SUBMERCADOS = ["SE", "S", "NE", "N"];
 
 const METRICAS = [
-  { key: "consumo",            label: "Consumo",            color: "#2563eb" },
-  { key: "compra",             label: "Compra",             color: "#16a34a" },
-  { key: "resultado",          label: "Resultado",          color: "#dc2626" },
-  { key: "mcp",                label: "MCP",                color: "#d97706" },
-  { key: "resultado_mcp",      label: "Resultado MCP",      color: "#7c3aed" },
-  { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2" },
+  { key: "consumo",            label: "Consumo",            color: "#2563eb", unidade: "MWm" },
+  { key: "compra",             label: "Compra",             color: "#16a34a", unidade: "MWm" },
+  { key: "geracao",            label: "Geração",            color: "#059669", unidade: "MWm", apenasComValor: true },
+  { key: "venda",              label: "Venda",              color: "#f59e0b", unidade: "MWm", apenasComValor: true },
+  { key: "consumo_geracao",    label: "Cons. da Ger.",      color: "#8b5cf6", unidade: "MWm", apenasComValor: true },
+  { key: "resultado",          label: "Resultado",          color: "#dc2626", unidade: "R$"  },
+  { key: "mcp",                label: "MCP",                color: "#d97706", unidade: "R$"  },
+  { key: "resultado_mcp",      label: "Resultado MCP",      color: "#7c3aed", unidade: "R$"  },
+  { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2", unidade: "MWm" },
 ];
 
 const GRAFICOS = [
   {
     titulo: "Consumo e Compra",
+    domain: [0, 'auto'],
     unidade: "MWm",
     linhas: [
       { key: "consumo", label: "Consumo", color: "#2563eb" },
       { key: "compra",  label: "Compra",  color: "#16a34a" },
+    ],
+  },
+  {
+    titulo: "Geração",
+    domain: [0, 'auto'],
+    unidade: "MWm",
+    skipIfAllNull: "geracao",
+    linhas: [
+      { key: "geracao", label: "Geração", color: "#059669" },
     ],
   },
   {
@@ -36,12 +49,10 @@ const GRAFICOS = [
     ],
   },
   {
-    titulo: "MCP · Resultado · Resultado MCP",
+    titulo: "MCP",
     unidade: "R$",
     linhas: [
-      { key: "mcp",           label: "MCP",           color: "#d97706" },
-      { key: "resultado",     label: "Resultado",     color: "#dc2626" },
-      { key: "resultado_mcp", label: "Resultado MCP", color: "#7c3aed" },
+      { key: "mcp", label: "MCP", color: "#d97706" },
     ],
   },
 ];
@@ -71,6 +82,16 @@ export default function AgenteDashboard() {
   const [filtroCidade,   setFiltroCidade]   = useState("");
   const [filtroRamo,     setFiltroRamo]     = useState("");
   const [filtroSub,      setFiltroSub]      = useState("");
+
+  const [usinas,         setUsinas]         = useState([]);
+  const [mesUsinas,      setMesUsinas]      = useState(null);
+  const [loadingUsinas,  setLoadingUsinas]  = useState(false);
+  const [filtroFonte,    setFiltroFonte]    = useState("");
+  const [filtroSubU,     setFiltroSubU]     = useState("");
+  const [filtroEstadoU,  setFiltroEstadoU]  = useState("");
+
+  const [modulacao,      setModulacao]      = useState(null);
+  const modulacaoIntervalRef = useRef(null);
 
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
@@ -159,6 +180,54 @@ export default function AgenteDashboard() {
       .finally(() => setLoadingCargas(false));
   }, [agente, mesSelecionado, filtroEstado, filtroCidade, filtroRamo, filtroSub]);
 
+  // ── 4. Busca usinas quando o agente ou mês selecionado mudar ────────
+  useEffect(() => {
+    if (!agente || !mesSelecionado) return;
+    const params = new URLSearchParams();
+    params.set("mes", mesSelecionado);
+    if (filtroFonte)   params.set("fonte",      filtroFonte);
+    if (filtroSubU)    params.set("submercado",  filtroSubU);
+    if (filtroEstadoU) params.set("estado",      filtroEstadoU);
+
+    setLoadingUsinas(true);
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/usinas?${params}`)
+      .then(r => r.json())
+      .then(json => {
+        if (json.error) setError(`Usinas: ${json.error}`);
+        else { setUsinas(json.registros); setMesUsinas(json.mes); }
+      })
+      .catch(err => setError(`Usinas: ${err.message}`))
+      .finally(() => setLoadingUsinas(false));
+  }, [agente, mesSelecionado, filtroFonte, filtroSubU, filtroEstadoU]);
+
+  // ── 5. Polling de modulação — inicia após histórico, para quando concluído ──
+  useEffect(() => {
+    if (!agente || loadingHist) return;
+
+    const fetchModulacao = () => {
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/modulacao`)
+        .then(r => r.json())
+        .then(json => {
+          if (json.error) return;
+          setModulacao(json);
+          // Para o polling quando não há mais nada calculando
+          if (!json.calculando && modulacaoIntervalRef.current) {
+            clearInterval(modulacaoIntervalRef.current);
+            modulacaoIntervalRef.current = null;
+          }
+        })
+        .catch(() => {});
+    };
+
+    fetchModulacao(); // fetch imediato
+    modulacaoIntervalRef.current = setInterval(fetchModulacao, 5000);
+
+    return () => {
+      clearInterval(modulacaoIntervalRef.current);
+      modulacaoIntervalRef.current = null;
+    };
+  }, [agente, loadingHist]);
+
   // Metadados vêm do mês atual ou do primeiro registro do histórico
   const meta = dadosMes ?? (historico.length > 0 ? historico[0] : null);
 
@@ -167,14 +236,17 @@ export default function AgenteDashboard() {
   return (
     <div style={s.page}>
       <style jsx>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 768px) {
-          .nav-inner   { padding: 0 16px !important; }
-          .page-inner  { padding: 24px 16px !important; }
+          .nav-inner    { padding: 0 16px !important; }
+          .page-inner   { padding: 24px 16px !important; }
           .metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
-          .agent-name  { font-size: 20px !important; }
+          .cargas-grid  { grid-template-columns: repeat(2, 1fr) !important; }
+          .agent-name   { font-size: 20px !important; }
         }
         @media (max-width: 480px) {
           .metrics-grid { grid-template-columns: 1fr 1fr !important; }
+          .cargas-grid  { grid-template-columns: 1fr 1fr !important; }
           .card-value   { font-size: 18px !important; }
         }
       `}</style>
@@ -250,6 +322,13 @@ export default function AgenteDashboard() {
 
             <div className="metrics-grid" style={s.grid}>
               {METRICAS.map(m => {
+                // Cards opcionais: visibilidade determinada pelo histórico (estável após carga)
+                // Evita layout shift — a decisão não muda a cada troca de mês
+                if (m.apenasComValor && !loadingHist) {
+                  const temNoHistorico = historico.some(h => h[m.key] != null && Number(h[m.key]) !== 0);
+                  const temNoDadosMes  = dadosMes?.[m.key] != null && Number(dadosMes[m.key]) !== 0;
+                  if (!temNoHistorico && !temNoDadosMes) return null;
+                }
                 const val      = dadosMes?.[m.key];
                 const negativo = !loadingMes
                   && ["mcp", "resultado", "resultado_mcp"].includes(m.key)
@@ -260,7 +339,13 @@ export default function AgenteDashboard() {
                   <div key={m.key} style={{ ...s.card, ...(negativo ? s.cardAlerta : {}) }}>
                     <p style={s.cardLabel}>{m.label}</p>
                     <p className="card-value" style={{ ...s.cardValue, color: cor }}>
+                      {!loadingMes && val != null && m.unidade === "R$" && (
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#94a3b8" }}>R$</span>
+                      )}
                       {loadingMes ? "—" : fmt(val)}
+                      {!loadingMes && val != null && m.unidade === "MWm" && (
+                        <span style={{ fontSize: 11, fontWeight: 400, color: "#94a3b8" }}>MWm</span>
+                      )}
                       {negativo && <span style={s.alertaIcon} title="Aporte necessário na CCEE">⚠</span>}
                     </p>
                   </div>
@@ -270,18 +355,39 @@ export default function AgenteDashboard() {
 
             {/* ── Gráficos históricos ───────────────────────────── */}
             {historico.length > 0 && GRAFICOS.map(g => {
-              const dadosGrafico = historico;
+              if (g.skipIfAllNull && !historico.some(d => d[g.skipIfAllNull] != null)) return null;
+
+              const valores = historico
+                .flatMap(d => g.linhas.map(l => d[l.key]))
+                .filter(v => v != null && isFinite(Number(v)))
+                .map(Number)
+                .sort((a, b) => a - b);
+
+              let yDomain = g.domain || ['auto', 'auto'];
+              if (!g.domain && valores.length >= 4) {
+                const p2  = valores[Math.floor(valores.length * 0.02)];
+                const p98 = valores[Math.ceil(valores.length * 0.98) - 1];
+                const pad = (p98 - p2) * 0.1 || Math.abs(p2) * 0.1 || 100;
+                yDomain = [Math.floor(p2 - pad), Math.ceil(p98 + pad)];
+              }
+
+              const fmtTick = v => {
+                const n = Number(v);
+                if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
+                return n.toFixed(0);
+              };
 
               return (
               <div key={g.titulo} style={s.chartBox}>
                 <h2 style={s.chartTitle}>{g.titulo}</h2>
-                <ResponsiveContainer width="100%" height={280}>
-                  <LineChart data={dadosGrafico} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={historico} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#9ca3af" }} />
                     <YAxis
                       tick={{ fontSize: 11, fill: "#9ca3af" }}
-                      domain={[0, 'auto']}
+                      domain={yDomain}
+                      tickFormatter={fmtTick}
                       label={{
                         value: g.unidade,
                         angle: -90,
@@ -289,7 +395,7 @@ export default function AgenteDashboard() {
                         offset: 10,
                         style: { fontSize: 11, fill: "#9ca3af" }
                       }}
-                      width={60}
+                      width={55}
                     />
                     <Tooltip
                       contentStyle={{ borderRadius: 8, fontSize: 13, border: "1px solid #e2e8f0" }}
@@ -316,12 +422,12 @@ export default function AgenteDashboard() {
           </>
         )}
 
-        {/* ── Parcelas de Carga ────────────────────────────────── */}
+        {/* ── Unidades Consumidoras ────────────────────────────── */}
         {!loadingHist && (
           <div style={s.chartBox}>
             <div style={s.cargasHeader}>
               <h2 style={s.chartTitle}>
-                Parcelas de Carga
+                Unidades Consumidoras
                 {mesCargas && mesCargas !== mesSelecionado && (
                   <span style={{ fontSize: 12, fontWeight: 400, color: "#94a3b8", marginLeft: 10 }}>
                     (dados mais recentes disponíveis: {mesCargas})
@@ -366,23 +472,23 @@ export default function AgenteDashboard() {
                 return acc;
               }, {});
               return (
-                <div style={s.cargasResumo}>
-                  <div style={s.resumoCard}>
-                    <p style={s.cardLabel}>Total de parcelas</p>
-                    <p style={{ ...s.cardValue, color: "#2563eb" }}>{cargas.length}</p>
+                <div className="cargas-grid" style={s.cargasResumo}>
+                  <div style={s.card}>
+                    <p style={s.cardLabel}>Unidades Consumidoras</p>
+                    <p className="card-value" style={{ ...s.cardValue, color: "#2563eb" }}>{cargas.length}</p>
                   </div>
-                  <div style={s.resumoCard}>
+                  <div style={s.card}>
                     <p style={s.cardLabel}>Consumo Total (MWh)</p>
-                    <p style={{ ...s.cardValue, color: "#16a34a" }}>{fmt(totalConsumo)}</p>
+                    <p className="card-value" style={{ ...s.cardValue, color: "#16a34a" }}>{fmt(totalConsumo)}</p>
                   </div>
-                  <div style={s.resumoCard}>
+                  <div style={s.card}>
                     <p style={s.cardLabel}>Consumo ACL (MWh)</p>
-                    <p style={{ ...s.cardValue, color: "#0891b2" }}>{fmt(totalConsumACL)}</p>
+                    <p className="card-value" style={{ ...s.cardValue, color: "#0891b2" }}>{fmt(totalConsumACL)}</p>
                   </div>
                   {Object.entries(porSub).map(([sub, n]) => (
-                    <div key={sub} style={s.resumoCard}>
+                    <div key={sub} style={s.card}>
                       <p style={s.cardLabel}>Submercado {sub}</p>
-                      <p style={{ ...s.cardValue, color: "#7c3aed" }}>{n}</p>
+                      <p className="card-value" style={{ ...s.cardValue, color: "#7c3aed" }}>{n}</p>
                     </div>
                   ))}
                 </div>
@@ -392,10 +498,10 @@ export default function AgenteDashboard() {
             {/* Tabela */}
             {cargas.length === 0 && !loadingCargas ? (
               <p style={{ fontSize: 14, color: "#94a3b8", textAlign: "center", padding: "24px 0" }}>
-                Nenhuma parcela de carga encontrada.
+                Nenhuma unidade consumidora encontrada.
               </p>
             ) : (
-              <div style={s.tableWrap}>
+              <div style={s.tableScroll}>
                 <table style={s.table}>
                   <thead>
                     <tr>
@@ -416,6 +522,167 @@ export default function AgenteDashboard() {
                         <td style={{ ...s.td, textAlign: "right" }}>{fmt(c.capacidade_carga)}</td>
                         <td style={{ ...s.td, textAlign: "right" }}>{fmt(c.consumo_acl)}</td>
                         <td style={{ ...s.td, textAlign: "right" }}>{fmt(c.consumo_total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Modulação horária ────────────────────────────────── */}
+        {!loadingHist && (
+          <div style={s.chartBox}>
+            <div style={s.cargasHeader}>
+              <h2 style={s.chartTitle}>Modulação Horária</h2>
+              {modulacao?.calculando && (
+                <span style={{ fontSize: 13, color: "#2563eb", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={s.spinnerSm} />
+                  Calculando{modulacao.calculados > 0 ? ` (${modulacao.calculados}/${modulacao.total_meses} meses)` : "…"}
+                </span>
+              )}
+              {modulacao && !modulacao.calculando && modulacao.calculados === 0 && (
+                <span style={{ fontSize: 13, color: "#94a3b8" }}>Sem dados de consumo horário disponíveis</span>
+              )}
+            </div>
+
+            {(!modulacao || (modulacao.calculando && modulacao.calculados === 0)) ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "24px 0" }}>
+                <span style={s.spinnerSm} />
+                <span style={{ fontSize: 14, color: "#64748b" }}>
+                  {modulacao ? "Aguardando primeiros resultados…" : "Carregando…"}
+                </span>
+              </div>
+            ) : modulacao.resultados.length > 0 ? (
+              <div style={s.tableScroll}>
+                <table style={s.table}>
+                  <thead>
+                    <tr>
+                      {["Mês","Submercado","Consumo (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)",""].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(() => {
+                      // Coleta todos os submercados por mês (agente pode ter SE e S no mesmo mês)
+                      const subsPorMes = {};
+                      modulacao.resultados.forEach(r => {
+                        if (!subsPorMes[r.mes_referencia]) subsPorMes[r.mes_referencia] = [];
+                        subsPorMes[r.mes_referencia].push(r.submercado);
+                      });
+                      const mesesVistos = new Set();
+                      return modulacao.resultados.map((r, i) => {
+                        const custo       = Number(r.custo_modulacao_rs_mwh);
+                        const cor         = custo > 0 ? "#dc2626" : custo < 0 ? "#16a34a" : "#374151";
+                        const primeiroMes = !mesesVistos.has(r.mes_referencia);
+                        if (primeiroMes) mesesVistos.add(r.mes_referencia);
+                        const csvUrl    = `${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-horario/csv?mes=${r.mes_referencia}`;
+                        const subParams = (subsPorMes[r.mes_referencia] || []).join(",");
+                        return (
+                          <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                            <td style={s.td}>{r.mes_referencia}</td>
+                            <td style={s.td}>{r.submercado}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.consumo_total_mwh)}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{r.n_horas}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_curva_rs)}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_flat_rs)}</td>
+                            <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: cor }}>
+                              {custo > 0 ? "+" : ""}{fmt(custo)}
+                            </td>
+                            <td style={{ ...s.td, textAlign: "center" }}>
+                              {primeiroMes && (
+                                <span style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+                                  <a href={csvUrl} download style={s.csvBtn} title="Consumo horário">
+                                    ↓ Consumo
+                                  </a>
+                                  <a href={`${API_URL}/pld/horario/csv?mes=${r.mes_referencia}&submercado=${subParams}`} download style={{ ...s.csvBtn, color: "#7c3aed", background: "#f5f3ff", borderColor: "#ddd6fe" }} title={`PLD horário — ${subParams}`}>
+                                    ↓ PLD
+                                  </a>
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {/* ── Unidades Geradoras ───────────────────────────────── */}
+        {!loadingHist && (loadingUsinas || usinas.length > 0) && (
+          <div style={s.chartBox}>
+            <div style={s.cargasHeader}>
+              <h2 style={s.chartTitle}>
+                Unidades Geradoras
+                {mesUsinas && mesUsinas !== mesSelecionado && (
+                  <span style={{ fontSize: 12, fontWeight: 400, color: "#94a3b8", marginLeft: 10 }}>
+                    (dados mais recentes disponíveis: {mesUsinas})
+                  </span>
+                )}
+              </h2>
+              {loadingUsinas && <span style={s.mesLoading}>carregando...</span>}
+            </div>
+
+            {/* Filtros */}
+            <div style={s.filtros}>
+              <select value={filtroFonte} onChange={e => setFiltroFonte(e.target.value)} style={s.filtroSelect}>
+                <option value="">Todas as fontes</option>
+                {[...new Set(usinas.map(u => u.fonte_energia_primaria).filter(Boolean))].sort().map(f => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+              <select value={filtroSubU} onChange={e => setFiltroSubU(e.target.value)} style={s.filtroSelect}>
+                <option value="">Todos submercados</option>
+                {SUBMERCADOS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <select value={filtroEstadoU} onChange={e => setFiltroEstadoU(e.target.value)} style={s.filtroSelect}>
+                <option value="">Todos os estados</option>
+                {[...new Set(usinas.map(u => u.estado_uf).filter(Boolean))].sort().map(e => (
+                  <option key={e} value={e}>{e}</option>
+                ))}
+              </select>
+            </div>
+
+            {usinas.length === 0 && !loadingUsinas ? (
+              <p style={{ fontSize: 14, color: "#94a3b8", textAlign: "center", padding: "24px 0" }}>
+                Nenhuma unidade geradora encontrada para este agente.
+              </p>
+            ) : (
+              <div style={s.tableScroll}>
+                <table style={s.table}>
+                  <thead>
+                    <tr>
+                      {["Ativo","Fonte","Submercado","UF","Cap. (MW)","Ger. CG (MWmed)","GF CG (MWmed)","Desc. (%)","MRE"].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usinas.map((u, i) => (
+                      <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                        <td style={s.td}>{u.sigla_ativo || "—"}</td>
+                        <td style={s.td}>{u.fonte_energia_primaria || "—"}</td>
+                        <td style={s.td}>{u.submercado || "—"}</td>
+                        <td style={s.td}>{u.estado_uf || "—"}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(u.cap_t)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(u.geracao_centro_gravidade)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(u.gf_centro_gravidade)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>
+                          {u.percentual_desconto_usina != null && !isNaN(Number(u.percentual_desconto_usina))
+                            ? `${fmt(u.percentual_desconto_usina)}%`
+                            : "—"}
+                        </td>
+                        <td style={s.td}>
+                          {["S", "Sim", "SIM", "s"].includes(u.participante_mre)
+                            ? <span style={s.badgeSim}>Sim</span>
+                            : <span style={s.badgeNao}>Não</span>}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -476,12 +743,17 @@ const s = {
   filtroSelect: { fontSize: 13, padding: "7px 10px", border: "1.5px solid #e2e8f0", borderRadius: 7, background: "#fff", color: "#374151", cursor: "pointer" },
   filtroInput:  { fontSize: 13, padding: "7px 10px", border: "1.5px solid #e2e8f0", borderRadius: 7, color: "#374151", outline: "none", minWidth: 160 },
 
-  cargasResumo: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 20 },
-  resumoCard:   { background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "14px 18px", minWidth: 140 },
+  cargasResumo: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 },
 
-  tableWrap: { overflowX: "auto" },
-  table:     { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  tableWrap:   { overflowX: "auto" },
+  tableScroll: { overflowX: "auto", overflowY: "auto", maxHeight: 360 },
+  table:       { width: "100%", borderCollapse: "collapse", fontSize: 13 },
   th:        { padding: "10px 12px", textAlign: "left", background: "#f1f5f9", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "1px solid #e2e8f0" },
   td:        { padding: "9px 12px", color: "#374151", borderBottom: "1px solid #f1f5f9", whiteSpace: "nowrap" },
   trEven:    { background: "#fafbfc" },
+
+  badgeSim:  { fontSize: 11, fontWeight: 600, color: "#059669", background: "#d1fae5", borderRadius: 20, padding: "2px 8px" },
+  badgeNao:  { fontSize: 11, fontWeight: 600, color: "#6b7280", background: "#f1f5f9", borderRadius: 20, padding: "2px 8px" },
+  spinnerSm: { display: "inline-block", width: 14, height: 14, borderRadius: "50%", border: "2px solid #e2e8f0", borderTopColor: "#2563eb", animation: "spin 0.8s linear infinite", flexShrink: 0 },
+  csvBtn:    { fontSize: 11, fontWeight: 600, color: "#2563eb", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, padding: "3px 8px", textDecoration: "none", whiteSpace: "nowrap" },
 };

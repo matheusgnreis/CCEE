@@ -5,6 +5,7 @@ const {
   YEAR_DELAY_MS,
   delay,
   normalizarRegistro,
+  fetchPagina,
   fetchTodasPaginas,
 } = require("./utils");
 
@@ -16,17 +17,22 @@ const DATASET_IDS = {
 };
 
 /**
- * Busca todas as parcelas de carga de um perfil de agente.
+ * Busca todas as parcelas de carga de um agente.
  *
- * @param {string}   siglaPerfilAgente - Sigla do perfil (ex: "SALITRE"). Case insensitive.
+ * Usa NOME_EMPRESARIAL (razão social da matriz) quando disponível — é estável
+ * e cobre todos os perfis do agente. Cai para SIGLA_PERFIL_AGENTE apenas
+ * se razaoSocial não for fornecida.
+ *
+ * @param {string}   siglaPerfilAgente    - Usado como fallback se razaoSocial ausente.
  * @param {object}   [opcoes]
- * @param {number[]} [opcoes.anos]     - Restringe a anos específicos (ex: [2025, 2026]).
- *                                       Por padrão busca todos os anos disponíveis.
- * @returns {Promise<object[]>} Registros normalizados ordenados por mes_referencia ASC
- *                              e depois por sigla_parcela_carga ASC.
+ * @param {number[]} [opcoes.anos]        - Restringe a anos específicos.
+ * @param {string}   [opcoes.razaoSocial] - Razão social vinda do Power BI (preferida).
  */
-async function buscarCargas(siglaPerfilAgente, { anos = null } = {}) {
-  siglaPerfilAgente = siglaPerfilAgente.trim().toUpperCase();
+async function buscarCargas(siglaPerfilAgente, { anos = null, razaoSocial = null } = {}) {
+  const campo = razaoSocial ? "NOME_EMPRESARIAL" : "SIGLA_PERFIL_AGENTE";
+  const valor = razaoSocial
+    ? razaoSocial.trim().toUpperCase()
+    : siglaPerfilAgente.trim().toUpperCase();
 
   const entradas = anos?.length
     ? anos.filter(a => DATASET_IDS[a]).map(a => [Number(a), DATASET_IDS[a]])
@@ -35,24 +41,20 @@ async function buscarCargas(siglaPerfilAgente, { anos = null } = {}) {
   if (!entradas.length)
     throw new Error(`Nenhum dos anos solicitados está disponível. Anos mapeados: ${Object.keys(DATASET_IDS).join(", ")}`);
 
-  const filtros = { SIGLA_PERFIL_AGENTE: siglaPerfilAgente };
-
-  console.log(`\n🔍 Cargas | sigla="${siglaPerfilAgente}" | ${entradas.length} anos`);
+  console.log(`\n🔍 Cargas | ${campo}="${valor}" | ${entradas.length} anos`);
 
   const resultado = [];
 
   for (let i = 0; i < entradas.length; i++) {
     const [ano, datasetId] = entradas[i];
-    console.log(`  📅 Buscando ${ano}...`);
-
+    console.log(`  📅 ${ano}...`);
     try {
-      const registros = await fetchTodasPaginas(datasetId, filtros);
+      const registros = await fetchTodasPaginas(datasetId, { [campo]: valor });
       console.log(`  ✓ ${registros.length} registros`);
       resultado.push(...registros.map(normalizarRegistro));
     } catch (err) {
       console.warn(`  ✗ Falha em ${ano}: ${err.message}`);
     }
-
     if (i < entradas.length - 1) await delay(YEAR_DELAY_MS);
   }
 
@@ -64,9 +66,9 @@ async function buscarCargas(siglaPerfilAgente, { anos = null } = {}) {
 
   if (resultado.length > 0) {
     const parcelas = new Set(resultado.map(r => r.sigla_parcela_carga)).size;
-    console.log(`\n✅ ${resultado.length} registros | ${parcelas} parcelas distintas | ${resultado[0].mes_referencia} → ${resultado.at(-1).mes_referencia}`);
+    console.log(`\n✅ ${resultado.length} registros via ${campo} | ${parcelas} parcelas | ${resultado[0].mes_referencia} → ${resultado.at(-1).mes_referencia}`);
   } else {
-    console.log(`\n⚠️  Nenhuma parcela de carga encontrada para sigla="${siglaPerfilAgente}"`);
+    console.log(`\n⚠️  Nenhuma parcela encontrada via ${campo}="${valor}"`);
   }
 
   return resultado;

@@ -422,37 +422,38 @@ describe("GET /inteligencia/:agente/cargas", () => {
   });
 
   it("retorna mês mais recente disponível quando mês solicitado não existe no banco", async () => {
+    // mes=2025-03 <= max=2025-06 → precisaAtualizar=false → sem fetch CKAN
     const row = cargaRow({ mes_referencia: "2025-06" });
     mockQueryImpl.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });  // SELECT 1 (existe)
     mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2025-06" }] }); // SELECT MAX
-    mockQueryImpl.mockResolvedValueOnce({ rows: [] });                   // SELECT 1 mes específico (não existe)
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] });                   // SELECT 1 mes=2025-03 (não existe)
     mockQueryImpl.mockResolvedValueOnce({ rows: [{ mes: "2025-06" }] }); // SELECT MAX fallback
     mockQueryImpl.mockResolvedValueOnce({ rows: [row] });                // SELECT * final
 
-    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas?mes=2026-02");
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas?mes=2025-03");
 
     expect(res.status).toBe(200);
     expect(res.body.mes).toBe("2025-06");
     expect(res.body.registros[0].mes_referencia).toBe("2025-06");
+    expect(mockFetchImpl).not.toHaveBeenCalled();
   });
 
   it("busca na API CCEE quando não há cargas no banco", async () => {
-    // Nenhuma carga no banco
-    mockQueryImpl.mockResolvedValueOnce({ rows: [] });
-    // CKAN: 3 anos (2024, 2025, 2026) todos vazios
-    for (let i = 0; i < 3; i++) {
-      mockFetchImpl.mockResolvedValueOnce({
-        ok:   true,
-        json: () => Promise.resolve({ success: true, result: { total: 0, records: [] } })
-      });
-    }
-    // SELECT * final
-    mockQueryImpl.mockResolvedValueOnce({ rows: [] });
+    mockQueryImpl
+      .mockResolvedValueOnce({ rows: [] })  // SELECT 1 ccee_cargas → vazio
+      .mockResolvedValueOnce({ rows: [] })  // SELECT razao_social → sem meta
+      .mockResolvedValueOnce({ rows: [] }); // SELECT * final
+
+    // probe 2026 + fetch 2024 + fetch 2025 + fetch 2026 = 4 chamadas CKAN
+    mockFetchImpl.mockResolvedValue({
+      ok:   true,
+      json: () => Promise.resolve({ success: true, result: { total: 0, records: [] } })
+    });
 
     const res = await request(app).get("/inteligencia/AGENTE%20TESTE/cargas");
 
     expect(res.status).toBe(200);
-    expect(mockFetchImpl).toHaveBeenCalledTimes(3); // 1 por ano (CKAN)
+    expect(mockFetchImpl).toHaveBeenCalledTimes(4); // 1 probe + 3 anos
     expect(res.body.registros).toHaveLength(0);
   });
 
@@ -510,6 +511,183 @@ describe("POST /inteligencia/:agente/refresh", () => {
     expect(res.status).toBe(500);
   });
 
+});
+
+// ─── GET /inteligencia/:agente/modulacao ──────────────────────────────────────
+
+describe("GET /inteligencia/:agente/modulacao", () => {
+  // Isolação de fila: clearAllMocks não reseta mockResolvedValueOnce, só resetAllMocks faz.
+  beforeEach(() => {
+    mockQueryImpl.mockReset();
+    mockFetchImpl.mockReset();
+  });
+
+  function ckanPldOk(records) {
+    return {
+      ok:   true,
+      json: () => Promise.resolve({ success: true, result: { total: records.length, records } }),
+    };
+  }
+
+  function consumoRows(sub = "SE") {
+    return [
+      { periodo: 1, submercado: sub, consumo_mwh: "100" },
+      { periodo: 2, submercado: sub, consumo_mwh: "200" },
+      { periodo: 3, submercado: sub, consumo_mwh: "150" },
+    ];
+  }
+
+  function pldRecords(sub = "SE") {
+    return [
+      { _id: 1, MES_REFERENCIA: "202503", SUBMERCADO: sub, PERIODO_COMERCIALIZACAO: 1, PLD: 50 },
+      { _id: 2, MES_REFERENCIA: "202503", SUBMERCADO: sub, PERIODO_COMERCIALIZACAO: 2, PLD: 60 },
+      { _id: 3, MES_REFERENCIA: "202503", SUBMERCADO: sub, PERIODO_COMERCIALIZACAO: 3, PLD: 55 },
+    ];
+  }
+
+  it("retorna 400 quando ?mes não é passado", async () => {
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/modulacao");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mes/i);
+  });
+
+  it("retorna 400 para formato de mês inválido", async () => {
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/modulacao?mes=2025");
+    expect(res.status).toBe(400);
+  });
+
+  it("retorna resultados calculados quando consumo já está no banco", async () => {
+    mockQueryImpl
+      .mockResolvedValueOnce({ rows: [{ "?column?": 1 }] })  // existeConsumo → existe
+      .mockResolvedValueOnce({ rows: consumoRows() })         // SELECT consumo
+      .mockResolvedValueOnce({ rows: [] });                   // salvarModulacao INSERT
+
+    mockFetchImpl.mockResolvedValueOnce(ckanPldOk(pldRecords()));
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/modulacao?mes=2025-03");
+
+    expect(res.status).toBe(200);
+    expect(res.body.resultados).toHaveLength(1);
+    expect(res.body.resultados[0].submercado).toBe("SE");
+    expect(res.body.resultados[0]).toHaveProperty("custo_modulacao_rs_mwh");
+  });
+
+  it("retorna 500 quando download de consumo horário falha", async () => {
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] }); // existeConsumo → vazio, tenta baixar
+
+    // package_show retorna erro HTTP → buscarConsumoHorario lança
+    mockFetchImpl.mockResolvedValueOnce({ ok: false, status: 404, text: () => Promise.resolve("") });
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/modulacao?mes=2025-03");
+
+    expect(res.status).toBe(500);
+  });
+
+  it("retorna mensagem quando não há dados de consumo no banco", async () => {
+    mockQueryImpl
+      .mockResolvedValueOnce({ rows: [{ "?column?": 1 }] }) // existeConsumo → existe
+      .mockResolvedValueOnce({ rows: [] });                  // SELECT consumo → vazio
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/modulacao?mes=2025-03");
+
+    expect(res.status).toBe(200);
+    expect(res.body.mensagem).toBeDefined();
+    expect(res.body.resultados).toEqual([]);
+  });
+
+  it("retorna 500 quando busca de PLD falha", async () => {
+    mockQueryImpl
+      .mockResolvedValueOnce({ rows: [{ "?column?": 1 }] }) // existeConsumo → existe
+      .mockResolvedValueOnce({ rows: consumoRows() });       // SELECT consumo
+
+    mockFetchImpl.mockRejectedValueOnce(new Error("Network error"));
+
+    const res = await request(app).get("/inteligencia/AGENTE%20TESTE/modulacao?mes=2025-03");
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── GET /jobs/:id ────────────────────────────────────────────────────────────
+
+describe("GET /jobs/:id", () => {
+  beforeEach(() => { mockQueryImpl.mockReset(); mockFetchImpl.mockReset(); });
+
+  it("retorna o job quando encontrado", async () => {
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      tipo: "modulacao", agente: "AGENTE TESTE", mes: "2025-03",
+      status: "done", resultado: { resultados: [] }, erro: null,
+      created_at: new Date(), updated_at: new Date()
+    }] });
+
+    const res = await request(app).get("/jobs/550e8400-e29b-41d4-a716-446655440000");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("done");
+  });
+
+  it("retorna 404 quando job não existe", async () => {
+    mockQueryImpl.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).get("/jobs/550e8400-e29b-41d4-a716-446655440000");
+    expect(res.status).toBe(404);
+  });
+
+  it("retorna 400 para ID inválido", async () => {
+    const res = await request(app).get("/jobs/nao-e-uuid");
+    expect(res.status).toBe(400);
+  });
+});
+
+// ─── GET /inteligencia/:agente/modulacao/solicitar ───────────────────────────
+
+describe("GET /inteligencia/:agente/modulacao/solicitar", () => {
+  beforeEach(() => { mockQueryImpl.mockReset(); mockFetchImpl.mockReset(); });
+
+  it("cria novo job e retorna 202 quando não existe job anterior", async () => {
+    mockQueryImpl
+      .mockResolvedValueOnce({ rows: [] })   // deduplicação → sem job existente
+      .mockResolvedValueOnce({ rows: [{ id: "550e8400-e29b-41d4-a716-446655440000" }] }) // criarJob
+      .mockResolvedValue({ rows: [] });      // background queries
+
+    const res = await request(app)
+      .get("/inteligencia/AGENTE%20TESTE/modulacao/solicitar?mes=2025-03");
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBeDefined();
+    expect(res.body.pollUrl).toMatch(/\/jobs\//);
+  });
+
+  it("retorna job existente sem criar novo (deduplicação)", async () => {
+    mockQueryImpl.mockResolvedValueOnce({ rows: [{
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      status: "done",
+      resultado: { resultados: [] },
+      erro: null,
+      updated_at: new Date()
+    }] });
+
+    const res = await request(app)
+      .get("/inteligencia/AGENTE%20TESTE/modulacao/solicitar?mes=2025-03");
+
+    expect(res.status).toBe(200);
+    expect(res.body.jobId).toBe("550e8400-e29b-41d4-a716-446655440000");
+    expect(res.body.status).toBe("done");
+    // não deve ter chamado criarJob (só 1 query: a de deduplicação)
+    expect(mockQueryImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("retorna 400 quando ?mes não é passado", async () => {
+    const res = await request(app)
+      .get("/inteligencia/AGENTE%20TESTE/modulacao/solicitar");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mes/i);
+  });
+
+  it("retorna 400 para agente inválido", async () => {
+    const res = await request(app)
+      .get("/inteligencia/X/modulacao/solicitar?mes=2025-03");
+    expect(res.status).toBe(400);
+  });
 });
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────

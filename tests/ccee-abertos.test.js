@@ -8,7 +8,9 @@ jest.mock("node-fetch", () => (...args) => mockFetchImpl(...args));
 
 const { normalizarMes } = require("../api/ccee-abertos/utils");
 const { buscarMcp, anosDisponiveis }                        = require("../api/ccee-abertos/mcp");
-const { buscarCargas, anosDisponiveis: anosDisponiveisCargas } = require("../api/ccee-abertos/cargas");
+const { buscarCargas, anosDisponiveis: anosDisponiveisCargas }   = require("../api/ccee-abertos/cargas");
+const { buscarUsinas, anosDisponiveis: anosDisponiveisUsinas }   = require("../api/ccee-abertos/geracao");
+const { buscarPldHorario, buscarPldHorarioMapa }            = require("../api/ccee-abertos/pld-horario");
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -274,6 +276,8 @@ describe("buscarCargas", () => {
 
   it("busca todos os anos disponíveis quando nenhum filtro é passado", async () => {
     const anosTotal = anosDisponiveisCargas().length;
+    // 1 probe no ano mais recente + anosTotal fetches = anosTotal + 1 chamadas
+    mockFetchImpl.mockResolvedValueOnce(ckanOk([])); // probe (ano mais recente, 0 resultados)
     for (let i = 0; i < anosTotal; i++) {
       mockFetchImpl.mockResolvedValueOnce(
         ckanOk(registrosCargas("SALITRE", [`${2024 + i}-01`]))
@@ -282,7 +286,7 @@ describe("buscarCargas", () => {
 
     const resultado = await buscarCargas("SALITRE");
 
-    expect(mockFetchImpl).toHaveBeenCalledTimes(anosTotal);
+    expect(mockFetchImpl).toHaveBeenCalledTimes(anosTotal + 1);
     expect(resultado).toHaveLength(anosTotal);
   });
 
@@ -297,20 +301,23 @@ describe("buscarCargas", () => {
   });
 
   it("filtra por anos específicos", async () => {
+    // probe no ano mais recente (2025) + fetch 2024 + fetch 2025 = 3 calls
     mockFetchImpl
-      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2024-01"])))
-      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2025-01"])));
+      .mockResolvedValueOnce(ckanOk([]))                                       // probe 2025
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2024-01"]))) // fetch 2024
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2025-01"]))); // fetch 2025
 
     const resultado = await buscarCargas("SALITRE", { anos: [2024, 2025] });
 
-    expect(mockFetchImpl).toHaveBeenCalledTimes(2);
+    expect(mockFetchImpl).toHaveBeenCalledTimes(3);
     expect(resultado).toHaveLength(2);
   });
 
   it("normaliza chaves para lowercase e normaliza mes_referencia", async () => {
-    mockFetchImpl.mockResolvedValueOnce(
-      ckanOk(registrosCargas("SALITRE", ["2024-03"]))
-    );
+    // probe 2024 + fetch 2024 = 2 calls
+    mockFetchImpl
+      .mockResolvedValueOnce(ckanOk([]))                                       // probe 2024
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2024-03"]))); // fetch 2024
 
     const resultado = await buscarCargas("SALITRE", { anos: [2024] });
 
@@ -326,7 +333,10 @@ describe("buscarCargas", () => {
       { _id: 2, SIGLA_PERFIL_AGENTE: "X", MES_REFERENCIA: "202401", SIGLA_PARCELA_CARGA: "X-P1" },
       { _id: 3, SIGLA_PERFIL_AGENTE: "X", MES_REFERENCIA: "202403", SIGLA_PARCELA_CARGA: "X-P1" },
     ];
-    mockFetchImpl.mockResolvedValueOnce(ckanOk(registros));
+    // probe 2024 + fetch 2024 = 2 calls
+    mockFetchImpl
+      .mockResolvedValueOnce(ckanOk([]))           // probe 2024
+      .mockResolvedValueOnce(ckanOk(registros));   // fetch 2024
 
     const resultado = await buscarCargas("X", { anos: [2024] });
 
@@ -335,7 +345,7 @@ describe("buscarCargas", () => {
     expect(resultado[2].sigla_parcela_carga).toBe("X-P2");
   });
 
-  it("pagina automaticamente quando total > 1000", async () => {
+  it("pagina automaticamente quando total > PAGE_SIZE", async () => {
     const pag1 = Array.from({ length: 1000 }, (_, i) => ({
       _id: i, SIGLA_PERFIL_AGENTE: "BIG", MES_REFERENCIA: "202401", SIGLA_PARCELA_CARGA: `P${i}`,
     }));
@@ -343,15 +353,34 @@ describe("buscarCargas", () => {
       _id: 1000 + i, SIGLA_PERFIL_AGENTE: "BIG", MES_REFERENCIA: "202402", SIGLA_PARCELA_CARGA: `P${1000 + i}`,
     }));
 
+    // probe 2024 (page 0, total=1050) + fetch page 0 + fetch page 1 = 3 calls
     mockFetchImpl
-      .mockResolvedValueOnce(ckanOk(pag1, 1050))
-      .mockResolvedValueOnce(ckanOk(pag2, 1050));
+      .mockResolvedValueOnce(ckanOk(pag1, 1050)) // probe 2024 (total conhecido)
+      .mockResolvedValueOnce(ckanOk(pag1, 1050)) // fetch 2024 page 0
+      .mockResolvedValueOnce(ckanOk(pag2, 1050)); // fetch 2024 page 1
 
     const resultado = await buscarCargas("BIG", { anos: [2024] });
 
-    expect(mockFetchImpl).toHaveBeenCalledTimes(2);
+    expect(mockFetchImpl).toHaveBeenCalledTimes(3);
     expect(resultado).toHaveLength(1050);
-    expect(mockFetchImpl.mock.calls[1][0]).toContain("offset=1000");
+    expect(mockFetchImpl.mock.calls[2][0]).toContain("offset=1000");
+  });
+
+  it("usa NOME_EMPRESARIAL quando SIGLA_PERFIL_AGENTE não retorna resultados", async () => {
+    // probe SIGLA (2026) → vazio; probe NOME (2026) → encontrou; fetch todos os anos por NOME
+    mockFetchImpl
+      .mockResolvedValueOnce(ckanOk([]))                                        // probe SIGLA 2026
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2026-01"]))) // probe NOME 2026
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2024-01"]))) // fetch 2024
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2025-01"]))) // fetch 2025
+      .mockResolvedValueOnce(ckanOk(registrosCargas("SALITRE", ["2026-01"]))); // fetch 2026
+
+    const resultado = await buscarCargas("SALITRE", { razaoSocial: "SALITRE RAZAO SOCIAL" });
+
+    expect(mockFetchImpl).toHaveBeenCalledTimes(5);
+    // segunda probe deve usar NOME_EMPRESARIAL
+    expect(mockFetchImpl.mock.calls[1][0]).toContain("NOME_EMPRESARIAL");
+    expect(resultado).toHaveLength(3);
   });
 
   it("continua nos outros anos quando um ano falha", async () => {
@@ -376,6 +405,155 @@ describe("buscarCargas", () => {
 
   it("lança erro quando o ano solicitado não está mapeado", async () => {
     await expect(buscarCargas("SALITRE", { anos: [2020] }))
+      .rejects
+      .toThrow(/disponív/i);
+  });
+
+});
+
+// ─── buscarUsinas ─────────────────────────────────────────────────────────────
+
+function registrosUsinas(sigla, meses) {
+  return meses.map((m, i) => ({
+    _id:                      i + 1,
+    SIGLA_PERFIL:             sigla,
+    MES_REFERENCIA:           m.replace("-", ""),
+    SIGLA_ATIVO:              `USI-${sigla}-${i + 1}`,
+    SIGLA_PARCELA_USINA:      `${sigla}-U${i + 1}`,
+    FONTE_ENERGIA_PRIMARIA:   "SOLAR",
+    SUBMERCADO:               "SE",
+    ESTADO_UF:                "SP",
+    CAP_T:                    5.0 + i,
+    GERACAO_CENTRO_GRAVIDADE: 3.5 + i,
+    GF_CENTRO_GRAVIDADE:      3.0 + i,
+    PERCENTUAL_DESCONTO_USINA: 50,
+    PARTICIPANTE_MRE:         "S",
+  }));
+}
+
+describe("buscarUsinas", () => {
+
+  beforeEach(() => { mockFetchImpl.mockReset(); });
+
+  it("busca todos os anos disponíveis quando nenhum filtro é passado", async () => {
+    const anosTotal = anosDisponiveisUsinas().length;
+    for (let i = 0; i < anosTotal; i++) {
+      mockFetchImpl.mockResolvedValueOnce(
+        ckanOk(registrosUsinas("GEN", [`${2024 + i}-01`]))
+      );
+    }
+
+    const resultado = await buscarUsinas("GERADORA SA");
+
+    expect(mockFetchImpl).toHaveBeenCalledTimes(anosTotal);
+    expect(resultado).toHaveLength(anosTotal);
+  });
+
+  it("converte nome para maiúsculo e busca por NOME_EMPRESARIAL", async () => {
+    mockFetchImpl.mockResolvedValue(ckanOk([]));
+
+    await buscarUsinas("geradora ltda", { anos: [2024] });
+
+    const url = mockFetchImpl.mock.calls[0][0];
+    expect(url).toContain("NOME_EMPRESARIAL");
+    expect(url).toContain("GERADORA"); // espaço é codificado como + ou %20 na URL
+  });
+
+  it("filtra por anos específicos", async () => {
+    mockFetchImpl
+      .mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2025-01"])))
+      .mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2026-01"])));
+
+    const resultado = await buscarUsinas("GERADORA SA", { anos: [2025, 2026] });
+
+    expect(mockFetchImpl).toHaveBeenCalledTimes(2);
+    expect(resultado).toHaveLength(2);
+  });
+
+  it("normaliza chaves para lowercase e normaliza mes_referencia", async () => {
+    mockFetchImpl.mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2024-05"])));
+
+    const resultado = await buscarUsinas("GERADORA SA", { anos: [2024] });
+
+    expect(resultado[0]).toHaveProperty("sigla_ativo");
+    expect(resultado[0]).toHaveProperty("mes_referencia", "2024-05");
+    expect(resultado[0]).toHaveProperty("fonte_energia_primaria", "SOLAR");
+    expect(resultado[0]).not.toHaveProperty("_id");
+  });
+
+  it("ordena por mes_referencia ASC e depois por sigla_ativo ASC", async () => {
+    const registros = [
+      { _id: 1, MES_REFERENCIA: "202403", SIGLA_ATIVO: "USI-B", SIGLA_PARCELA_USINA: "X-U2" },
+      { _id: 2, MES_REFERENCIA: "202401", SIGLA_ATIVO: "USI-A", SIGLA_PARCELA_USINA: "X-U1" },
+      { _id: 3, MES_REFERENCIA: "202403", SIGLA_ATIVO: "USI-A", SIGLA_PARCELA_USINA: "X-U3" },
+    ];
+    mockFetchImpl.mockResolvedValueOnce(ckanOk(registros));
+
+    const resultado = await buscarUsinas("GERADORA SA", { anos: [2024] });
+
+    expect(resultado[0].mes_referencia).toBe("2024-01");
+    expect(resultado[1].sigla_ativo).toBe("USI-A");
+    expect(resultado[2].sigla_ativo).toBe("USI-B");
+  });
+
+  it("pagina automaticamente quando total > PAGE_SIZE", async () => {
+    const pag1 = Array.from({ length: 1000 }, (_, i) => ({
+      _id: i, MES_REFERENCIA: "202401", SIGLA_PARCELA_USINA: `U${i}`, SIGLA_ATIVO: `USI-${i}`,
+    }));
+    const pag2 = Array.from({ length: 50 }, (_, i) => ({
+      _id: 1000 + i, MES_REFERENCIA: "202402", SIGLA_PARCELA_USINA: `U${1000 + i}`, SIGLA_ATIVO: `USI-${1000 + i}`,
+    }));
+
+    mockFetchImpl
+      .mockResolvedValueOnce(ckanOk(pag1, 1050))
+      .mockResolvedValueOnce(ckanOk(pag2, 1050));
+
+    const resultado = await buscarUsinas("GERADORA SA", { anos: [2024] });
+
+    expect(mockFetchImpl).toHaveBeenCalledTimes(2);
+    expect(resultado).toHaveLength(1050);
+    expect(mockFetchImpl.mock.calls[1][0]).toContain("offset=1000");
+  });
+
+  it("sempre busca por NOME_EMPRESARIAL em todos os anos", async () => {
+    mockFetchImpl
+      .mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2024-01"])))
+      .mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2025-01"])))
+      .mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2026-01"])));
+
+    const resultado = await buscarUsinas("GERADORA SA");
+
+    expect(mockFetchImpl.mock.calls[0][0]).toContain("NOME_EMPRESARIAL");
+    expect(resultado).toHaveLength(3);
+  });
+
+  it("continua nos outros anos quando um ano falha", async () => {
+    mockFetchImpl
+      .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("") })
+      .mockResolvedValueOnce(ckanOk(registrosUsinas("GEN", ["2025-01"])))
+      .mockResolvedValue(ckanOk([]));
+
+    const resultado = await buscarUsinas("GERADORA SA");
+
+    expect(Array.isArray(resultado)).toBe(true);
+    expect(resultado.some(r => r.mes_referencia === "2025-01")).toBe(true);
+  });
+
+  it("retorna array vazio quando nenhuma usina é encontrada", async () => {
+    mockFetchImpl.mockResolvedValue(ckanOk([]));
+
+    const resultado = await buscarUsinas("NAO EXISTE LTDA");
+
+    expect(resultado).toHaveLength(0);
+  });
+
+  it("lança erro quando nome empresarial não é fornecido", async () => {
+    await expect(buscarUsinas("")).rejects.toThrow(/obrigatório/i);
+    await expect(buscarUsinas(null)).rejects.toThrow(/obrigatório/i);
+  });
+
+  it("lança erro quando o ano solicitado não está mapeado", async () => {
+    await expect(buscarUsinas("GERADORA SA", { anos: [2020] }))
       .rejects
       .toThrow(/disponív/i);
   });
@@ -466,6 +644,68 @@ describe("buscarMesRecente", () => {
     expect(mes).toMatch(/^\d{4}-\d{2}$/);
   });
 
+});
+
+// ─── buscarPldHorario ─────────────────────────────────────────────────────────
+
+describe("buscarPldHorario", () => {
+  function pldRecord(periodo, sub, pld) {
+    return { _id: periodo, MES_REFERENCIA: "202503", SUBMERCADO: sub, PERIODO_COMERCIALIZACAO: periodo, PLD: pld };
+  }
+
+  it("retorna lista com campos normalizados", async () => {
+    mockFetchImpl.mockResolvedValueOnce(ckanOk([
+      pldRecord(1, "SE", 100.5),
+      pldRecord(2, "SE", 110.0),
+    ]));
+
+    const lista = await buscarPldHorario("2025-03");
+
+    expect(lista).toHaveLength(2);
+    expect(lista[0]).toMatchObject({ mes_referencia: "2025-03", periodo: 1, submercado: "SE", pld_rs_mwh: 100.5 });
+  });
+
+  it("filtra por submercado quando passado", async () => {
+    mockFetchImpl.mockResolvedValueOnce(ckanOk([pldRecord(1, "SE", 99)]));
+
+    const lista = await buscarPldHorario("2025-03", "SE");
+
+    expect(lista).toHaveLength(1);
+    // confirma que o filtro foi passado na URL
+    const url = mockFetchImpl.mock.calls[0][0];
+    expect(url).toContain("SE");
+  });
+
+  it("lança erro para ano sem dataset mapeado", async () => {
+    await expect(buscarPldHorario("2020-01")).rejects.toThrow("não disponível");
+  });
+
+  it("descarta registros sem periodo ou submercado", async () => {
+    mockFetchImpl.mockResolvedValueOnce(ckanOk([
+      { _id: 1, MES_REFERENCIA: "202503", SUBMERCADO: "", PERIODO_COMERCIALIZACAO: 1, PLD: 50 },
+      { _id: 2, MES_REFERENCIA: "202503", SUBMERCADO: "SE", PERIODO_COMERCIALIZACAO: null, PLD: 60 },
+      { _id: 3, MES_REFERENCIA: "202503", SUBMERCADO: "SE", PERIODO_COMERCIALIZACAO: 5, PLD: 70 },
+    ]));
+
+    const lista = await buscarPldHorario("2025-03");
+
+    expect(lista).toHaveLength(1);
+    expect(lista[0].periodo).toBe(5);
+  });
+});
+
+describe("buscarPldHorarioMapa", () => {
+  it("retorna mapa indexado por periodo|submercado", async () => {
+    mockFetchImpl.mockResolvedValueOnce(ckanOk([
+      { _id: 1, MES_REFERENCIA: "202503", SUBMERCADO: "SE", PERIODO_COMERCIALIZACAO: 1, PLD: 100 },
+      { _id: 2, MES_REFERENCIA: "202503", SUBMERCADO: "S",  PERIODO_COMERCIALIZACAO: 1, PLD: 90  },
+    ]));
+
+    const mapa = await buscarPldHorarioMapa("2025-03");
+
+    expect(mapa["1|SE"]).toBe(100);
+    expect(mapa["1|S"]).toBe(90);
+  });
 });
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
