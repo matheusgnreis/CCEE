@@ -1224,7 +1224,13 @@ app.get("/inteligencia/:agente/usinas", async (req, res) => {
       } else {
         const registros = await buscarUsinas(razaoSocial);
         console.log(`[usinas] API retornou ${registros.length} registros`);
-        if (registros.length > 0) await salvarUsinas(agente, agente, registros);
+        if (registros.length > 0) {
+          await salvarUsinas(agente, agente, registros);
+          // Dispara modulação de geração agora que as usinas estão no banco
+          dispararModulacaoGeracaoBackground(agente).catch(err =>
+            console.warn("[mod-ger-auto] Erro ao disparar após usinas:", err.message)
+          );
+        }
       }
     } else {
       console.log(`[usinas] Banco atualizado até "${maxUsinaDB}", sem necessidade de rebuscar`);
