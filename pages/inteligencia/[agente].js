@@ -90,8 +90,10 @@ export default function AgenteDashboard() {
   const [filtroSubU,     setFiltroSubU]     = useState("");
   const [filtroEstadoU,  setFiltroEstadoU]  = useState("");
 
-  const [modulacao,      setModulacao]      = useState(null);
-  const modulacaoIntervalRef = useRef(null);
+  const [modulacao,        setModulacao]        = useState(null);
+  const [modulacaoGer,     setModulacaoGer]     = useState(null);
+  const modulacaoIntervalRef    = useRef(null);
+  const modulacaoGerIntervalRef = useRef(null);
 
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
@@ -225,6 +227,32 @@ export default function AgenteDashboard() {
     return () => {
       clearInterval(modulacaoIntervalRef.current);
       modulacaoIntervalRef.current = null;
+    };
+  }, [agente, loadingHist]);
+
+  // ── 6. Polling modulação de geração ──────────────────────────────────────────
+  useEffect(() => {
+    if (!agente || loadingHist) return;
+
+    const fetch_ = () => {
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/modulacao-geracao`)
+        .then(r => r.json())
+        .then(json => {
+          if (json.error) return;
+          setModulacaoGer(json);
+          if (!json.calculando && modulacaoGerIntervalRef.current) {
+            clearInterval(modulacaoGerIntervalRef.current);
+            modulacaoGerIntervalRef.current = null;
+          }
+        })
+        .catch(() => {});
+    };
+
+    fetch_();
+    modulacaoGerIntervalRef.current = setInterval(fetch_, 5000);
+    return () => {
+      clearInterval(modulacaoGerIntervalRef.current);
+      modulacaoGerIntervalRef.current = null;
     };
   }, [agente, loadingHist]);
 
@@ -505,7 +533,7 @@ export default function AgenteDashboard() {
                 <table style={s.table}>
                   <thead>
                     <tr>
-                      {["Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Capacidade (kW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
+                      {["Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Capacidade (MW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
                         <th key={h} style={s.th}>{h}</th>
                       ))}
                     </tr>
@@ -689,6 +717,64 @@ export default function AgenteDashboard() {
                 </table>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Modulação de Geração ─────────────────────────────── */}
+        {!loadingHist && (loadingUsinas || usinas.length > 0) && (
+          <div style={s.chartBox}>
+            <div style={s.cargasHeader}>
+              <h2 style={s.chartTitle}>Modulação Horária — Geração</h2>
+              {modulacaoGer?.calculando && (
+                <span style={{ fontSize: 13, color: "#059669", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ ...s.spinnerSm, borderTopColor: "#059669" }} />
+                  Calculando{modulacaoGer.calculados > 0 ? ` (${modulacaoGer.calculados}/${modulacaoGer.total_meses} meses)` : "…"}
+                </span>
+              )}
+              {modulacaoGer && !modulacaoGer.calculando && modulacaoGer.calculados === 0 && (
+                <span style={{ fontSize: 13, color: "#94a3b8" }}>Sem dados de geração horária disponíveis</span>
+              )}
+            </div>
+
+            {(!modulacaoGer || (modulacaoGer.calculando && modulacaoGer.calculados === 0)) ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "24px 0" }}>
+                <span style={{ ...s.spinnerSm, borderTopColor: "#059669" }} />
+                <span style={{ fontSize: 14, color: "#64748b" }}>
+                  {modulacaoGer ? "Aguardando primeiros resultados…" : "Carregando…"}
+                </span>
+              </div>
+            ) : modulacaoGer.resultados.length > 0 ? (
+              <div style={s.tableScroll}>
+                <table style={s.table}>
+                  <thead>
+                    <tr>
+                      {["Mês","Submercado","Geração (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)"].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {modulacaoGer.resultados.map((r, i) => {
+                      const custo = Number(r.custo_modulacao_rs_mwh);
+                      const cor   = custo > 0 ? "#dc2626" : custo < 0 ? "#16a34a" : "#374151";
+                      return (
+                        <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                          <td style={s.td}>{r.mes_referencia}</td>
+                          <td style={s.td}>{r.submercado}</td>
+                          <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.geracao_total_mwh)}</td>
+                          <td style={{ ...s.td, textAlign: "right" }}>{r.n_horas}</td>
+                          <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_curva_rs)}</td>
+                          <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_flat_rs)}</td>
+                          <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: cor }}>
+                            {custo > 0 ? "+" : ""}{fmt(custo)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
           </div>
         )}
 

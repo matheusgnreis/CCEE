@@ -7,6 +7,7 @@ const cors      = require("cors");
 const rateLimit = require("express-rate-limit");
 
 const { buscarCargas }            = require("./ccee-abertos/cargas");
+const { buscarGeracaoHoraria }    = require("./ccee-abertos/geracao-horaria");
 const { buscarUsinas }            = require("./ccee-abertos/geracao");
 const { buscarMesRecente }        = require("./ccee-abertos/mcp");
 const { buscarConsumoHorario }    = require("./ccee-abertos/consumo-horario");
@@ -1061,10 +1062,13 @@ app.get("/inteligencia/:agente/historico", async (req, res) => {
       ORDER BY d.mes ASC
     `, [agente]);
 
-    // Dispara cálculo de modulação em background para meses ainda não calculados
+    // Dispara cálculo de modulação (consumo e geração) em background
     if (r.rows.length > 0) {
       dispararModulacaoBackground(agente).catch(err =>
         console.warn("[modulacao-auto] Erro ao disparar:", err.message)
+      );
+      dispararModulacaoGeracaoBackground(agente).catch(err =>
+        console.warn("[mod-ger-auto] Erro ao disparar:", err.message)
       );
     }
 
@@ -1557,8 +1561,10 @@ async function processarMesModulacao(agente, mes) {
 
   if (nConsumoDB === 0 || maxPeriodoDB < maxEsperado) {
     console.log(`[modulacao] Baixando consumo horário da CCEE...`);
+    const metaAgente  = await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
+    const razaoSocial = metaAgente.rows[0]?.razao_social || null;
     try {
-      const registros = await buscarConsumoHorario(agente, mes);
+      const registros = await buscarConsumoHorario(agente, mes, razaoSocial);
       console.log(`[modulacao] CCEE retornou ${registros.length} períodos`);
       if (registros.length > 0) await salvarConsumoHorario(agente, registros);
       else console.warn(`[modulacao] ⚠ Nenhum período de consumo encontrado para "${agente}" em ${mes}`);
@@ -1665,6 +1671,233 @@ async function dispararModulacaoBackground(agente) {
     }
   });
 }
+
+// ─── Modulação de Geração ─────────────────────────────────────────────────────
+
+async function salvarGeracaoHoraria(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_geracao_horaria (agente, mes_referencia, periodo, submercado, geracao_mwmed)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::integer[], $4::text[], $5::numeric[])
+      ON CONFLICT (agente, mes_referencia, periodo, submercado) DO NOTHING
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.periodo),
+      lote.map(r => r.submercado),
+      lote.map(r => r.geracao_mwmed),
+    ]);
+  }
+  console.log(`Geração horária: ${registros.length} períodos salvos para ${agente}`);
+}
+
+function calcularModulacaoGeracaoPorSub(geracao, pldMapa, submercadoFiltro) {
+  const registros = geracao.filter(r => r.submercado === submercadoFiltro);
+  if (!registros.length) return null;
+
+  let totalGeracao = 0;
+  let somaCurva    = 0;
+  const semPld     = [];
+
+  for (const r of registros) {
+    const geracaoMwmed = Number(r.geracao_mwmed) || 0;
+    const pld          = pldMapa[`${r.periodo}|${submercadoFiltro}`];
+    if (pld == null) { semPld.push(r.periodo); continue; }
+    totalGeracao += geracaoMwmed;
+    somaCurva    += geracaoMwmed * pld;
+  }
+
+  // soma_flat usa TODOS os períodos do PLD (inclui última hora do mês)
+  let somaPldTotal = 0, nHorasPld = 0;
+  for (const [key, pld] of Object.entries(pldMapa)) {
+    if (key.endsWith(`|${submercadoFiltro}`)) { somaPldTotal += pld; nHorasPld++; }
+  }
+
+  console.log(`[calc-mod-ger] sub=${submercadoFiltro}: ${registros.length} geração | ${nHorasPld} PLD | ${semPld.length} sem match`);
+  if (!nHorasPld || !totalGeracao) return null;
+
+  const flat           = totalGeracao / nHorasPld;
+  const somaFlat       = flat * somaPldTotal;
+  const custoModulacao = (somaCurva - somaFlat) / totalGeracao;
+
+  return {
+    submercado:              submercadoFiltro,
+    geracao_total_mwh:       Number(totalGeracao.toFixed(4)),
+    n_horas:                 nHorasPld,
+    soma_curva_rs:           Number(somaCurva.toFixed(4)),
+    soma_flat_rs:            Number(somaFlat.toFixed(4)),
+    custo_modulacao_rs_mwh:  Number(custoModulacao.toFixed(4)),
+  };
+}
+
+async function salvarModulacaoGeracao(agente, mes, resultados) {
+  if (!resultados.length) return;
+  await pool.query(`
+    INSERT INTO ccee_modulacao_geracao
+      (agente, mes_referencia, submercado, geracao_total_mwh, n_horas, soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh)
+    SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::integer[], $6::numeric[], $7::numeric[], $8::numeric[])
+    ON CONFLICT (agente, mes_referencia, submercado) DO UPDATE SET
+      geracao_total_mwh      = EXCLUDED.geracao_total_mwh,
+      n_horas                = EXCLUDED.n_horas,
+      soma_curva_rs          = EXCLUDED.soma_curva_rs,
+      soma_flat_rs           = EXCLUDED.soma_flat_rs,
+      custo_modulacao_rs_mwh = EXCLUDED.custo_modulacao_rs_mwh,
+      created_at             = NOW()
+  `, [
+    resultados.map(() => agente),
+    resultados.map(() => mes),
+    resultados.map(r => r.submercado),
+    resultados.map(r => r.geracao_total_mwh),
+    resultados.map(r => r.n_horas),
+    resultados.map(r => r.soma_curva_rs),
+    resultados.map(r => r.soma_flat_rs),
+    resultados.map(r => r.custo_modulacao_rs_mwh),
+  ]);
+  console.log(`Modulação geração: ${resultados.length} submercados salvos para ${agente} ${mes}`);
+}
+
+async function processarMesModulacaoGeracao(agente, mes, siglasUsinas) {
+  const [ano, mesNum] = mes.split("-").map(Number);
+  const maxEsperado   = new Date(ano, mesNum, 0).getDate() * 24;
+
+  const check = await pool.query(
+    "SELECT MAX(periodo) AS max_periodo FROM ccee_geracao_horaria WHERE agente = $1 AND mes_referencia = $2",
+    [agente, mes]
+  );
+  const maxAtual     = Number(check.rows[0]?.max_periodo || 0);
+  const periodoErrado = maxAtual > 0 && maxAtual < maxEsperado;
+
+  const jaCalculado = await pool.query(
+    "SELECT 1 FROM ccee_modulacao_geracao WHERE agente = $1 AND mes_referencia = $2 LIMIT 1",
+    [agente, mes]
+  );
+  if (jaCalculado.rows.length > 0 && !periodoErrado) return "already_done";
+  if (periodoErrado) {
+    await pool.query("DELETE FROM ccee_modulacao_geracao WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+    await pool.query("DELETE FROM ccee_geracao_horaria  WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+  }
+
+  const nDB = await pool.query(
+    "SELECT COUNT(*) AS n FROM ccee_geracao_horaria WHERE agente = $1 AND mes_referencia = $2",
+    [agente, mes]
+  );
+  const nGeracaoDB = Number(nDB.rows[0].n);
+
+  if (nGeracaoDB === 0 || periodoErrado) {
+    console.log(`[mod-ger] Baixando geração horária ${agente} ${mes}...`);
+    try {
+      const registros = await buscarGeracaoHoraria(mes, siglasUsinas);
+      if (registros.length > 0) await salvarGeracaoHoraria(agente, registros);
+      else { console.warn(`[mod-ger] ⚠ Sem geração para ${agente} em ${mes}`); return "no_generation"; }
+    } catch (err) {
+      console.error(`[mod-ger] ✖ Erro ao baixar geração: ${err.message}`);
+      throw err;
+    }
+  }
+
+  const rGeracao = await pool.query(
+    "SELECT periodo, submercado, geracao_mwmed FROM ccee_geracao_horaria WHERE agente = $1 AND mes_referencia = $2 ORDER BY periodo",
+    [agente, mes]
+  );
+  if (!rGeracao.rows.length) return "no_generation";
+
+  const pldMapa     = await buscarPldHorarioMapa(mes);
+  const submercados = [...new Set(rGeracao.rows.map(r => r.submercado))];
+  const resultados  = submercados.map(s => calcularModulacaoGeracaoPorSub(rGeracao.rows, pldMapa, s)).filter(Boolean);
+
+  if (resultados.length) await salvarModulacaoGeracao(agente, mes, resultados);
+  return resultados.length ? "done" : "no_results";
+}
+
+const modulacaoGeracaoEmAndamento = new Set();
+
+async function dispararModulacaoGeracaoBackground(agente) {
+  if (modulacaoGeracaoEmAndamento.has(agente)) return;
+
+  // Busca siglas das usinas do agente no banco
+  const rUsinas = await pool.query(
+    "SELECT DISTINCT sigla_parcela_usina FROM ccee_usinas WHERE agente = $1 AND sigla_parcela_usina IS NOT NULL",
+    [agente]
+  );
+  if (!rUsinas.rows.length) return; // sem usinas, não calcula
+
+  const siglasUsinas = rUsinas.rows.map(r => r.sigla_parcela_usina);
+
+  const [calculados, todos, maxPorMesRows] = await Promise.all([
+    pool.query("SELECT mes_referencia FROM ccee_modulacao_geracao WHERE agente = $1", [agente]),
+    pool.query("SELECT mes FROM ccee_dados WHERE agente = $1 ORDER BY mes DESC", [agente]),
+    pool.query("SELECT mes_referencia, MAX(periodo) AS max_periodo FROM ccee_geracao_horaria WHERE agente = $1 GROUP BY mes_referencia", [agente]),
+  ]);
+
+  const calculadosSet = new Set(calculados.rows.map(r => r.mes_referencia));
+  const maxPorMes     = {};
+  maxPorMesRows.rows.forEach(r => { maxPorMes[r.mes_referencia] = Number(r.max_periodo); });
+
+  const mesesPendentes = todos.rows
+    .map(r => r.mes)
+    .filter(m => {
+      if (m < PRIMEIRO_MES_PLD) return false;
+      if (!calculadosSet.has(m)) return true;
+      const [ano, mesNum] = m.split("-").map(Number);
+      const maxEsperado   = new Date(ano, mesNum, 0).getDate() * 24;
+      const maxAtual      = maxPorMes[m] || 0;
+      return maxAtual > 0 && maxAtual < maxEsperado;
+    });
+
+  if (!mesesPendentes.length) return;
+
+  modulacaoGeracaoEmAndamento.add(agente);
+  console.log(`[mod-ger-auto] ${agente}: ${mesesPendentes.length} meses | ${siglasUsinas.length} usinas`);
+
+  setImmediate(async () => {
+    try {
+      for (const mes of mesesPendentes) {
+        try {
+          const status = await processarMesModulacaoGeracao(agente, mes, siglasUsinas);
+          console.log(`[mod-ger-auto] ${agente} ${mes}: ${status}`);
+        } catch (err) {
+          console.warn(`[mod-ger-auto] Erro em ${agente} ${mes}: ${err.message}`);
+        }
+      }
+    } finally {
+      modulacaoGeracaoEmAndamento.delete(agente);
+      console.log(`[mod-ger-auto] ${agente}: batch concluído`);
+    }
+  });
+}
+
+// GET /inteligencia/:agente/modulacao-geracao
+app.get("/inteligencia/:agente/modulacao-geracao", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+  try {
+    const [resultados, totalMeses] = await Promise.all([
+      pool.query(`
+        SELECT mes_referencia, submercado, geracao_total_mwh, n_horas,
+               custo_modulacao_rs_mwh, soma_curva_rs, soma_flat_rs
+        FROM ccee_modulacao_geracao
+        WHERE agente = $1
+        ORDER BY mes_referencia DESC, submercado ASC
+      `, [agente]),
+      pool.query(`SELECT COUNT(*) AS total FROM ccee_dados WHERE agente = $1 AND mes >= $2`, [agente, PRIMEIRO_MES_PLD]),
+    ]);
+
+    return res.json({
+      calculando: modulacaoGeracaoEmAndamento.has(agente),
+      total_meses: Number(totalMeses.rows[0].total),
+      calculados:  resultados.rows.length,
+      resultados:  resultados.rows,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 // ─── Jobs ─────────────────────────────────────────────────────────────────────
 
@@ -1818,6 +2051,44 @@ app.post("/admin/cleanup-jobs", async (_req, res) => {
   try {
     const corrigidos = await limparJobsTravados(pool);
     return res.json({ corrigidos: corrigidos.length, jobs: corrigidos });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /modulacao/status — visão geral de todos os agentes com progresso de modulação
+app.get("/modulacao/status", async (_req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        a.agente,
+        a.razao_social,
+        COUNT(DISTINCT d.mes) FILTER (WHERE d.mes >= $1)  AS total_meses,
+        COUNT(DISTINCT m.mes_referencia)                   AS calculados,
+        MAX(m.mes_referencia)                              AS ultimo_mes,
+        ROUND(AVG(m.custo_modulacao_rs_mwh)::numeric, 4)  AS custo_medio
+      FROM ccee_agentes a
+      LEFT JOIN ccee_dados     d ON d.agente = a.agente
+      LEFT JOIN ccee_modulacao m ON m.agente = a.agente
+      GROUP BY a.agente, a.razao_social
+      HAVING COUNT(DISTINCT d.mes) > 0
+      ORDER BY a.agente
+    `, [PRIMEIRO_MES_PLD]);
+
+    const emAndamento = [...modulacaoEmAndamento];
+
+    return res.json({
+      em_andamento: emAndamento,
+      agentes: r.rows.map(row => ({
+        agente:       row.agente,
+        razao_social: row.razao_social,
+        calculando:   emAndamento.includes(row.agente),
+        total_meses:  Number(row.total_meses),
+        calculados:   Number(row.calculados),
+        ultimo_mes:   row.ultimo_mes || null,
+        custo_medio:  row.custo_medio != null ? Number(row.custo_medio) : null,
+      })),
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

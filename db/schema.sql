@@ -143,6 +143,41 @@ CREATE TABLE ccee_modulacao (
 CREATE INDEX idx_mod_agente ON ccee_modulacao (agente);
 CREATE INDEX idx_mod_mes    ON ccee_modulacao (mes_referencia);
 
+-- ─── Geração horária ─────────────────────────────────────────────────────────
+-- periodo = hora-do-mês base 1 (1–744). geracao_mwmed = GERACAO_CENTRO_GRAVIDADE.
+CREATE TABLE ccee_geracao_horaria (
+  id             SERIAL      PRIMARY KEY,
+  agente         TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  mes_referencia CHAR(7)     NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  periodo        INTEGER     NOT NULL,
+  submercado     TEXT        NOT NULL,
+  geracao_mwmed  NUMERIC     NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uniq_geracao_horaria UNIQUE (agente, mes_referencia, periodo, submercado)
+);
+
+CREATE INDEX idx_gh_agente     ON ccee_geracao_horaria (agente);
+CREATE INDEX idx_gh_mes        ON ccee_geracao_horaria (mes_referencia);
+CREATE INDEX idx_gh_submercado ON ccee_geracao_horaria (submercado);
+
+-- ─── Modulação horária de geração ─────────────────────────────────────────────
+CREATE TABLE ccee_modulacao_geracao (
+  id                     SERIAL      PRIMARY KEY,
+  agente                 TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  mes_referencia         CHAR(7)     NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  submercado             TEXT        NOT NULL,
+  geracao_total_mwh      NUMERIC     NOT NULL,
+  n_horas                INTEGER     NOT NULL,
+  soma_curva_rs          NUMERIC     NOT NULL,
+  soma_flat_rs           NUMERIC     NOT NULL,
+  custo_modulacao_rs_mwh NUMERIC     NOT NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uniq_modulacao_geracao UNIQUE (agente, mes_referencia, submercado)
+);
+
+CREATE INDEX idx_modg_agente ON ccee_modulacao_geracao (agente);
+CREATE INDEX idx_modg_mes    ON ccee_modulacao_geracao (mes_referencia);
+
 -- ─── Jobs assíncronos ─────────────────────────────────────────────────────────
 CREATE TABLE ccee_jobs (
   id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

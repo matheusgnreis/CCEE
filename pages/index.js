@@ -93,6 +93,7 @@ export default function Home() {
       <nav style={s.nav}>
         <div className="nav-inner" style={s.navInner}>
           <span style={s.logo}>⚡Monitoramento Mercado Livre</span>
+          <Link href="/modulacao" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600 }}>Modulação →</Link>
         </div>
       </nav>
 

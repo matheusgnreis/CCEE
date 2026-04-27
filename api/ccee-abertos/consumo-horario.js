@@ -152,8 +152,9 @@ async function streamCsv(url, processLinha) {
  * @param {string} mes - "YYYY-MM"
  * @returns {Promise<Array<{ sigla_perfil_agente, mes_referencia, periodo, submercado, consumo_mwh }>>}
  */
-async function buscarConsumoHorario(siglaPerfilAgente, mes) {
+async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) {
   siglaPerfilAgente = siglaPerfilAgente.trim().toUpperCase();
+  const nomeEmpresarial = razaoSocial ? razaoSocial.trim().toUpperCase() : null;
 
   const recursos = await listarRecursos();
   const recurso  = recursos.find(r => r.mes === mes);
@@ -163,30 +164,30 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes) {
     throw new Error(`Mês ${mes} não disponível. Meses: ${disponiveis}`);
   }
 
-  console.log(`\n📥 Consumo horário | agente="${siglaPerfilAgente}" | mês=${mes}`);
+  console.log(`\n📥 Consumo horário | agente="${siglaPerfilAgente}"${nomeEmpresarial ? ` | nome="${nomeEmpresarial}"` : ""} | mês=${mes}`);
   console.log(`  URL: ${recurso.url}`);
 
-  // Normaliza submercado: CSV usa "SUDESTE"/"SUL"/"NORDESTE"/"NORTE", PLD usa "SE"/"S"/"NE"/"N"
   const SUB_MAP = {
     SUDESTE: "SE", "SUDESTE/CENTRO-OESTE": "SE", SECO: "SE",
-    SUL: "S",
-    NORDESTE: "NE",
-    NORTE: "N",
+    SUL: "S", NORDESTE: "NE", NORTE: "N",
     SE: "SE", S: "S", NE: "NE", N: "N",
   };
 
-  const agregado       = {};
-  let   encontrou      = false;
-  let   siglasAmostra  = new Set();
+  const agregado        = {};
+  let   encontrou       = false;
+  let   siglasAmostra   = new Set();
   let   subBrutoAmostra = new Set();
+  const vistosKey       = new Set(); // dedup quando ambos os filtros batem na mesma linha
 
   const headers = await streamCsv(recurso.url, (row) => {
     const sigla = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
+    const nome  = (row.NOME_EMPRESARIAL    || "").trim().toUpperCase();
 
-    // Coleta amostra de siglas para diagnóstico (primeiras 20 únicas)
     if (siglasAmostra.size < 20) siglasAmostra.add(sigla);
 
-    if (sigla !== siglaPerfilAgente) return;
+    const bateSigla = sigla === siglaPerfilAgente;
+    const bateNome  = nomeEmpresarial && nome === nomeEmpresarial;
+    if (!bateSigla && !bateNome) return;
 
     encontrou = true;
 
@@ -226,7 +227,8 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes) {
 
   if (!encontrou) {
     const parecidos = [...siglasAmostra].filter(s => s.includes(siglaPerfilAgente.slice(0, 6)));
-    if (parecidos.length) console.warn(`  Nomes parecidos: ${parecidos.slice(0, 5).join(", ")}`);
+    if (parecidos.length) console.warn(`  Nomes parecidos (sigla): ${parecidos.slice(0, 5).join(", ")}`);
+    if (nomeEmpresarial) console.warn(`  Também tentou NOME_EMPRESARIAL="${nomeEmpresarial}" sem resultado`);
   }
 
   const resultado = Object.values(agregado).sort((a, b) => a.periodo - b.periodo);
