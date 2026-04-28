@@ -271,11 +271,12 @@ export default function AgenteDashboard() {
           .metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
           .cargas-grid  { grid-template-columns: repeat(2, 1fr) !important; }
           .agent-name   { font-size: 20px !important; }
+          .card-value   { font-size: 19px !important; flex-wrap: wrap; }
         }
         @media (max-width: 480px) {
           .metrics-grid { grid-template-columns: 1fr 1fr !important; }
           .cargas-grid  { grid-template-columns: 1fr 1fr !important; }
-          .card-value   { font-size: 18px !important; }
+          .card-value   { font-size: 15px !important; flex-wrap: wrap; }
         }
       `}</style>
 
@@ -815,10 +816,10 @@ const s = {
   mesLoading: { fontSize: 12, color: "#94a3b8" },
 
   grid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 },
-  card:       { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "18px 20px" },
+  card:       { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "18px 20px", minWidth: 0, overflow: "hidden" },
   cardAlerta: { border: "1px solid #fecaca", background: "#fff7f7" },
   cardLabel:  { fontSize: 12, color: "#6b7280", margin: "0 0 6px", fontWeight: 600 },
-  cardValue:  { fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: -0.5, transition: "color 0.2s", display: "flex", alignItems: "center", gap: 8 },
+  cardValue:  { fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: -0.5, transition: "color 0.2s", display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" },
   alertaIcon: { fontSize: 18, lineHeight: 1 },
 
   chartBox:   { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 24px 12px", marginBottom: 20, overflow: "hidden", minWidth: 0 },
@@ -829,7 +830,7 @@ const s = {
   filtroSelect: { fontSize: 13, padding: "7px 10px", border: "1.5px solid #e2e8f0", borderRadius: 7, background: "#fff", color: "#374151", cursor: "pointer" },
   filtroInput:  { fontSize: 13, padding: "7px 10px", border: "1.5px solid #e2e8f0", borderRadius: 7, color: "#374151", outline: "none", minWidth: 160 },
 
-  cargasResumo: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 },
+  cargasResumo: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 12, marginBottom: 24 },
 
   tableWrap:   { overflowX: "auto" },
   tableScroll: { overflowX: "auto", overflowY: "auto", maxHeight: 360 },

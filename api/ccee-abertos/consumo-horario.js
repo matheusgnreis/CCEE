@@ -13,6 +13,24 @@ const TIMEOUT_CKAN = 30000;  // CKAN metadata
 const TIMEOUT_DL   = 600000; // download de arquivo (até 10 min para gzip de 400MB)
 const USER_AGENT   = "Mozilla/5.0 (compatible; CCEEMonitor/1.0)";
 
+function stripAccents(s) {
+  return s.normalize("NFD").replace(/̀-ͯ/g, "");
+}
+
+// Mutex por URL: evita que dois agentes baixem o mesmo arquivo simultaneamente
+// (a CCEE dropa a segunda conexão para o mesmo recurso no mesmo IP)
+const _dlEmAndamento = new Map(); // url → Promise
+
+function downloadExclusivo(url, fn) {
+  if (_dlEmAndamento.has(url)) {
+    console.log(`  ⏳ Aguardando outro download do mesmo arquivo...`);
+    return _dlEmAndamento.get(url).then(() => downloadExclusivo(url, fn));
+  }
+  const p = fn().finally(() => _dlEmAndamento.delete(url));
+  _dlEmAndamento.set(url, p);
+  return p;
+}
+
 // ─── CKAN ─────────────────────────────────────────────────────────────────────
 
 async function ckanGet(action, params = {}) {
@@ -154,7 +172,7 @@ async function streamCsv(url, processLinha) {
  */
 async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) {
   siglaPerfilAgente = siglaPerfilAgente.trim().toUpperCase();
-  const nomeEmpresarial = razaoSocial ? razaoSocial.trim().toUpperCase() : null;
+  const nomeEmpresarial = razaoSocial ? stripAccents(razaoSocial.trim().toUpperCase()) : null;
 
   const recursos = await listarRecursos();
   const recurso  = recursos.find(r => r.mes === mes);
@@ -179,15 +197,18 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
   let   subBrutoAmostra = new Set();
   const vistosKey       = new Set(); // dedup quando ambos os filtros batem na mesma linha
 
-  const headers = await streamCsv(recurso.url, (row) => {
+  const headers = await downloadExclusivo(recurso.url, () => streamCsv(recurso.url, (row) => {
     const sigla = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
-    const nome  = (row.NOME_EMPRESARIAL    || "").trim().toUpperCase();
-
     if (siglasAmostra.size < 20) siglasAmostra.add(sigla);
 
-    const bateSigla = sigla === siglaPerfilAgente;
-    const bateNome  = nomeEmpresarial && nome === nomeEmpresarial;
-    if (!bateSigla && !bateNome) return;
+    // Se temos razão social, filtra exclusivamente por NOME_EMPRESARIAL (cobre todos os perfis da empresa)
+    // Caso contrário cai na sigla exata
+    if (nomeEmpresarial) {
+      const nome = stripAccents((row.NOME_EMPRESARIAL || "").trim().toUpperCase());
+      if (nome !== nomeEmpresarial) return;
+    } else {
+      if (sigla !== siglaPerfilAgente) return;
+    }
 
     encontrou = true;
 
@@ -217,18 +238,15 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
       agregado[key] = { sigla_perfil_agente: siglaPerfilAgente, mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
     }
     agregado[key].consumo_mwh += consumo;
-  });
+  }));
 
   console.log(`  Submercado bruto (amostra): ${[...subBrutoAmostra].join(", ")}`);
-
-  console.log(`  Headers: ${(headers || []).join(" | ")}`);
-  console.log(`  Siglas (amostra): ${[...siglasAmostra].slice(0, 10).join(", ")}`);
   console.log(`  Agente "${siglaPerfilAgente}" encontrado: ${encontrou ? "SIM ✅" : "NÃO ⚠"}`);
 
   if (!encontrou) {
     const parecidos = [...siglasAmostra].filter(s => s.includes(siglaPerfilAgente.slice(0, 6)));
     if (parecidos.length) console.warn(`  Nomes parecidos (sigla): ${parecidos.slice(0, 5).join(", ")}`);
-    if (nomeEmpresarial) console.warn(`  Também tentou NOME_EMPRESARIAL="${nomeEmpresarial}" sem resultado`);
+    if (nomeEmpresarial) console.warn(`  Tentou NOME_EMPRESARIAL="${nomeEmpresarial}" — sem resultado`);
   }
 
   const resultado = Object.values(agregado).sort((a, b) => a.periodo - b.periodo);

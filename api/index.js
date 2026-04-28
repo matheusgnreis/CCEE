@@ -1534,18 +1534,23 @@ async function processarMesModulacao(agente, mes) {
   const maxPeriodoCheck = Number(formatoCheck.rows[0]?.max_periodo || 0);
   const periodoErrado   = maxPeriodoCheck > 0 && maxPeriodoCheck < maxEsperado;
 
-  const jaCalculado = await pool.query(
-    "SELECT 1 FROM ccee_modulacao WHERE agente = $1 AND mes_referencia = $2 LIMIT 1",
-    [agente, mes]
-  );
-  if (jaCalculado.rows.length > 0 && !periodoErrado) {
+  const [jaCalculado, nConsumoCheck] = await Promise.all([
+    pool.query("SELECT 1 FROM ccee_modulacao WHERE agente = $1 AND mes_referencia = $2 LIMIT 1", [agente, mes]),
+    pool.query("SELECT COUNT(*) AS n FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+  ]);
+  const semConsumo = Number(nConsumoCheck.rows[0].n) === 0;
+
+  if (jaCalculado.rows.length > 0 && !periodoErrado && !semConsumo) {
     console.log(`[modulacao] ${mes}: já calculado (max_periodo=${maxPeriodoCheck}/${maxEsperado}), pulando`);
     return "already_done";
   }
   if (periodoErrado) {
     console.warn(`[modulacao] ⚠ Períodos descasados (max=${maxPeriodoCheck}, esperado=${maxEsperado}) — deletando e recalculando`);
-    await pool.query("DELETE FROM ccee_modulacao     WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+    await pool.query("DELETE FROM ccee_modulacao       WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
     await pool.query("DELETE FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+  } else if (jaCalculado.rows.length > 0 && semConsumo) {
+    console.warn(`[modulacao] ⚠ Modulação existe mas consumo ausente — recalculando ${mes}`);
+    await pool.query("DELETE FROM ccee_modulacao WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
   }
 
   const existeConsumo = await pool.query(
@@ -1774,7 +1779,9 @@ async function processarMesModulacaoGeracao(agente, mes, siglasUsinas) {
     [agente, mes]
   );
   const maxAtual     = Number(check.rows[0]?.max_periodo || 0);
-  const periodoErrado = maxAtual > 0 && maxAtual < maxEsperado;
+  // Detecta indexação errada: < esperado (dados incompletos) ou > esperado (bug antigo que
+  // aplicava conversão hora-do-dia em período absoluto, gerando períodos até ~1465 para 31 dias)
+  const periodoErrado = maxAtual > 0 && maxAtual !== maxEsperado;
 
   const jaCalculado = await pool.query(
     "SELECT 1 FROM ccee_modulacao_geracao WHERE agente = $1 AND mes_referencia = $2 LIMIT 1",
@@ -1850,7 +1857,7 @@ async function dispararModulacaoGeracaoBackground(agente) {
       const [ano, mesNum] = m.split("-").map(Number);
       const maxEsperado   = new Date(ano, mesNum, 0).getDate() * 24;
       const maxAtual      = maxPorMes[m] || 0;
-      return maxAtual > 0 && maxAtual < maxEsperado;
+      return maxAtual > 0 && maxAtual !== maxEsperado;
     });
 
   if (!mesesPendentes.length) return;
@@ -2052,6 +2059,57 @@ if (process.env.NODE_ENV !== "test") {
   }, 6 * 60 * 60 * 1000);
 }
 
+// POST /admin/modulacao/:agente — dispara manualmente o job de modulação (carga + geração)
+app.post("/admin/modulacao/:agente", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const { carga = true, geracao = true } = req.query;
+
+  try {
+    const jobs = [];
+    if (String(carga) !== "false") {
+      jobs.push(
+        dispararModulacaoBackground(agente)
+          .then(() => "carga: disparado")
+          .catch(e => `carga: erro — ${e.message}`)
+      );
+    }
+    if (String(geracao) !== "false") {
+      jobs.push(
+        dispararModulacaoGeracaoBackground(agente)
+          .then(() => "geracao: disparado")
+          .catch(e => `geracao: erro — ${e.message}`)
+      );
+    }
+    const resultados = await Promise.all(jobs);
+    return res.json({ agente, status: resultados });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /admin/consumo-horario/:agente?mes=YYYY-MM — força re-download do consumo
+// Sem ?mes: deleta todo o consumo do agente. Com ?mes: deleta só aquele mês.
+app.delete("/admin/consumo-horario/:agente", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const mes    = req.query.mes;
+
+  if (mes && !/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Formato de mês inválido (YYYY-MM)" });
+
+  try {
+    const params = mes ? [agente, mes] : [agente];
+    const where  = mes ? "agente = $1 AND mes_referencia = $2" : "agente = $1";
+
+    const rC = await pool.query(`DELETE FROM ccee_consumo_horario WHERE ${where} RETURNING 1`, params);
+    const rM = await pool.query(`DELETE FROM ccee_modulacao       WHERE ${where} RETURNING 1`, params);
+
+    console.log(`[admin] Consumo/modulação deletados para ${agente}${mes ? ` ${mes}` : " (todos os meses)"}`);
+    return res.json({ agente, mes: mes || "todos", consumo_deletado: rC.rowCount, modulacao_deletada: rM.rowCount });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /admin/cleanup-jobs — permite acionar limpeza manualmente via curl/Postman
 app.post("/admin/cleanup-jobs", async (_req, res) => {
   try {
@@ -2062,37 +2120,50 @@ app.post("/admin/cleanup-jobs", async (_req, res) => {
   }
 });
 
-// GET /modulacao/status — visão geral de todos os agentes com progresso de modulação
+// GET /modulacao/status — visão geral de todos os agentes: carga e geração
 app.get("/modulacao/status", async (_req, res) => {
   try {
     const r = await pool.query(`
       SELECT
         a.agente,
         a.razao_social,
-        COUNT(DISTINCT d.mes) FILTER (WHERE d.mes >= $1)  AS total_meses,
-        COUNT(DISTINCT m.mes_referencia)                   AS calculados,
-        MAX(m.mes_referencia)                              AS ultimo_mes,
-        ROUND(AVG(m.custo_modulacao_rs_mwh)::numeric, 4)  AS custo_medio
+        COUNT(DISTINCT d.mes) FILTER (WHERE d.mes >= $1)   AS total_meses,
+        COUNT(DISTINCT m.mes_referencia)                    AS calculados_carga,
+        MAX(m.mes_referencia)                               AS ultimo_mes_carga,
+        ROUND(AVG(m.custo_modulacao_rs_mwh)::numeric, 4)   AS custo_medio_carga,
+        COUNT(DISTINCT mg.mes_referencia)                   AS calculados_geracao,
+        MAX(mg.mes_referencia)                              AS ultimo_mes_geracao,
+        ROUND(AVG(mg.custo_modulacao_rs_mwh)::numeric, 4)  AS custo_medio_geracao
       FROM ccee_agentes a
-      LEFT JOIN ccee_dados     d ON d.agente = a.agente
-      LEFT JOIN ccee_modulacao m ON m.agente = a.agente
+      LEFT JOIN ccee_dados              d  ON d.agente  = a.agente
+      LEFT JOIN ccee_modulacao          m  ON m.agente  = a.agente
+      LEFT JOIN ccee_modulacao_geracao  mg ON mg.agente = a.agente
       GROUP BY a.agente, a.razao_social
       HAVING COUNT(DISTINCT d.mes) > 0
       ORDER BY a.agente
     `, [PRIMEIRO_MES_PLD]);
 
-    const emAndamento = [...modulacaoEmAndamento];
+    const emAndamentoCarga   = [...modulacaoEmAndamento];
+    const emAndamentoGeracao = [...modulacaoGeracaoEmAndamento];
 
     return res.json({
-      em_andamento: emAndamento,
+      em_andamento: [...new Set([...emAndamentoCarga, ...emAndamentoGeracao])],
       agentes: r.rows.map(row => ({
         agente:       row.agente,
         razao_social: row.razao_social,
-        calculando:   emAndamento.includes(row.agente),
         total_meses:  Number(row.total_meses),
-        calculados:   Number(row.calculados),
-        ultimo_mes:   row.ultimo_mes || null,
-        custo_medio:  row.custo_medio != null ? Number(row.custo_medio) : null,
+        carga: {
+          calculando:  emAndamentoCarga.includes(row.agente),
+          calculados:  Number(row.calculados_carga),
+          ultimo_mes:  row.ultimo_mes_carga || null,
+          custo_medio: row.custo_medio_carga != null ? Number(row.custo_medio_carga) : null,
+        },
+        geracao: {
+          calculando:  emAndamentoGeracao.includes(row.agente),
+          calculados:  Number(row.calculados_geracao),
+          ultimo_mes:  row.ultimo_mes_geracao || null,
+          custo_medio: row.custo_medio_geracao != null ? Number(row.custo_medio_geracao) : null,
+        },
       })),
     });
   } catch (e) {

@@ -10,6 +10,17 @@ const CKAN_BASE    = "https://dadosabertos.ccee.org.br/api/3/action";
 const DATASET_SLUG = "geracao_horaria_usina";
 const TIMEOUT_CKAN = 30000;
 const TIMEOUT_DL   = 600000;
+
+const _dlEmAndamento = new Map();
+function downloadExclusivo(url, fn) {
+  if (_dlEmAndamento.has(url)) {
+    console.log(`  ⏳ Aguardando outro download do mesmo arquivo...`);
+    return _dlEmAndamento.get(url).then(() => downloadExclusivo(url, fn));
+  }
+  const p = fn().finally(() => _dlEmAndamento.delete(url));
+  _dlEmAndamento.set(url, p);
+  return p;
+}
 const USER_AGENT   = "Mozilla/5.0 (compatible; CCEEMonitor/1.0)";
 
 const SUB_MAP = { SUDESTE: "SE", SUL: "S", NORDESTE: "NE", NORTE: "N", SE: "SE", S: "S", NE: "NE", N: "N" };
@@ -134,17 +145,14 @@ async function buscarGeracaoHoraria(mes, siglasUsinas) {
   let   encontrou   = false;
   let   amostraSubs = new Set();
 
-  await streamCsv(recurso.url, (row) => {
+  await downloadExclusivo(recurso.url, () => streamCsv(recurso.url, (row) => {
     const sigla = (row.SIGLA_USINA || "").trim().toUpperCase();
     if (!siglasSet.has(sigla)) return;
 
     encontrou = true;
-    const horaDia = parseInt(row.PERIODO_COMERCIALIZACAO, 10);
-    const dataStr = (row.DATA || "").trim();
-    let diaMes    = 1;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dataStr))     diaMes = parseInt(dataStr.slice(8, 10), 10);
-    else if (/^\d{2}\/\d{2}\/\d{4}$/.test(dataStr)) diaMes = parseInt(dataStr.slice(0, 2), 10);
-    const periodo = (diaMes - 1) * 24 + horaDia + 1;
+    // Geração: PERIODO_COMERCIALIZACAO já é o período absoluto do mês (1–744)
+    // Diferente do consumo que usa hora-do-dia (0–23) e precisa de conversão
+    const periodo = parseInt(row.PERIODO_COMERCIALIZACAO, 10);
 
     const subBruto   = (row.SUBMERCADO || "").trim().toUpperCase();
     if (amostraSubs.size < 5) amostraSubs.add(subBruto);
@@ -158,7 +166,7 @@ async function buscarGeracaoHoraria(mes, siglasUsinas) {
       agregado[key] = { mes_referencia: mes, periodo, submercado, geracao_mwmed: 0 };
     }
     agregado[key].geracao_mwmed += geracao;
-  });
+  }));
 
   console.log(`  Submercado bruto (amostra): ${[...amostraSubs].join(", ")}`);
   console.log(`  Usinas encontradas: ${encontrou ? "SIM ✅" : "NÃO ⚠"}`);
@@ -174,4 +182,4 @@ async function mesesDisponiveis() {
   return (await listarRecursos()).map(r => r.mes);
 }
 
-module.exports = { buscarGeracaoHoraria, mesesDisponiveis };
+module.exports = { buscarGeracaoHoraria, mesesDisponiveis, listarRecursos };
