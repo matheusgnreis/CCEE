@@ -83,6 +83,8 @@ export default function Home() {
           .hero-section { padding: 64px 16px 48px !important; }
           .section-pad  { padding: 48px 16px !important; }
           .cta-section  { padding: 48px 16px !important; }
+          .nav-logo     { font-size: 14px !important; }
+          .nav-logo-txt { display: none; }
         }
         @media (max-width: 480px) {
           .search-input { font-size: 13px !important; padding: 14px 12px !important; }
@@ -92,8 +94,10 @@ export default function Home() {
       {/* ── Navbar ─────────────────────────────────────────────── */}
       <nav style={s.nav}>
         <div className="nav-inner" style={s.navInner}>
-          <span style={s.logo}>⚡Monitoramento Mercado Livre</span>
-          <Link href="/modulacao" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600 }}>Modulação →</Link>
+          <span className="nav-logo" style={s.logo}>
+            ⚡<span className="nav-logo-txt"> Monitoramento Mercado Livre</span>
+          </span>
+          <Link href="/modulacao" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}>Modulação →</Link>
         </div>
       </nav>
 
