@@ -141,6 +141,8 @@ async function buscarGeracaoHoraria(mes, siglasUsinas) {
   console.log(`\n📥 Geração horária | mês=${mes} | usinas=${[...siglasSet].join(",")}`);
   console.log(`  URL: ${recurso.url}`);
 
+  // Armazena por (sigla_usina, periodo, submercado) — sem agregar usinas
+  // para permitir curva de carga separada por unidade geradora
   const agregado    = {};
   let   encontrou   = false;
   let   amostraSubs = new Set();
@@ -150,8 +152,6 @@ async function buscarGeracaoHoraria(mes, siglasUsinas) {
     if (!siglasSet.has(sigla)) return;
 
     encontrou = true;
-    // Geração: PERIODO_COMERCIALIZACAO já é o período absoluto do mês (1–744)
-    // Diferente do consumo que usa hora-do-dia (0–23) e precisa de conversão
     const periodo = parseInt(row.PERIODO_COMERCIALIZACAO, 10);
 
     const subBruto   = (row.SUBMERCADO || "").trim().toUpperCase();
@@ -161,9 +161,9 @@ async function buscarGeracaoHoraria(mes, siglasUsinas) {
     const geracao = parseFloat((row.GERACAO_CENTRO_GRAVIDADE || "0").replace(",", ".")) || 0;
     if (!periodo || !submercado) return;
 
-    const key = `${periodo}|${submercado}`;
+    const key = `${sigla}|${periodo}|${submercado}`;
     if (!agregado[key]) {
-      agregado[key] = { mes_referencia: mes, periodo, submercado, geracao_mwmed: 0 };
+      agregado[key] = { mes_referencia: mes, sigla_usina: sigla, periodo, submercado, geracao_mwmed: 0 };
     }
     agregado[key].geracao_mwmed += geracao;
   }));
@@ -171,10 +171,10 @@ async function buscarGeracaoHoraria(mes, siglasUsinas) {
   console.log(`  Submercado bruto (amostra): ${[...amostraSubs].join(", ")}`);
   console.log(`  Usinas encontradas: ${encontrou ? "SIM ✅" : "NÃO ⚠"}`);
 
-  const resultado = Object.values(agregado).sort((a, b) => a.periodo - b.periodo);
-  const subs      = [...new Set(resultado.map(r => r.submercado))];
-  console.log(`  Submercados: ${subs.join(", ") || "(nenhum)"} | Período ${resultado[0]?.periodo}–${resultado[resultado.length - 1]?.periodo}`);
-  console.log(`  ✅ ${resultado.length} períodos de geração`);
+  const resultado = Object.values(agregado).sort((a, b) => a.periodo - b.periodo || a.sigla_usina.localeCompare(b.sigla_usina));
+  const usinas    = [...new Set(resultado.map(r => r.sigla_usina))];
+  console.log(`  Usinas: ${usinas.join(", ")} | Período ${resultado[0]?.periodo}–${resultado[resultado.length - 1]?.periodo}`);
+  console.log(`  ✅ ${resultado.length} registros (${usinas.length} usinas)`);
   return resultado;
 }
 
