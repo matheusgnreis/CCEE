@@ -493,69 +493,67 @@ export default function AgenteDashboard() {
           </>
         )}
 
-        {/* ── Curva de Carga Típica ────────────────────────────── */}
-        {(loadingCurva || curvaCarga.length > 0) && (
-          <div style={s.chartBox}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-              <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Carga Típica</h2>
-              <span style={{ fontSize: 12, color: "#94a3b8" }}>
-                média histórica por hora do dia • normalizada em pu
-                {curvaCarga[0]?.n_amostras && ` • ${curvaCarga[0].n_amostras} amostras/hora`}
-              </span>
+        {/* ── Curva de Carga Típica por Submercado ─────────────── */}
+        {curvaCarga.length > 0 && (() => {
+          const COR_SUB = { SE: "#2563eb", S: "#059669", NE: "#f59e0b", N: "#dc2626" };
+          const subs = [...new Set(curvaCarga.map(r => r.submercado))];
+          const porHora = {};
+          for (const r of curvaCarga) {
+            if (!porHora[r.hora]) porHora[r.hora] = { hora: r.hora };
+            porHora[r.hora][r.submercado] = r.pu;
+          }
+          const dados = Object.values(porHora).sort((a, b) => a.hora - b.hora);
+
+          return (
+            <div style={s.chartBox}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+                <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Carga Típica</h2>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu por submercado</span>
+              </div>
+              {loadingCurva && <div style={{ color: "#94a3b8", fontSize: 13 }}>Carregando...</div>}
+              {dados.length > 0 && (
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={dados} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                    <defs>
+                      {subs.map(sub => (
+                        <linearGradient key={sub} id={`gradCarga${sub}`} x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%"  stopColor={COR_SUB[sub] || "#2563eb"} stopOpacity={0.18} />
+                          <stop offset="95%" stopColor={COR_SUB[sub] || "#2563eb"} stopOpacity={0.01} />
+                        </linearGradient>
+                      ))}
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
+                    <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,"0")}h`} tick={{ fontSize: 11, fill: "#64748b" }} interval={1} />
+                    <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fontSize: 11, fill: "#64748b" }} width={42} />
+                    <Tooltip
+                      labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
+                      formatter={(v, name) => [`${(v*100).toFixed(1)}%`, name]}
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+                    {subs.map(sub => (
+                      <Area
+                        key={sub}
+                        type="monotone"
+                        dataKey={sub}
+                        name={sub}
+                        stroke={COR_SUB[sub] || "#2563eb"}
+                        strokeWidth={2}
+                        fill={`url(#gradCarga${sub})`}
+                        dot={false}
+                        activeDot={{ r: 4 }}
+                      />
+                    ))}
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
             </div>
-
-            {loadingCurva && <div style={{ color: "#94a3b8", fontSize: 13 }}>Carregando...</div>}
-
-            {curvaCarga.length > 0 && (
-              <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={curvaCarga} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="gradCurva" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%"  stopColor="#2563eb" stopOpacity={0.18} />
-                      <stop offset="95%" stopColor="#2563eb" stopOpacity={0.01} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
-                  <XAxis
-                    dataKey="hora"
-                    tickFormatter={h => `${String(h).padStart(2,"0")}h`}
-                    tick={{ fontSize: 11, fill: "#64748b" }}
-                    interval={1}
-                  />
-                  <YAxis
-                    domain={[0, 1]}
-                    tickFormatter={v => `${(v * 100).toFixed(0)}%`}
-                    tick={{ fontSize: 11, fill: "#64748b" }}
-                    width={42}
-                  />
-                  <Tooltip
-                    formatter={(v, name) => [
-                      name === "pu"
-                        ? `${(v * 100).toFixed(1)}%`
-                        : `${Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 3 })} MWh`,
-                      name === "pu" ? "PU" : "Consumo médio"
-                    ]}
-                    labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
-                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                  />
-                  <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
-                  <Area
-                    type="monotone"
-                    dataKey="pu"
-                    stroke="#2563eb"
-                    strokeWidth={2}
-                    fill="url(#gradCurva)"
-                    dot={false}
-                    activeDot={{ r: 4, fill: "#2563eb" }}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        )}
+          );
+        })()}
 
         {/* ── Curva de Geração por Usina ───────────────────────── */}
-        {(loadingCurvaGer || curvaGeracao.length > 0) && (() => {
+        {curvaGeracao.length > 0 && (() => {
           const CORES = ["#059669","#2563eb","#f59e0b","#dc2626","#7c3aed","#0891b2","#ea580c","#16a34a"];
           // Pivota: [{ hora, "UFV JUSANTE 6": 0.85, "UFV JUSANTE 4": 0.0, ... }]
           const usinas = [...new Set(curvaGeracao.map(r => r.sigla_usina))];
@@ -811,7 +809,7 @@ export default function AgenteDashboard() {
         )}
 
         {/* ── Unidades Geradoras ───────────────────────────────── */}
-        {!loadingHist && (loadingUsinas || usinas.length > 0) && (
+        {!loadingHist && usinas.length > 0 && (
           <div style={s.chartBox}>
             <div style={s.cargasHeader}>
               <h2 style={s.chartTitle}>
@@ -889,7 +887,7 @@ export default function AgenteDashboard() {
         )}
 
         {/* ── Modulação de Geração ─────────────────────────────── */}
-        {!loadingHist && (loadingUsinas || usinas.length > 0) && (
+        {!loadingHist && usinas.length > 0 && (
           <div style={s.chartBox}>
             <div style={s.cargasHeader}>
               <h2 style={s.chartTitle}>Modulação Horária — Geração</h2>
@@ -948,7 +946,7 @@ export default function AgenteDashboard() {
         )}
 
         {/* ── Contabilização por Perfil ─────────────────────────── */}
-        {(loadingContab || contabilizacao.length > 0) && (
+        {contabilizacao.length > 0 && (
           <div style={s.chartBox}>
             <div style={s.cargasHeader}>
               <h2 style={s.chartTitle}>Contabilização por Perfil</h2>

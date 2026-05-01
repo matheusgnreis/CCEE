@@ -1400,29 +1400,39 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
   }
 });
 
-// GET /inteligencia/:agente/curva-carga — curva típica de consumo em pu (média por hora do dia)
+// GET /inteligencia/:agente/curva-carga — curva típica de consumo em pu por submercado
 app.get("/inteligencia/:agente/curva-carga", async (req, res) => {
   const agente = normalizarAgente(decodeURIComponent(req.params.agente));
   try {
     const r = await pool.query(`
       SELECT
-        ((periodo - 1) % 24) + 1          AS hora,
-        AVG(consumo_mwh)                   AS consumo_medio,
-        COUNT(*)                           AS n_amostras
+        submercado,
+        ((periodo - 1) % 24) + 1  AS hora,
+        AVG(consumo_mwh)           AS consumo_medio,
+        COUNT(*)                   AS n_amostras
       FROM ccee_consumo_horario
       WHERE agente = $1
-      GROUP BY hora
-      ORDER BY hora
+      GROUP BY submercado, hora
+      ORDER BY submercado, hora
     `, [agente]);
 
     if (!r.rows.length) return res.json([]);
 
-    const maxConsumo = Math.max(...r.rows.map(row => Number(row.consumo_medio)));
+    // Normaliza em pu por submercado (cada sub tem seu próprio pico)
+    const maxPorSub = {};
+    for (const row of r.rows) {
+      const v = Number(row.consumo_medio);
+      if (!maxPorSub[row.submercado] || v > maxPorSub[row.submercado])
+        maxPorSub[row.submercado] = v;
+    }
 
     return res.json(r.rows.map(row => ({
+      submercado:     row.submercado,
       hora:           Number(row.hora),
       consumo_medio:  Number(Number(row.consumo_medio).toFixed(4)),
-      pu:             maxConsumo > 0 ? Number((Number(row.consumo_medio) / maxConsumo).toFixed(4)) : 0,
+      pu:             maxPorSub[row.submercado] > 0
+                        ? Number((Number(row.consumo_medio) / maxPorSub[row.submercado]).toFixed(4))
+                        : 0,
       n_amostras:     Number(row.n_amostras),
     })));
   } catch (e) {
