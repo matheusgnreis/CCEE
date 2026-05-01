@@ -16,9 +16,9 @@ const METRICAS = [
   { key: "geracao",            label: "Geração",            color: "#059669", unidade: "MWm", apenasComValor: true },
   { key: "venda",              label: "Venda",              color: "#f59e0b", unidade: "MWm", apenasComValor: true },
   { key: "consumo_geracao",    label: "Cons. da Ger.",      color: "#8b5cf6", unidade: "MWm", apenasComValor: true },
-  { key: "resultado",          label: "Resultado",          color: "#dc2626", unidade: "R$"  },
+  { key: "resultado",          label: "Resultado com ajustes",          color: "#dc2626", unidade: "R$"  },
   { key: "mcp",                label: "MCP",                color: "#d97706", unidade: "R$"  },
-  { key: "resultado_mcp",      label: "Resultado MCP",      color: "#7c3aed", unidade: "R$"  },
+  { key: "resultado_mcp",      label: "Resultado final",      color: "#7c3aed", unidade: "R$"  },
   { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2", unidade: "MWm" },
 ];
 
@@ -699,7 +699,7 @@ export default function AgenteDashboard() {
                 <table style={s.table}>
                   <thead>
                     <tr>
-                      {["Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Capacidade (MW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
+                      {["Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Demanda (MW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
                         <th key={h} style={s.th}>{h}</th>
                       ))}
                     </tr>
