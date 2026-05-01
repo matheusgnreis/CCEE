@@ -102,6 +102,11 @@ export default function AgenteDashboard() {
   const [loadingCurva,     setLoadingCurva]     = useState(false);
   const [curvaGeracao,     setCurvaGeracao]     = useState([]);
   const [loadingCurvaGer,  setLoadingCurvaGer]  = useState(false);
+  const [activeUsinaGer,   setActiveUsinaGer]   = useState(null);
+  const [activeSubCarga,   setActiveSubCarga]   = useState(null);
+
+  const [sazonalizacao,    setSazonalizacao]    = useState(null);
+  const [contratoMWm,      setContratoMWm]      = useState("");
 
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
@@ -199,6 +204,11 @@ export default function AgenteDashboard() {
       .then(json => { if (!json.error) setCurvaCarga(json); })
       .catch(() => {})
       .finally(() => setLoadingCurva(false));
+
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/sazonalizacao`)
+      .then(r => r.json())
+      .then(json => { if (!json.error) setSazonalizacao(json); })
+      .catch(() => {});
 
     setLoadingCurvaGer(true);
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-geracao`)
@@ -506,48 +516,78 @@ export default function AgenteDashboard() {
 
           return (
             <div style={s.chartBox}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
                 <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Carga Típica</h2>
                 <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu por submercado</span>
+                {activeSubCarga && (
+                  <button onClick={() => setActiveSubCarga(null)}
+                    style={{ fontSize: 11, color: "#6b7280", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>
+                    ver todas
+                  </button>
+                )}
               </div>
-              {loadingCurva && <div style={{ color: "#94a3b8", fontSize: 13 }}>Carregando...</div>}
-              {dados.length > 0 && (
-                <ResponsiveContainer width="100%" height={240}>
-                  <AreaChart data={dados} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                    <defs>
-                      {subs.map(sub => (
-                        <linearGradient key={sub} id={`gradCarga${sub}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%"  stopColor={COR_SUB[sub] || "#2563eb"} stopOpacity={0.18} />
-                          <stop offset="95%" stopColor={COR_SUB[sub] || "#2563eb"} stopOpacity={0.01} />
-                        </linearGradient>
-                      ))}
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
-                    <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,"0")}h`} tick={{ fontSize: 11, fill: "#64748b" }} interval={1} />
-                    <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fontSize: 11, fill: "#64748b" }} width={42} />
-                    <Tooltip
-                      labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
-                      formatter={(v, name) => [`${(v*100).toFixed(1)}%`, name]}
-                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+
+              {/* Legenda clicável */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                {subs.map(sub => {
+                  const cor   = COR_SUB[sub] || "#2563eb";
+                  const ativa = !activeSubCarga || activeSubCarga === sub;
+                  return (
+                    <button key={sub} onClick={() => setActiveSubCarga(prev => prev === sub ? null : sub)} style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      fontSize: 11, fontWeight: 600,
+                      color: ativa ? cor : "#94a3b8",
+                      background: ativa ? `${cor}18` : "#f8fafc",
+                      border: `1px solid ${ativa ? cor : "#e2e8f0"}`,
+                      borderRadius: 20, padding: "4px 10px",
+                      cursor: "pointer", transition: "all 0.15s",
+                    }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: ativa ? cor : "#d1d5db", flexShrink: 0 }} />
+                      {sub}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={dados} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <defs>
                     {subs.map(sub => (
+                      <linearGradient key={sub} id={`gradCarga${sub}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={COR_SUB[sub] || "#2563eb"} stopOpacity={0.22} />
+                        <stop offset="95%" stopColor={COR_SUB[sub] || "#2563eb"} stopOpacity={0.01} />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
+                  <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,"0")}h`} tick={{ fontSize: 11, fill: "#64748b" }} interval={1} />
+                  <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fontSize: 11, fill: "#64748b" }} width={42} />
+                  <Tooltip
+                    labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
+                    formatter={(v, name) => [`${(v*100).toFixed(1)}%`, name]}
+                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                  />
+                  <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+                  {subs.map(sub => {
+                    const cor   = COR_SUB[sub] || "#2563eb";
+                    const ativa = !activeSubCarga || activeSubCarga === sub;
+                    return (
                       <Area
                         key={sub}
                         type="monotone"
                         dataKey={sub}
                         name={sub}
-                        stroke={COR_SUB[sub] || "#2563eb"}
-                        strokeWidth={2}
-                        fill={`url(#gradCarga${sub})`}
+                        stroke={cor}
+                        strokeWidth={activeSubCarga === sub ? 2.5 : 1.5}
+                        strokeOpacity={ativa ? 1 : 0.1}
+                        fill={ativa ? `url(#gradCarga${sub})` : "transparent"}
                         dot={false}
-                        activeDot={{ r: 4 }}
+                        activeDot={ativa ? { r: 4 } : false}
                       />
-                    ))}
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
+                    );
+                  })}
+                </AreaChart>
+              </ResponsiveContainer>
             </div>
           );
         })()}
@@ -555,63 +595,87 @@ export default function AgenteDashboard() {
         {/* ── Curva de Geração por Usina ───────────────────────── */}
         {curvaGeracao.length > 0 && (() => {
           const CORES = ["#059669","#2563eb","#f59e0b","#dc2626","#7c3aed","#0891b2","#ea580c","#16a34a"];
-          // Pivota: [{ hora, "UFV JUSANTE 6": 0.85, "UFV JUSANTE 4": 0.0, ... }]
           const usinas = [...new Set(curvaGeracao.map(r => r.sigla_usina))];
           const porHora = {};
           for (const r of curvaGeracao) {
             if (!porHora[r.hora]) porHora[r.hora] = { hora: r.hora };
             porHora[r.hora][r.sigla_usina] = r.pu;
-            porHora[r.hora][`${r.sigla_usina}_mwmed`] = r.geracao_media;
           }
           const dados = Object.values(porHora).sort((a, b) => a.hora - b.hora);
 
           return (
             <div style={s.chartBox}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
                 <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Geração por Usina</h2>
-                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica • normalizada em pu por unidade geradora</span>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica • pu por unidade geradora</span>
+                {activeUsinaGer && (
+                  <button onClick={() => setActiveUsinaGer(null)}
+                    style={{ fontSize: 11, color: "#6b7280", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>
+                    ver todas
+                  </button>
+                )}
               </div>
-              {loadingCurvaGer && <div style={{ color: "#94a3b8", fontSize: 13 }}>Carregando...</div>}
-              {dados.length > 0 && (
-                <ResponsiveContainer width="100%" height={240}>
-                  <AreaChart data={dados} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                    <defs>
-                      {usinas.map((u, i) => (
-                        <linearGradient key={u} id={`gradGer${i}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%"  stopColor={CORES[i % CORES.length]} stopOpacity={0.18} />
-                          <stop offset="95%" stopColor={CORES[i % CORES.length]} stopOpacity={0.01} />
-                        </linearGradient>
-                      ))}
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
-                    <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,"0")}h`} tick={{ fontSize: 11, fill: "#64748b" }} interval={1} />
-                    <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fontSize: 11, fill: "#64748b" }} width={42} />
-                    <Tooltip
-                      labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
-                      formatter={(v, name) => {
-                        if (name.endsWith("_mwmed")) return null;
-                        return [`${(v*100).toFixed(1)}%`, name];
-                      }}
-                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+
+              {/* Legenda clicável: clica para isolar, clica novamente para voltar todas */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                {usinas.map((u, i) => {
+                  const cor   = CORES[i % CORES.length];
+                  const ativa = !activeUsinaGer || activeUsinaGer === u;
+                  return (
+                    <button key={u} onClick={() => setActiveUsinaGer(prev => prev === u ? null : u)} style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      fontSize: 11, fontWeight: 600,
+                      color: ativa ? cor : "#94a3b8",
+                      background: ativa ? `${cor}18` : "#f8fafc",
+                      border: `1px solid ${ativa ? cor : "#e2e8f0"}`,
+                      borderRadius: 20, padding: "4px 10px",
+                      cursor: "pointer", transition: "all 0.15s",
+                    }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: ativa ? cor : "#d1d5db", flexShrink: 0 }} />
+                      {u}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={dados} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <defs>
                     {usinas.map((u, i) => (
+                      <linearGradient key={u} id={`gradGer${i}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={CORES[i % CORES.length]} stopOpacity={0.22} />
+                        <stop offset="95%" stopColor={CORES[i % CORES.length]} stopOpacity={0.01} />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
+                  <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,"0")}h`} tick={{ fontSize: 11, fill: "#64748b" }} interval={1} />
+                  <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fontSize: 11, fill: "#64748b" }} width={42} />
+                  <Tooltip
+                    labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
+                    formatter={(v, name) => [`${(v*100).toFixed(1)}%`, name]}
+                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                  />
+                  <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+                  {usinas.map((u, i) => {
+                    const ativa = !activeUsinaGer || activeUsinaGer === u;
+                    return (
                       <Area
                         key={u}
                         type="monotone"
                         dataKey={u}
                         name={u}
                         stroke={CORES[i % CORES.length]}
-                        strokeWidth={2}
-                        fill={`url(#gradGer${i})`}
+                        strokeWidth={activeUsinaGer === u ? 2.5 : 1.5}
+                        strokeOpacity={ativa ? 1 : 0.1}
+                        fill={ativa ? `url(#gradGer${i})` : "transparent"}
                         dot={false}
-                        activeDot={{ r: 4 }}
+                        activeDot={ativa ? { r: 4 } : false}
                       />
-                    ))}
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
+                    );
+                  })}
+                </AreaChart>
+              </ResponsiveContainer>
             </div>
           );
         })()}
@@ -914,36 +978,182 @@ export default function AgenteDashboard() {
                 <table style={s.table}>
                   <thead>
                     <tr>
-                      {["Mês","Usina","Submercado","Geração (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)"].map(h => (
+                      {["Mês","Usina","Submercado","Geração (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)",""].map(h => (
                         <th key={h} style={s.th}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {modulacaoGer.resultados.map((r, i) => {
-                      const custo = Number(r.custo_modulacao_rs_mwh);
-                      const cor   = custo > 0 ? "#dc2626" : custo < 0 ? "#16a34a" : "#374151";
-                      return (
-                        <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
-                          <td style={s.td}>{r.mes_referencia}</td>
-                          <td style={{ ...s.td, fontWeight: 600, whiteSpace: "nowrap" }}>{r.sigla_usina || "—"}</td>
-                          <td style={s.td}>{r.submercado}</td>
-                          <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.geracao_total_mwh)}</td>
-                          <td style={{ ...s.td, textAlign: "right" }}>{r.n_horas}</td>
-                          <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_curva_rs)}</td>
-                          <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_flat_rs)}</td>
-                          <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: cor }}>
-                            {custo > 0 ? "+" : ""}{fmt(custo)}
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {(() => {
+                      const mesesVistos = new Set();
+                      return modulacaoGer.resultados.map((r, i) => {
+                        const custo       = Number(r.custo_modulacao_rs_mwh);
+                        const cor         = custo > 0 ? "#dc2626" : custo < 0 ? "#16a34a" : "#374151";
+                        const primeiroMes = !mesesVistos.has(r.mes_referencia);
+                        if (primeiroMes) mesesVistos.add(r.mes_referencia);
+                        return (
+                          <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                            <td style={s.td}>{r.mes_referencia}</td>
+                            <td style={{ ...s.td, fontWeight: 600, whiteSpace: "nowrap" }}>{r.sigla_usina || "—"}</td>
+                            <td style={s.td}>{r.submercado}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.geracao_total_mwh)}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{r.n_horas}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_curva_rs)}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_flat_rs)}</td>
+                            <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: cor }}>
+                              {custo > 0 ? "+" : ""}{fmt(custo)}
+                            </td>
+                            <td style={{ ...s.td, textAlign: "center" }}>
+                              {primeiroMes && (
+                                <a
+                                  href={`${API_URL}/inteligencia/${encodeURIComponent(agente)}/geracao-horaria/csv?mes=${r.mes_referencia}`}
+                                  download
+                                  style={{ ...s.csvBtn, color: "#059669", background: "#f0fdf4", borderColor: "#bbf7d0" }}
+                                  title="Geração horária por usina"
+                                >
+                                  ↓ Geração
+                                </a>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
                   </tbody>
                 </table>
               </div>
             ) : null}
           </div>
         )}
+
+        {/* ── Sugestão de Sazonalização ────────────────────────── */}
+        {sazonalizacao && (() => {
+          const contrato  = parseFloat(contratoMWm.replace(",", ".")) || 0;
+          // horas do ano-alvo (ano base + 1 como proxy, ou ano corrente)
+          const anoAlvo   = sazonalizacao.ano_base + 1;
+          const horasAlvo = sazonalizacao.meses.reduce((s, m) => {
+            // replica horas do mês base para o mesmo mês do ano alvo
+            const mesNum = Number(m.mes.split("-")[1]);
+            return s + new Date(anoAlvo, mesNum, 0).getDate() * 24;
+          }, 0);
+          const totalMWhContratado = contrato * horasAlvo;
+
+          const MESES_PT = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+
+          return (
+            <div style={s.chartBox}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
+                <div>
+                  <h2 style={{ ...s.chartTitle, margin: "0 0 4px" }}>Sugestão de Sazonalização</h2>
+                  <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                    base: {sazonalizacao.ano_base} • média anual: <strong>{sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm</strong>
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, marginLeft: "auto" }}>
+                  <label style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Montante contratado (MWm)</label>
+                  <input
+                    type="text"
+                    value={contratoMWm}
+                    onChange={e => setContratoMWm(e.target.value)}
+                    placeholder={sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                    style={{ width: 130, fontSize: 13, padding: "6px 10px", border: "1.5px solid #e2e8f0", borderRadius: 8, outline: "none" }}
+                  />
+                  <span style={{ fontSize: 11, color: "#94a3b8" }}>use vírgula — ex: {sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                </div>
+              </div>
+              {contrato > 0 && Math.abs(contrato / sazonalizacao.media_mwm - 1) > 0.5 && (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 14px", marginBottom: 12, fontSize: 12, color: "#92400e" }}>
+                  ⚠ Montante informado ({contrato.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm) difere muito da média histórica ({sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm). Verifique se o valor está correto — use vírgula como separador decimal.
+                </div>
+              )}
+
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ ...s.table, fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      {["Mês", "Horas", `Base (MWm) ${sazonalizacao.ano_base}`, "Part. (%)", "Sugestão (MWm)", `Realizado ${sazonalizacao.ano_atual} (MWm)`, "Aderência", "Desvio do flat"].map(h => (
+                        <th key={h} style={{ ...s.th, textAlign: h === "Mês" ? "left" : "right" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sazonalizacao.meses.map((m, i) => {
+                      const mesNum      = Number(m.mes.split("-")[1]);
+                      const diasAlvo    = new Date(anoAlvo, mesNum, 0).getDate();
+                      const horasMes    = diasAlvo * 24;
+                      const part        = m.participacao_pct / 100;
+                      const mwhSug      = contrato > 0 ? totalMWhContratado * part : null;
+                      const mwmSug      = mwhSug != null ? mwhSug / horasMes : null;
+                      const flatMWh     = contrato > 0 ? contrato * horasMes : null;
+                      const fator       = (flatMWh && flatMWh > 0 && mwhSug != null) ? mwhSug / flatMWh : null;
+                      const corFator    = fator == null ? "#374151" : fator > 1.05 ? "#dc2626" : fator < 0.95 ? "#2563eb" : "#16a34a";
+                      // Realizado do ano atual para este mês (se disponível)
+                      const realizado   = sazonalizacao.realizado_atual?.[mesNum] ?? null;
+                      // Aderência: realizado vs sugestão (só mostra se ambos existem)
+                      const aderencia   = (realizado != null && mwmSug != null && mwmSug > 0)
+                                            ? realizado / mwmSug
+                                            : null;
+                      const corAder     = aderencia == null ? "#374151"
+                                        : aderencia > 1.05 ? "#dc2626"
+                                        : aderencia < 0.95 ? "#2563eb"
+                                        : "#16a34a";
+                      return (
+                        <tr key={m.mes} style={i % 2 === 0 ? s.trEven : {}}>
+                          <td style={s.td}><strong>{MESES_PT[mesNum - 1]}/{anoAlvo}</strong></td>
+                          <td style={{ ...s.td, textAlign: "right" }}>{horasMes}</td>
+                          <td style={{ ...s.td, textAlign: "right", color: "#64748b" }}>
+                            {m.consumo_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                          </td>
+                          <td style={{ ...s.td, textAlign: "right", fontWeight: 600 }}>
+                            {m.participacao_pct.toFixed(2)}%
+                          </td>
+                          <td style={{ ...s.td, textAlign: "right", fontWeight: 600 }}>
+                            {mwmSug != null ? mwmSug.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : "—"}
+                          </td>
+                          <td style={{ ...s.td, textAlign: "right", color: realizado != null ? "#0f172a" : "#94a3b8" }}>
+                            {realizado != null ? realizado.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : "—"}
+                          </td>
+                          <td style={{ ...s.td, textAlign: "right", fontWeight: aderencia != null ? 700 : 400, color: corAder }}>
+                            {aderencia != null ? `${(aderencia * 100).toFixed(1)}%` : "—"}
+                          </td>
+                          <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: corFator }}>
+                            {fator != null ? `${(fator * 100).toFixed(1)}%` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  {contrato > 0 && (
+                    <tfoot>
+                      <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
+                        <td style={s.td}>Total / Média</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{horasAlvo}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>
+                          {sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                        </td>
+                        <td style={{ ...s.td, textAlign: "right" }}>100,00%</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>
+                          {contrato.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                        </td>
+                        <td style={{ ...s.td, textAlign: "right", color: "#64748b" }}>
+                          {(() => {
+                            const vals = Object.values(sazonalizacao.realizado_atual || {});
+                            if (!vals.length) return "—";
+                            const soma  = vals.reduce((s, v) => s + v, 0);
+                            const media = soma / vals.length;
+                            return media.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+                          })()}
+                        </td>
+                        <td style={{ ...s.td, textAlign: "right" }}>—</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>—</td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ── Contabilização por Perfil ─────────────────────────── */}
         {contabilizacao.length > 0 && (
@@ -1032,9 +1242,9 @@ const s = {
   mesLoading: { fontSize: 12, color: "#94a3b8" },
 
   grid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 },
-  card:       { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "18px 20px", minWidth: 0, overflow: "hidden" },
+  card:       { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "18px 20px", minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column" },
   cardAlerta: { border: "1px solid #fecaca", background: "#fff7f7" },
-  cardLabel:  { fontSize: 12, color: "#6b7280", margin: "0 0 6px", fontWeight: 600 },
+  cardLabel:  { fontSize: 12, color: "#6b7280", margin: "0 0 6px", fontWeight: 600, minHeight: 32 },
   cardValue:  { fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: -0.5, transition: "color 0.2s", display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" },
   alertaIcon: { fontSize: 18, lineHeight: 1 },
 

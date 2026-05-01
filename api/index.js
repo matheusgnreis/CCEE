@@ -1400,6 +1400,74 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
   }
 });
 
+// GET /inteligencia/:agente/sazonalizacao?ano=YYYY — sugestão de sazonalização baseada no último ano completo
+app.get("/inteligencia/:agente/sazonalizacao", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  try {
+    // Encontra o último ano com 12 meses de dados
+    const rAnos = await pool.query(`
+      SELECT LEFT(mes, 4)::integer AS ano, COUNT(*) AS n_meses
+      FROM ccee_dados
+      WHERE agente = $1
+      GROUP BY LEFT(mes, 4)
+      HAVING COUNT(*) = 12
+      ORDER BY ano DESC
+      LIMIT 1
+    `, [agente]);
+
+    if (!rAnos.rows.length)
+      return res.status(404).json({ error: "Nenhum ano completo (12 meses) de consumo encontrado" });
+
+    const anoBase  = Number(rAnos.rows[0].ano);
+    const anoAtual = new Date().getFullYear();
+
+    // Busca base (ano completo) e ano atual em paralelo
+    const [rBase, rAtual] = await Promise.all([
+      pool.query(`SELECT mes, consumo FROM ccee_dados WHERE agente = $1 AND mes LIKE $2 ORDER BY mes ASC`, [agente, `${anoBase}-%`]),
+      pool.query(`SELECT mes, consumo FROM ccee_dados WHERE agente = $1 AND mes LIKE $2 ORDER BY mes ASC`, [agente, `${anoAtual}-%`]),
+    ]);
+
+    const calcMes = (row) => {
+      const [ano, mesNum] = row.mes.split("-").map(Number);
+      const horas       = new Date(ano, mesNum, 0).getDate() * 24;
+      const consumo_mwm = Number(row.consumo) || 0;
+      return { mes: row.mes, horas, consumo_mwm, consumo_mwh: consumo_mwm * horas };
+    };
+
+    const meses       = rBase.rows.map(calcMes);
+    const total_mwh   = meses.reduce((s, m) => s + m.consumo_mwh, 0);
+    const total_horas = meses.reduce((s, m) => s + m.horas, 0);
+    const media_mwm   = total_horas > 0 ? total_mwh / total_horas : 0;
+
+    // Realizado do ano atual indexado por número do mês (1-12)
+    const realizadoAtual = {};
+    rAtual.rows.forEach(row => {
+      const mesNum = Number(row.mes.split("-")[1]);
+      realizadoAtual[mesNum] = Number(row.consumo) || 0;
+    });
+
+    return res.json({
+      ano_base:        anoBase,
+      ano_atual:       anoAtual,
+      total_mwh:       Number(total_mwh.toFixed(4)),
+      total_horas,
+      media_mwm:       Number(media_mwm.toFixed(4)),
+      realizado_atual: realizadoAtual,
+      meses: meses.map(m => ({
+        mes:              m.mes,
+        horas:            m.horas,
+        consumo_mwm:      Number(m.consumo_mwm.toFixed(4)),
+        consumo_mwh:      Number(m.consumo_mwh.toFixed(4)),
+        participacao_pct: total_mwh > 0
+          ? Number((m.consumo_mwh / total_mwh * 100).toFixed(4))
+          : Number((100 / 12).toFixed(4)),
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /inteligencia/:agente/curva-carga — curva típica de consumo em pu por submercado
 app.get("/inteligencia/:agente/curva-carga", async (req, res) => {
   const agente = normalizarAgente(decodeURIComponent(req.params.agente));
@@ -1476,6 +1544,49 @@ app.get("/inteligencia/:agente/curva-geracao", async (req, res) => {
                         : 0,
       n_amostras:     Number(row.n_amostras),
     })));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/geracao-horaria/csv?mes=YYYY-MM — exporta geração horária por usina como CSV
+app.get("/inteligencia/:agente/geracao-horaria/csv", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+  const mes    = req.query.mes;
+
+  if (!mes || !/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Parâmetro ?mes=YYYY-MM é obrigatório" });
+
+  try {
+    const r = await pool.query(`
+      SELECT sigla_usina, periodo, submercado, geracao_mwmed
+      FROM ccee_geracao_horaria
+      WHERE agente = $1 AND mes_referencia = $2
+      ORDER BY sigla_usina, periodo ASC
+    `, [agente, mes]);
+
+    if (!r.rows.length)
+      return res.status(404).json({ error: "Sem dados de geração horária para este agente/mês" });
+
+    const [ano, mesNum] = mes.split("-");
+    const linhas = [
+      "data,hora,sigla_usina,submercado,geracao_mwmed",
+      ...r.rows.map(row => {
+        const p    = Number(row.periodo);
+        const dia  = Math.ceil(p / 24).toString().padStart(2, "0");
+        const hora = (((p - 1) % 24) + 1).toString().padStart(2, "0");
+        return `${dia}/${mesNum}/${ano},${hora},${row.sigla_usina},${row.submercado},${Number(row.geracao_mwmed).toFixed(6)}`;
+      }),
+    ].join("\n");
+
+    const filename = `geracao_horaria_${agente.replace(/\s+/g, "_")}_${mes}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.send(linhas);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

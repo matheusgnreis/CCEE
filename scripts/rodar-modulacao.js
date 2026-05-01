@@ -19,12 +19,21 @@ const pool = new Pool({
 });
 
 const AGENTES = [
-  "AVIVAR",
-  "LPA",
-  "SUPERMERCADOS ABC",
-  "SUPER BH 001",
+  "ACUMENT",
+  "ARCOR",
+  "ARCOR - RIO DAS PEDRAS",
+  "CEBRACE",
   "MARTMINAS",
-  "UTE WD",
+  "CEMIG H COMERCIALIZACAO",
+  "CIAFAL",
+  "CIPALAM",
+  "SAE TOWERS",
+  "SG DO BRASIL",
+  "TELHANORTE",
+  "CEMIG GERACAO",
+  "PATIO SABIA",
+  "PRAIA CLUBE",
+  "ATLANTIC NICKEL"
 ];
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
