@@ -1403,6 +1403,7 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
 // GET /inteligencia/:agente/sazonalizacao?ano=YYYY — sugestão de sazonalização baseada no último ano completo
 app.get("/inteligencia/:agente/sazonalizacao", async (req, res) => {
   const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const modo   = req.query.modo || "total";
   try {
     // Encontra o último ano com 12 meses de dados
     const rAnos = await pool.query(`
@@ -1420,6 +1421,94 @@ app.get("/inteligencia/:agente/sazonalizacao", async (req, res) => {
 
     const anoBase  = Number(rAnos.rows[0].ano);
     const anoAtual = new Date().getFullYear();
+
+    if (modo === "sub") {
+      const [rBase, rAtual] = await Promise.all([
+        pool.query(`
+          SELECT mes_referencia, submercado, SUM(consumo_mwh) AS total_mwh,
+                 COUNT(DISTINCT periodo) AS n_periodos
+          FROM ccee_consumo_horario
+          WHERE agente = $1 AND LEFT(mes_referencia,4)::integer = $2
+          GROUP BY mes_referencia, submercado ORDER BY mes_referencia, submercado
+        `, [agente, anoBase]),
+        pool.query(`
+          SELECT mes_referencia, submercado, SUM(consumo_mwh) AS total_mwh,
+                 COUNT(DISTINCT periodo) AS n_periodos
+          FROM ccee_consumo_horario
+          WHERE agente = $1 AND LEFT(mes_referencia,4)::integer = $2
+          GROUP BY mes_referencia, submercado ORDER BY mes_referencia, submercado
+        `, [agente, anoAtual]),
+      ]);
+      const totalMwhBySub = {};
+      rBase.rows.forEach(r => {
+        totalMwhBySub[r.submercado] = (totalMwhBySub[r.submercado] || 0) + Number(r.total_mwh);
+      });
+      const realizadoAtualSub = {};
+      rAtual.rows.forEach(r => {
+        const k = `${r.submercado}|${r.mes_referencia}`;
+        realizadoAtualSub[k] = { total_mwh: Number(r.total_mwh), n_periodos: Number(r.n_periodos) };
+      });
+      return res.json({
+        ano_base: anoBase, ano_atual: anoAtual, modo: "sub",
+        meses: rBase.rows.map(r => {
+          const sub = r.submercado, mes_r = r.mes_referencia;
+          const [ano, mesNum] = mes_r.split("-").map(Number);
+          const n_horas = new Date(ano, mesNum, 0).getDate() * 24;
+          const twh = Number(r.total_mwh);
+          const real = realizadoAtualSub[`${sub}|${mes_r.replace(String(anoBase), String(anoAtual))}`] || null;
+          return {
+            mes: mes_r, submercado: sub,
+            consumo_mwh: Number(twh.toFixed(2)),
+            consumo_mwm: Number((twh / n_horas).toFixed(4)),
+            participacao_pct: totalMwhBySub[sub] > 0 ? Number((twh / totalMwhBySub[sub] * 100).toFixed(2)) : 0,
+            realizado_mwh: real ? Number(Number(real.total_mwh).toFixed(2)) : null,
+          };
+        }),
+      });
+    }
+
+    if (modo === "perfil") {
+      const [rBase, rAtual] = await Promise.all([
+        pool.query(`
+          SELECT mes_referencia, sigla_perfil, SUM(consumo_mwh) AS total_mwh
+          FROM ccee_consumo_horario_perfil
+          WHERE agente = $1 AND LEFT(mes_referencia,4)::integer = $2
+          GROUP BY mes_referencia, sigla_perfil ORDER BY mes_referencia, sigla_perfil
+        `, [agente, anoBase]),
+        pool.query(`
+          SELECT mes_referencia, sigla_perfil, SUM(consumo_mwh) AS total_mwh
+          FROM ccee_consumo_horario_perfil
+          WHERE agente = $1 AND LEFT(mes_referencia,4)::integer = $2
+          GROUP BY mes_referencia, sigla_perfil ORDER BY mes_referencia, sigla_perfil
+        `, [agente, anoAtual]),
+      ]);
+      const totalMwhByPerfil = {};
+      rBase.rows.forEach(r => {
+        totalMwhByPerfil[r.sigla_perfil] = (totalMwhByPerfil[r.sigla_perfil] || 0) + Number(r.total_mwh);
+      });
+      const realizadoAtualPerfil = {};
+      rAtual.rows.forEach(r => {
+        const k = `${r.sigla_perfil}|${r.mes_referencia}`;
+        realizadoAtualPerfil[k] = Number(r.total_mwh);
+      });
+      return res.json({
+        ano_base: anoBase, ano_atual: anoAtual, modo: "perfil",
+        meses: rBase.rows.map(r => {
+          const perfil = r.sigla_perfil, mes_r = r.mes_referencia;
+          const [ano, mesNum] = mes_r.split("-").map(Number);
+          const n_horas = new Date(ano, mesNum, 0).getDate() * 24;
+          const twh = Number(r.total_mwh);
+          const realKey = `${perfil}|${mes_r.replace(String(anoBase), String(anoAtual))}`;
+          return {
+            mes: mes_r, sigla_perfil: perfil,
+            consumo_mwh: Number(twh.toFixed(2)),
+            consumo_mwm: Number((twh / n_horas).toFixed(4)),
+            participacao_pct: totalMwhByPerfil[perfil] > 0 ? Number((twh / totalMwhByPerfil[perfil] * 100).toFixed(2)) : 0,
+            realizado_mwh: realizadoAtualPerfil[realKey] != null ? Number(Number(realizadoAtualPerfil[realKey]).toFixed(2)) : null,
+          };
+        }),
+      });
+    }
 
     // Busca base (ano completo) e ano atual em paralelo
     const [rBase, rAtual] = await Promise.all([
@@ -1502,6 +1591,45 @@ app.get("/inteligencia/:agente/curva-carga", async (req, res) => {
                         ? Number((Number(row.consumo_medio) / maxPorSub[row.submercado]).toFixed(4))
                         : 0,
       n_amostras:     Number(row.n_amostras),
+    })));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/curva-carga-perfil — curva típica de consumo em pu por SIGLA_PERFIL_AGENTE
+app.get("/inteligencia/:agente/curva-carga-perfil", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  try {
+    const r = await pool.query(`
+      SELECT
+        sigla_perfil,
+        ((periodo - 1) % 24) + 1  AS hora,
+        AVG(consumo_mwh)           AS consumo_medio,
+        COUNT(*)                   AS n_amostras
+      FROM ccee_consumo_horario_perfil
+      WHERE agente = $1
+      GROUP BY sigla_perfil, hora
+      ORDER BY sigla_perfil, hora
+    `, [agente]);
+
+    if (!r.rows.length) return res.json([]);
+
+    const maxPorPerfil = {};
+    for (const row of r.rows) {
+      const v = Number(row.consumo_medio);
+      if (!maxPorPerfil[row.sigla_perfil] || v > maxPorPerfil[row.sigla_perfil])
+        maxPorPerfil[row.sigla_perfil] = v;
+    }
+
+    return res.json(r.rows.map(row => ({
+      sigla_perfil:  row.sigla_perfil,
+      hora:          Number(row.hora),
+      consumo_medio: Number(Number(row.consumo_medio).toFixed(4)),
+      pu:            maxPorPerfil[row.sigla_perfil] > 0
+                       ? Number((Number(row.consumo_medio) / maxPorPerfil[row.sigla_perfil]).toFixed(4))
+                       : 0,
+      n_amostras:    Number(row.n_amostras),
     })));
   } catch (e) {
     return res.status(500).json({ error: e.message });
@@ -1679,6 +1807,30 @@ async function salvarConsumoHorario(agente, registros) {
   console.log(`Consumo horário: ${registros.length} períodos salvos para ${agente}`);
 }
 
+async function salvarConsumoHorarioPerfil(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_consumo_horario_perfil
+        (agente, mes_referencia, sigla_perfil, periodo, submercado, consumo_mwh)
+      SELECT * FROM UNNEST(
+        $1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::text[], $6::numeric[]
+      )
+      ON CONFLICT (agente, mes_referencia, sigla_perfil, periodo, submercado) DO NOTHING
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.sigla_perfil),
+      lote.map(r => r.periodo),
+      lote.map(r => r.submercado),
+      lote.map(r => r.consumo_mwh),
+    ]);
+  }
+  console.log(`Consumo por perfil: ${registros.length} períodos salvos para ${agente}`);
+}
+
 // ─── Cálculo de modulação ─────────────────────────────────────────────────────
 
 /**
@@ -1773,6 +1925,37 @@ async function salvarModulacao(agente, mes, resultados) {
   console.log(`Modulação: ${resultados.length} submercados salvos para ${agente} ${mes}`);
 }
 
+async function salvarModulacaoPerfil(agente, mes, resultados) {
+  if (!resultados.length) return;
+  await pool.query(`
+    INSERT INTO ccee_modulacao_perfil
+      (agente, mes_referencia, sigla_perfil, submercado, consumo_total_mwh, n_horas,
+       soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh)
+    SELECT * FROM UNNEST(
+      $1::text[], $2::char(7)[], $3::text[], $4::text[], $5::numeric[], $6::integer[],
+      $7::numeric[], $8::numeric[], $9::numeric[]
+    )
+    ON CONFLICT (agente, mes_referencia, sigla_perfil, submercado) DO UPDATE SET
+      consumo_total_mwh      = EXCLUDED.consumo_total_mwh,
+      n_horas                = EXCLUDED.n_horas,
+      soma_curva_rs          = EXCLUDED.soma_curva_rs,
+      soma_flat_rs           = EXCLUDED.soma_flat_rs,
+      custo_modulacao_rs_mwh = EXCLUDED.custo_modulacao_rs_mwh,
+      created_at             = NOW()
+  `, [
+    resultados.map(() => agente),
+    resultados.map(() => mes),
+    resultados.map(r => r.sigla_perfil),
+    resultados.map(r => r.submercado),
+    resultados.map(r => r.consumo_total_mwh),
+    resultados.map(r => r.n_horas),
+    resultados.map(r => r.soma_curva_rs),
+    resultados.map(r => r.soma_flat_rs),
+    resultados.map(r => r.custo_modulacao_rs_mwh),
+  ]);
+  console.log(`Modulação por perfil: ${resultados.length} perfis×submercados salvos para ${agente} ${mes}`);
+}
+
 // GET /inteligencia/:agente/modulacao
 // Query params: ?mes=YYYY-MM (obrigatório) &submercado=SE (opcional)
 app.get("/inteligencia/:agente/modulacao", async (req, res) => {
@@ -1795,8 +1978,9 @@ app.get("/inteligencia/:agente/modulacao", async (req, res) => {
     );
     if (existeConsumo.rows.length === 0) {
       console.log(`[modulação] Baixando consumo horário para ${agente} | mês=${mes}...`);
-      const registros = await buscarConsumoHorario(agente, mes);
+      const { resultado: registros, resultadoPerfil } = await buscarConsumoHorario(agente, mes);
       if (registros.length > 0) await salvarConsumoHorario(agente, registros);
+      if (resultadoPerfil.length > 0) await salvarConsumoHorarioPerfil(agente, resultadoPerfil);
     }
 
     // Busca consumo do banco
@@ -1838,6 +2022,34 @@ app.get("/inteligencia/:agente/modulacao", async (req, res) => {
   }
 });
 
+// GET /inteligencia/:agente/modulacao-perfil?mes=YYYY-MM
+app.get("/inteligencia/:agente/modulacao-perfil", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const mes    = req.query.mes;
+  if (!mes || !/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Parâmetro ?mes=YYYY-MM é obrigatório" });
+  try {
+    const r = await pool.query(`
+      SELECT sigla_perfil, submercado, consumo_total_mwh, n_horas,
+             soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh
+      FROM ccee_modulacao_perfil
+      WHERE agente = $1 AND mes_referencia = $2
+      ORDER BY sigla_perfil, submercado
+    `, [agente, mes]);
+    return res.json({ agente, mes, resultados: r.rows.map(row => ({
+      sigla_perfil:          row.sigla_perfil,
+      submercado:            row.submercado,
+      consumo_total_mwh:     Number(row.consumo_total_mwh),
+      n_horas:               Number(row.n_horas),
+      soma_curva_rs:         Number(row.soma_curva_rs),
+      soma_flat_rs:          Number(row.soma_flat_rs),
+      custo_modulacao_rs_mwh: Number(row.custo_modulacao_rs_mwh),
+    }))});
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Modulação automática ─────────────────────────────────────────────────────
 
 const PRIMEIRO_MES_PLD = "2025-01"; // PLD horário disponível a partir deste mês
@@ -1871,8 +2083,12 @@ async function processarMesModulacao(agente, mes) {
   }
   if (periodoErrado) {
     console.warn(`[modulacao] ⚠ Períodos descasados (max=${maxPeriodoCheck}, esperado=${maxEsperado}) — deletando e recalculando`);
-    await pool.query("DELETE FROM ccee_modulacao       WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
-    await pool.query("DELETE FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
+    await Promise.all([
+      pool.query("DELETE FROM ccee_modulacao              WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+      pool.query("DELETE FROM ccee_consumo_horario        WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+      pool.query("DELETE FROM ccee_consumo_horario_perfil WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+      pool.query("DELETE FROM ccee_modulacao_perfil       WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+    ]);
   } else if (jaCalculado.rows.length > 0 && semConsumo) {
     console.warn(`[modulacao] ⚠ Modulação existe mas consumo ausente — recalculando ${mes}`);
     await pool.query("DELETE FROM ccee_modulacao WHERE agente = $1 AND mes_referencia = $2", [agente, mes]);
@@ -1889,10 +2105,10 @@ async function processarMesModulacao(agente, mes) {
   // Se max_periodo < esperado, os dados estão com indexação errada — deleta e re-baixa
   if (nConsumoDB > 0 && maxPeriodoDB < maxEsperado) {
     console.warn(`[modulacao] ⚠ Consumo com períodos errados (max=${maxPeriodoDB}, esperado=${maxEsperado}) — deletando`);
-    await pool.query(
-      "DELETE FROM ccee_consumo_horario WHERE agente = $1 AND mes_referencia = $2",
-      [agente, mes]
-    );
+    await Promise.all([
+      pool.query("DELETE FROM ccee_consumo_horario        WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+      pool.query("DELETE FROM ccee_consumo_horario_perfil WHERE agente = $1 AND mes_referencia = $2", [agente, mes]),
+    ]);
   }
 
   if (nConsumoDB === 0 || maxPeriodoDB < maxEsperado) {
@@ -1900,10 +2116,14 @@ async function processarMesModulacao(agente, mes) {
     const metaAgente  = await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
     const razaoSocial = metaAgente.rows[0]?.razao_social || null;
     try {
-      const registros = await buscarConsumoHorario(agente, mes, razaoSocial);
-      console.log(`[modulacao] CCEE retornou ${registros.length} períodos`);
-      if (registros.length > 0) await salvarConsumoHorario(agente, registros);
-      else console.warn(`[modulacao] ⚠ Nenhum período de consumo encontrado para "${agente}" em ${mes}`);
+      const { resultado: registros, resultadoPerfil } = await buscarConsumoHorario(agente, mes, razaoSocial);
+      console.log(`[modulacao] CCEE retornou ${registros.length} períodos | ${resultadoPerfil.length} por perfil`);
+      if (registros.length > 0) {
+        await salvarConsumoHorario(agente, registros);
+        if (resultadoPerfil.length > 0) await salvarConsumoHorarioPerfil(agente, resultadoPerfil);
+      } else {
+        console.warn(`[modulacao] ⚠ Nenhum período de consumo encontrado para "${agente}" em ${mes}`);
+      }
     } catch (err) {
       console.error(`[modulacao] ✖ Erro ao baixar consumo: ${err.message}`);
       throw err;
@@ -1957,6 +2177,32 @@ async function processarMesModulacao(agente, mes) {
 
   if (resultados.length) await salvarModulacao(agente, mes, resultados);
   else console.warn(`[modulacao] ⚠ Nenhum resultado calculado — verifique se os submercados e períodos coincidem`);
+
+  // Calcula modulação por (sigla_perfil, submercado)
+  const rConsumoPerfil = await pool.query(`
+    SELECT sigla_perfil, periodo, submercado, consumo_mwh
+    FROM ccee_consumo_horario_perfil
+    WHERE agente = $1 AND mes_referencia = $2
+    ORDER BY periodo ASC
+  `, [agente, mes]);
+
+  if (rConsumoPerfil.rows.length > 0) {
+    const perfis = [...new Set(rConsumoPerfil.rows.map(r => r.sigla_perfil))];
+    const subsPerfil = [...new Set(rConsumoPerfil.rows.map(r => r.submercado))];
+    const resultadosPerfil = [];
+    for (const perfil of perfis) {
+      for (const sub of subsPerfil) {
+        const registros = rConsumoPerfil.rows.filter(r => r.sigla_perfil === perfil && r.submercado === sub);
+        if (!registros.length) continue;
+        const res = calcularModulacaoPorSub(
+          registros.map(r => ({ ...r, submercado: sub })),
+          pldMapa, sub
+        );
+        if (res) resultadosPerfil.push({ ...res, sigla_perfil: perfil });
+      }
+    }
+    if (resultadosPerfil.length) await salvarModulacaoPerfil(agente, mes, resultadosPerfil);
+  }
 
   return resultados.length ? "done" : "no_results";
 }
@@ -2345,8 +2591,9 @@ app.get("/inteligencia/:agente/modulacao/solicitar", async (req, res) => {
       );
       if (existeConsumo.rows.length === 0) {
         console.log(`[job ${jobId}] Baixando consumo horário ${agente} ${mes}...`);
-        const registros = await buscarConsumoHorario(agente, mes);
+        const { resultado: registros, resultadoPerfil } = await buscarConsumoHorario(agente, mes);
         if (registros.length > 0) await salvarConsumoHorario(agente, registros);
+        if (resultadoPerfil.length > 0) await salvarConsumoHorarioPerfil(agente, resultadoPerfil);
       }
 
       // Busca consumo do banco
@@ -2437,11 +2684,19 @@ app.delete("/admin/consumo-horario/:agente", async (req, res) => {
     const params = mes ? [agente, mes] : [agente];
     const where  = mes ? "agente = $1 AND mes_referencia = $2" : "agente = $1";
 
-    const rC = await pool.query(`DELETE FROM ccee_consumo_horario WHERE ${where} RETURNING 1`, params);
-    const rM = await pool.query(`DELETE FROM ccee_modulacao       WHERE ${where} RETURNING 1`, params);
+    const [rC, rM, rCP, rMP] = await Promise.all([
+      pool.query(`DELETE FROM ccee_consumo_horario        WHERE ${where} RETURNING 1`, params),
+      pool.query(`DELETE FROM ccee_modulacao              WHERE ${where} RETURNING 1`, params),
+      pool.query(`DELETE FROM ccee_consumo_horario_perfil WHERE ${where} RETURNING 1`, params),
+      pool.query(`DELETE FROM ccee_modulacao_perfil       WHERE ${where} RETURNING 1`, params),
+    ]);
 
     console.log(`[admin] Consumo/modulação deletados para ${agente}${mes ? ` ${mes}` : " (todos os meses)"}`);
-    return res.json({ agente, mes: mes || "todos", consumo_deletado: rC.rowCount, modulacao_deletada: rM.rowCount });
+    return res.json({
+      agente, mes: mes || "todos",
+      consumo_deletado: rC.rowCount, modulacao_deletada: rM.rowCount,
+      consumo_perfil_deletado: rCP.rowCount, modulacao_perfil_deletada: rMP.rowCount,
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

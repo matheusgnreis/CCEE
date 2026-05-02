@@ -2,8 +2,13 @@
 -- Para resetar o banco: node db/reset.js
 
 -- ─── Drop (ordem respeita FKs) ────────────────────────────────────────────────
+DROP TABLE IF EXISTS ccee_modulacao_perfil;
+DROP TABLE IF EXISTS ccee_modulacao_geracao;
 DROP TABLE IF EXISTS ccee_modulacao;
+DROP TABLE IF EXISTS ccee_consumo_horario_perfil;
 DROP TABLE IF EXISTS ccee_consumo_horario;
+DROP TABLE IF EXISTS ccee_geracao_horaria;
+DROP TABLE IF EXISTS ccee_contabilizacao;
 DROP TABLE IF EXISTS ccee_jobs;
 DROP TABLE IF EXISTS ccee_usinas;
 DROP TABLE IF EXISTS ccee_cargas;
@@ -145,15 +150,17 @@ CREATE INDEX idx_mod_mes    ON ccee_modulacao (mes_referencia);
 
 -- ─── Geração horária ─────────────────────────────────────────────────────────
 -- periodo = hora-do-mês base 1 (1–744). geracao_mwmed = GERACAO_CENTRO_GRAVIDADE.
+-- sigla_usina = SIGLA_PARCELA_USINA do CSV de geração.
 CREATE TABLE ccee_geracao_horaria (
   id             SERIAL      PRIMARY KEY,
   agente         TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
   mes_referencia CHAR(7)     NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  sigla_usina    TEXT        NOT NULL,
   periodo        INTEGER     NOT NULL,
   submercado     TEXT        NOT NULL,
   geracao_mwmed  NUMERIC     NOT NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT uniq_geracao_horaria UNIQUE (agente, mes_referencia, periodo, submercado)
+  CONSTRAINT uniq_geracao_horaria UNIQUE (agente, mes_referencia, periodo, submercado, sigla_usina)
 );
 
 CREATE INDEX idx_gh_agente     ON ccee_geracao_horaria (agente);
@@ -165,6 +172,7 @@ CREATE TABLE ccee_modulacao_geracao (
   id                     SERIAL      PRIMARY KEY,
   agente                 TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
   mes_referencia         CHAR(7)     NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  sigla_usina            TEXT        NOT NULL,
   submercado             TEXT        NOT NULL,
   geracao_total_mwh      NUMERIC     NOT NULL,
   n_horas                INTEGER     NOT NULL,
@@ -172,7 +180,7 @@ CREATE TABLE ccee_modulacao_geracao (
   soma_flat_rs           NUMERIC     NOT NULL,
   custo_modulacao_rs_mwh NUMERIC     NOT NULL,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT uniq_modulacao_geracao UNIQUE (agente, mes_referencia, submercado)
+  CONSTRAINT uniq_modulacao_geracao UNIQUE (agente, mes_referencia, sigla_usina, submercado)
 );
 
 CREATE INDEX idx_modg_agente ON ccee_modulacao_geracao (agente);
@@ -208,6 +216,42 @@ CREATE TABLE ccee_contabilizacao (
 
 CREATE INDEX idx_cont_agente ON ccee_contabilizacao (agente);
 CREATE INDEX idx_cont_mes    ON ccee_contabilizacao (mes_referencia);
+
+-- ─── Consumo horário por perfil de agente ────────────────────────────────────
+-- sigla_perfil = SIGLA_PERFIL_AGENTE do CSV de consumo (perfil individual).
+CREATE TABLE ccee_consumo_horario_perfil (
+  id             SERIAL      PRIMARY KEY,
+  agente         TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  mes_referencia CHAR(7)     NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  sigla_perfil   TEXT        NOT NULL,
+  periodo        INTEGER     NOT NULL,
+  submercado     TEXT        NOT NULL,
+  consumo_mwh    NUMERIC     NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uniq_consumo_perfil UNIQUE (agente, mes_referencia, sigla_perfil, periodo, submercado)
+);
+
+CREATE INDEX idx_chp_agente ON ccee_consumo_horario_perfil (agente);
+CREATE INDEX idx_chp_mes    ON ccee_consumo_horario_perfil (mes_referencia);
+
+-- ─── Modulação horária por perfil de agente ───────────────────────────────────
+CREATE TABLE ccee_modulacao_perfil (
+  id                     SERIAL      PRIMARY KEY,
+  agente                 TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  mes_referencia         CHAR(7)     NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  sigla_perfil           TEXT        NOT NULL,
+  submercado             TEXT        NOT NULL,
+  consumo_total_mwh      NUMERIC     NOT NULL,
+  n_horas                INTEGER     NOT NULL,
+  soma_curva_rs          NUMERIC     NOT NULL,
+  soma_flat_rs           NUMERIC     NOT NULL,
+  custo_modulacao_rs_mwh NUMERIC     NOT NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uniq_modulacao_perfil UNIQUE (agente, mes_referencia, sigla_perfil, submercado)
+);
+
+CREATE INDEX idx_modp_agente ON ccee_modulacao_perfil (agente);
+CREATE INDEX idx_modp_mes    ON ccee_modulacao_perfil (mes_referencia);
 
 -- ─── Jobs assíncronos ─────────────────────────────────────────────────────────
 CREATE TABLE ccee_jobs (

@@ -1,5 +1,5 @@
+import React, { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   LineChart, AreaChart, Area, Line, XAxis, YAxis, CartesianGrid,
@@ -98,15 +98,22 @@ export default function AgenteDashboard() {
   const [contabilizacao,   setContabilizacao]   = useState([]);
   const [loadingContab,    setLoadingContab]    = useState(false);
 
-  const [curvaCarga,       setCurvaCarga]       = useState([]);
-  const [loadingCurva,     setLoadingCurva]     = useState(false);
-  const [curvaGeracao,     setCurvaGeracao]     = useState([]);
-  const [loadingCurvaGer,  setLoadingCurvaGer]  = useState(false);
-  const [activeUsinaGer,   setActiveUsinaGer]   = useState(null);
-  const [activeSubCarga,   setActiveSubCarga]   = useState(null);
+  const [curvaCarga,        setCurvaCarga]        = useState([]);
+  const [loadingCurva,      setLoadingCurva]      = useState(false);
+  const [curvaCargaPerfil,  setCurvaCargaPerfil]  = useState([]);
+  const [activePerfilCarga, setActivePerfilCarga] = useState(null);
+  const [curvaGeracao,      setCurvaGeracao]      = useState([]);
+  const [loadingCurvaGer,   setLoadingCurvaGer]   = useState(false);
+  const [activeUsinaGer,    setActiveUsinaGer]    = useState(null);
+  const [activeSubCarga,    setActiveSubCarga]    = useState(null);
 
   const [sazonalizacao,    setSazonalizacao]    = useState(null);
   const [contratoMWm,      setContratoMWm]      = useState("");
+
+  const [modulacaoPerfil,   setModulacaoPerfil]   = useState(null);
+  const [sazMode,           setSazMode]           = useState("total"); // "total" | "sub" | "perfil"
+  const [sazoSub,           setSazoSub]           = useState(null);
+  const [sazoPerfilData,    setSazoPerfilData]     = useState(null);
 
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
@@ -205,9 +212,24 @@ export default function AgenteDashboard() {
       .catch(() => {})
       .finally(() => setLoadingCurva(false));
 
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga-perfil`)
+      .then(r => r.json())
+      .then(json => { if (!json.error) setCurvaCargaPerfil(json); })
+      .catch(() => {});
+
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/sazonalizacao`)
       .then(r => r.json())
       .then(json => { if (!json.error) setSazonalizacao(json); })
+      .catch(() => {});
+
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/sazonalizacao?modo=sub`)
+      .then(r => r.json())
+      .then(json => { if (!json.error) setSazoSub(json); })
+      .catch(() => {});
+
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/sazonalizacao?modo=perfil`)
+      .then(r => r.json())
+      .then(json => { if (!json.error) setSazoPerfilData(json); })
       .catch(() => {});
 
     setLoadingCurvaGer(true);
@@ -281,6 +303,15 @@ export default function AgenteDashboard() {
       modulacaoIntervalRef.current = null;
     };
   }, [agente, loadingHist]);
+
+  // ── Busca modulação por perfil quando mês selecionado muda ──────────────────
+  useEffect(() => {
+    if (!agente || !mesSelecionado) return;
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/modulacao-perfil?mes=${mesSelecionado}`)
+      .then(r => r.json())
+      .then(json => { if (!json.error) setModulacaoPerfil(json); })
+      .catch(() => {});
+  }, [agente, mesSelecionado]);
 
   // ── 6. Polling modulação de geração ──────────────────────────────────────────
   useEffect(() => {
@@ -592,6 +623,93 @@ export default function AgenteDashboard() {
           );
         })()}
 
+        {/* ── Curva de Carga por Perfil (só mostra quando há 2+ perfis distintos) ── */}
+        {curvaCargaPerfil.length > 0 && [...new Set(curvaCargaPerfil.map(r => r.sigla_perfil))].length > 1 && (() => {
+          const CORES = ["#2563eb","#059669","#f59e0b","#dc2626","#7c3aed","#0891b2","#ea580c","#16a34a"];
+          const perfis = [...new Set(curvaCargaPerfil.map(r => r.sigla_perfil))];
+          const porHora = {};
+          for (const r of curvaCargaPerfil) {
+            if (!porHora[r.hora]) porHora[r.hora] = { hora: r.hora };
+            porHora[r.hora][r.sigla_perfil] = r.pu;
+          }
+          const dados = Object.values(porHora).sort((a, b) => a.hora - b.hora);
+
+          return (
+            <div style={s.chartBox}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+                <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Carga por Perfil</h2>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu por perfil de agente</span>
+                {activePerfilCarga && (
+                  <button onClick={() => setActivePerfilCarga(null)}
+                    style={{ fontSize: 11, color: "#6b7280", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>
+                    ver todos
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                {perfis.map((p, i) => {
+                  const cor   = CORES[i % CORES.length];
+                  const ativa = !activePerfilCarga || activePerfilCarga === p;
+                  return (
+                    <button key={p} onClick={() => setActivePerfilCarga(prev => prev === p ? null : p)} style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      fontSize: 11, fontWeight: 600,
+                      color: ativa ? cor : "#94a3b8",
+                      background: ativa ? `${cor}18` : "#f8fafc",
+                      border: `1px solid ${ativa ? cor : "#e2e8f0"}`,
+                      borderRadius: 20, padding: "4px 10px",
+                      cursor: "pointer", transition: "all 0.15s",
+                    }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: ativa ? cor : "#d1d5db", flexShrink: 0 }} />
+                      {p}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={dados} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <defs>
+                    {perfis.map((p, i) => (
+                      <linearGradient key={p} id={`gradCargaPerfil${i}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={CORES[i % CORES.length]} stopOpacity={0.22} />
+                        <stop offset="95%" stopColor={CORES[i % CORES.length]} stopOpacity={0.01} />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f4f8" />
+                  <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,"0")}h`} tick={{ fontSize: 11, fill: "#64748b" }} interval={1} />
+                  <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fontSize: 11, fill: "#64748b" }} width={42} />
+                  <Tooltip
+                    labelFormatter={h => `Hora ${String(h).padStart(2,"0")}:00`}
+                    formatter={(v, name) => [`${(v*100).toFixed(1)}%`, name]}
+                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                  />
+                  <ReferenceLine y={1} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+                  {perfis.map((p, i) => {
+                    const ativa = !activePerfilCarga || activePerfilCarga === p;
+                    return (
+                      <Area
+                        key={p}
+                        type="monotone"
+                        dataKey={p}
+                        name={p}
+                        stroke={CORES[i % CORES.length]}
+                        strokeWidth={activePerfilCarga === p ? 2.5 : 1.5}
+                        strokeOpacity={ativa ? 1 : 0.1}
+                        fill={ativa ? `url(#gradCargaPerfil${i})` : "transparent"}
+                        dot={false}
+                        activeDot={ativa ? { r: 4 } : false}
+                      />
+                    );
+                  })}
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          );
+        })()}
+
         {/* ── Curva de Geração por Usina ───────────────────────── */}
         {curvaGeracao.length > 0 && (() => {
           const CORES = ["#059669","#2563eb","#f59e0b","#dc2626","#7c3aed","#0891b2","#ea580c","#16a34a"];
@@ -872,6 +990,46 @@ export default function AgenteDashboard() {
           </div>
         )}
 
+        {/* ── Modulação Horária — por Perfil ──────────────────── */}
+        {!loadingHist && modulacaoPerfil?.resultados?.length > 0 && (
+          <div style={s.chartBox}>
+            <div style={s.cargasHeader}>
+              <h2 style={s.chartTitle}>Modulação Horária — por Perfil</h2>
+              <span style={{ fontSize: 13, color: "#64748b" }}>{mesSelecionado}</span>
+            </div>
+            <div style={s.tableScroll}>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    {["Perfil","Submercado","Consumo (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)"].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {modulacaoPerfil.resultados.map((r, i) => {
+                    const custo = Number(r.custo_modulacao_rs_mwh);
+                    const cor   = custo > 0 ? "#dc2626" : custo < 0 ? "#16a34a" : "#374151";
+                    return (
+                      <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                        <td style={{ ...s.td, fontWeight: 600, whiteSpace: "nowrap" }}>{r.sigla_perfil}</td>
+                        <td style={s.td}>{r.submercado}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.consumo_total_mwh)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{r.n_horas}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_curva_rs)}</td>
+                        <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.soma_flat_rs)}</td>
+                        <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: cor }}>
+                          {custo > 0 ? "+" : ""}{fmt(custo)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* ── Unidades Geradoras ───────────────────────────────── */}
         {!loadingHist && usinas.length > 0 && (
           <div style={s.chartBox}>
@@ -1061,96 +1219,213 @@ export default function AgenteDashboard() {
                   <span style={{ fontSize: 11, color: "#94a3b8" }}>use vírgula — ex: {sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
                 </div>
               </div>
-              {contrato > 0 && Math.abs(contrato / sazonalizacao.media_mwm - 1) > 0.5 && (
-                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 14px", marginBottom: 12, fontSize: 12, color: "#92400e" }}>
-                  ⚠ Montante informado ({contrato.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm) difere muito da média histórica ({sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm). Verifique se o valor está correto — use vírgula como separador decimal.
-                </div>
+
+              {/* Tabs */}
+              <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "2px solid #e2e8f0", paddingBottom: 0 }}>
+                {[["total","Total"],["sub","Por Submercado"],["perfil","Por Perfil"]].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setSazMode(key)}
+                    style={{
+                      padding: "7px 16px", fontSize: 13, fontWeight: sazMode === key ? 700 : 400,
+                      background: "none", border: "none", cursor: "pointer",
+                      borderBottom: sazMode === key ? "2px solid #2563eb" : "2px solid transparent",
+                      color: sazMode === key ? "#2563eb" : "#64748b",
+                      marginBottom: -2, outline: "none",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {sazMode === "total" && (
+                <>
+                  {contrato > 0 && Math.abs(contrato / sazonalizacao.media_mwm - 1) > 0.5 && (
+                    <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 14px", marginBottom: 12, fontSize: 12, color: "#92400e" }}>
+                      ⚠ Montante informado ({contrato.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm) difere muito da média histórica ({sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} MWm). Verifique se o valor está correto — use vírgula como separador decimal.
+                    </div>
+                  )}
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ ...s.table, fontSize: 12 }}>
+                      <thead>
+                        <tr>
+                          {["Mês", "Horas", `Base (MWm) ${sazonalizacao.ano_base}`, "Part. (%)", "Sugestão (MWm)", `Realizado ${sazonalizacao.ano_atual} (MWm)`, "Aderência", "Desvio do flat"].map(h => (
+                            <th key={h} style={{ ...s.th, textAlign: h === "Mês" ? "left" : "right" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sazonalizacao.meses.map((m, i) => {
+                          const mesNum      = Number(m.mes.split("-")[1]);
+                          const diasAlvo    = new Date(anoAlvo, mesNum, 0).getDate();
+                          const horasMes    = diasAlvo * 24;
+                          const part        = m.participacao_pct / 100;
+                          const mwhSug      = contrato > 0 ? totalMWhContratado * part : null;
+                          const mwmSug      = mwhSug != null ? mwhSug / horasMes : null;
+                          const flatMWh     = contrato > 0 ? contrato * horasMes : null;
+                          const fator       = (flatMWh && flatMWh > 0 && mwhSug != null) ? mwhSug / flatMWh : null;
+                          const corFator    = fator == null ? "#374151" : fator > 1.05 ? "#dc2626" : fator < 0.95 ? "#2563eb" : "#16a34a";
+                          const realizado   = sazonalizacao.realizado_atual?.[mesNum] ?? null;
+                          const aderencia   = (realizado != null && mwmSug != null && mwmSug > 0)
+                                                ? realizado / mwmSug
+                                                : null;
+                          const corAder     = aderencia == null ? "#374151"
+                                            : aderencia > 1.05 ? "#dc2626"
+                                            : aderencia < 0.95 ? "#2563eb"
+                                            : "#16a34a";
+                          return (
+                            <tr key={m.mes} style={i % 2 === 0 ? s.trEven : {}}>
+                              <td style={s.td}><strong>{MESES_PT[mesNum - 1]}/{anoAlvo}</strong></td>
+                              <td style={{ ...s.td, textAlign: "right" }}>{horasMes}</td>
+                              <td style={{ ...s.td, textAlign: "right", color: "#64748b" }}>
+                                {m.consumo_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                              </td>
+                              <td style={{ ...s.td, textAlign: "right", fontWeight: 600 }}>
+                                {m.participacao_pct.toFixed(2)}%
+                              </td>
+                              <td style={{ ...s.td, textAlign: "right", fontWeight: 600 }}>
+                                {mwmSug != null ? mwmSug.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : "—"}
+                              </td>
+                              <td style={{ ...s.td, textAlign: "right", color: realizado != null ? "#0f172a" : "#94a3b8" }}>
+                                {realizado != null ? realizado.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : "—"}
+                              </td>
+                              <td style={{ ...s.td, textAlign: "right", fontWeight: aderencia != null ? 700 : 400, color: corAder }}>
+                                {aderencia != null ? `${(aderencia * 100).toFixed(1)}%` : "—"}
+                              </td>
+                              <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: corFator }}>
+                                {fator != null ? `${(fator * 100).toFixed(1)}%` : "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      {contrato > 0 && (
+                        <tfoot>
+                          <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
+                            <td style={s.td}>Total / Média</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>{horasAlvo}</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>
+                              {sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                            </td>
+                            <td style={{ ...s.td, textAlign: "right" }}>100,00%</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>
+                              {contrato.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                            </td>
+                            <td style={{ ...s.td, textAlign: "right", color: "#64748b" }}>
+                              {(() => {
+                                const vals = Object.values(sazonalizacao.realizado_atual || {});
+                                if (!vals.length) return "—";
+                                const soma  = vals.reduce((s, v) => s + v, 0);
+                                const media = soma / vals.length;
+                                return media.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+                              })()}
+                            </td>
+                            <td style={{ ...s.td, textAlign: "right" }}>—</td>
+                            <td style={{ ...s.td, textAlign: "right" }}>—</td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+                </>
               )}
 
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ ...s.table, fontSize: 12 }}>
-                  <thead>
-                    <tr>
-                      {["Mês", "Horas", `Base (MWm) ${sazonalizacao.ano_base}`, "Part. (%)", "Sugestão (MWm)", `Realizado ${sazonalizacao.ano_atual} (MWm)`, "Aderência", "Desvio do flat"].map(h => (
-                        <th key={h} style={{ ...s.th, textAlign: h === "Mês" ? "left" : "right" }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sazonalizacao.meses.map((m, i) => {
-                      const mesNum      = Number(m.mes.split("-")[1]);
-                      const diasAlvo    = new Date(anoAlvo, mesNum, 0).getDate();
-                      const horasMes    = diasAlvo * 24;
-                      const part        = m.participacao_pct / 100;
-                      const mwhSug      = contrato > 0 ? totalMWhContratado * part : null;
-                      const mwmSug      = mwhSug != null ? mwhSug / horasMes : null;
-                      const flatMWh     = contrato > 0 ? contrato * horasMes : null;
-                      const fator       = (flatMWh && flatMWh > 0 && mwhSug != null) ? mwhSug / flatMWh : null;
-                      const corFator    = fator == null ? "#374151" : fator > 1.05 ? "#dc2626" : fator < 0.95 ? "#2563eb" : "#16a34a";
-                      // Realizado do ano atual para este mês (se disponível)
-                      const realizado   = sazonalizacao.realizado_atual?.[mesNum] ?? null;
-                      // Aderência: realizado vs sugestão (só mostra se ambos existem)
-                      const aderencia   = (realizado != null && mwmSug != null && mwmSug > 0)
-                                            ? realizado / mwmSug
-                                            : null;
-                      const corAder     = aderencia == null ? "#374151"
-                                        : aderencia > 1.05 ? "#dc2626"
-                                        : aderencia < 0.95 ? "#2563eb"
-                                        : "#16a34a";
-                      return (
-                        <tr key={m.mes} style={i % 2 === 0 ? s.trEven : {}}>
-                          <td style={s.td}><strong>{MESES_PT[mesNum - 1]}/{anoAlvo}</strong></td>
-                          <td style={{ ...s.td, textAlign: "right" }}>{horasMes}</td>
-                          <td style={{ ...s.td, textAlign: "right", color: "#64748b" }}>
-                            {m.consumo_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                          </td>
-                          <td style={{ ...s.td, textAlign: "right", fontWeight: 600 }}>
-                            {m.participacao_pct.toFixed(2)}%
-                          </td>
-                          <td style={{ ...s.td, textAlign: "right", fontWeight: 600 }}>
-                            {mwmSug != null ? mwmSug.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : "—"}
-                          </td>
-                          <td style={{ ...s.td, textAlign: "right", color: realizado != null ? "#0f172a" : "#94a3b8" }}>
-                            {realizado != null ? realizado.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : "—"}
-                          </td>
-                          <td style={{ ...s.td, textAlign: "right", fontWeight: aderencia != null ? 700 : 400, color: corAder }}>
-                            {aderencia != null ? `${(aderencia * 100).toFixed(1)}%` : "—"}
-                          </td>
-                          <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: corFator }}>
-                            {fator != null ? `${(fator * 100).toFixed(1)}%` : "—"}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  {contrato > 0 && (
-                    <tfoot>
-                      <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
-                        <td style={s.td}>Total / Média</td>
-                        <td style={{ ...s.td, textAlign: "right" }}>{horasAlvo}</td>
-                        <td style={{ ...s.td, textAlign: "right" }}>
-                          {sazonalizacao.media_mwm.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                        </td>
-                        <td style={{ ...s.td, textAlign: "right" }}>100,00%</td>
-                        <td style={{ ...s.td, textAlign: "right" }}>
-                          {contrato.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                        </td>
-                        <td style={{ ...s.td, textAlign: "right", color: "#64748b" }}>
-                          {(() => {
-                            const vals = Object.values(sazonalizacao.realizado_atual || {});
-                            if (!vals.length) return "—";
-                            const soma  = vals.reduce((s, v) => s + v, 0);
-                            const media = soma / vals.length;
-                            return media.toLocaleString("pt-BR", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-                          })()}
-                        </td>
-                        <td style={{ ...s.td, textAlign: "right" }}>—</td>
-                        <td style={{ ...s.td, textAlign: "right" }}>—</td>
-                      </tr>
-                    </tfoot>
-                  )}
-                </table>
-              </div>
+              {sazMode === "sub" && (
+                sazoSub ? (() => {
+                  const subs = [...new Set(sazoSub.meses.map(m => m.submercado))].sort();
+                  const mesesBase = [...new Set(sazoSub.meses.map(m => m.mes))].sort();
+                  const dataMap = {};
+                  sazoSub.meses.forEach(m => { dataMap[`${m.mes}|${m.submercado}`] = m; });
+                  return (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ ...s.table, fontSize: 12 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ ...s.th, textAlign: "left" }}>Mês ({sazoSub.ano_base})</th>
+                            {subs.map(sub => (
+                              <React.Fragment key={sub}>
+                                <th style={{ ...s.th, textAlign: "right" }}>{sub} Part. (%)</th>
+                                <th style={{ ...s.th, textAlign: "right" }}>{sub} Real. {sazoSub.ano_atual} (MWh)</th>
+                              </React.Fragment>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mesesBase.map((mes_r, i) => {
+                            const mesNum = Number(mes_r.split("-")[1]);
+                            return (
+                              <tr key={mes_r} style={i % 2 === 0 ? s.trEven : {}}>
+                                <td style={s.td}><strong>{MESES_PT[mesNum - 1]}</strong></td>
+                                {subs.map(sub => {
+                                  const d = dataMap[`${mes_r}|${sub}`];
+                                  return (
+                                    <React.Fragment key={sub}>
+                                      <td style={{ ...s.td, textAlign: "right" }}>{d ? `${d.participacao_pct.toFixed(2)}%` : "—"}</td>
+                                      <td style={{ ...s.td, textAlign: "right", color: d?.realizado_mwh != null ? "#0f172a" : "#94a3b8" }}>
+                                        {d?.realizado_mwh != null ? d.realizado_mwh.toLocaleString("pt-BR", { maximumFractionDigits: 2 }) : "—"}
+                                      </td>
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()
+                : <p style={{ fontSize: 14, color: "#94a3b8", padding: "16px 0" }}>Dados de consumo horário necessários</p>
+              )}
+
+              {sazMode === "perfil" && (
+                sazoPerfilData ? (() => {
+                  const perfis = [...new Set(sazoPerfilData.meses.map(m => m.sigla_perfil))].sort();
+                  const mesesBase = [...new Set(sazoPerfilData.meses.map(m => m.mes))].sort();
+                  const dataMap = {};
+                  sazoPerfilData.meses.forEach(m => { dataMap[`${m.mes}|${m.sigla_perfil}`] = m; });
+                  return (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ ...s.table, fontSize: 12 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ ...s.th, textAlign: "left" }}>Mês ({sazoPerfilData.ano_base})</th>
+                            {perfis.map(p => (
+                              <React.Fragment key={p}>
+                                <th style={{ ...s.th, textAlign: "right" }}>{p} Part. (%)</th>
+                                <th style={{ ...s.th, textAlign: "right" }}>{p} Real. {sazoPerfilData.ano_atual} (MWh)</th>
+                              </React.Fragment>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mesesBase.map((mes_r, i) => {
+                            const mesNum = Number(mes_r.split("-")[1]);
+                            return (
+                              <tr key={mes_r} style={i % 2 === 0 ? s.trEven : {}}>
+                                <td style={s.td}><strong>{MESES_PT[mesNum - 1]}</strong></td>
+                                {perfis.map(p => {
+                                  const d = dataMap[`${mes_r}|${p}`];
+                                  return (
+                                    <React.Fragment key={p}>
+                                      <td style={{ ...s.td, textAlign: "right" }}>{d ? `${d.participacao_pct.toFixed(2)}%` : "—"}</td>
+                                      <td style={{ ...s.td, textAlign: "right", color: d?.realizado_mwh != null ? "#0f172a" : "#94a3b8" }}>
+                                        {d?.realizado_mwh != null ? d.realizado_mwh.toLocaleString("pt-BR", { maximumFractionDigits: 2 }) : "—"}
+                                      </td>
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()
+                : <p style={{ fontSize: 14, color: "#94a3b8", padding: "16px 0" }}>Dados de consumo horário necessários</p>
+              )}
             </div>
           );
         })()}

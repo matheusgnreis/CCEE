@@ -1,21 +1,49 @@
-# CCEE SaaS
+# CCEE Monitor
 
-## rodar local
+## Rodar local
 
-### banco
-criar postgres e rodar /db/schema.sql
-
-### api
-cd api
+```bash
 npm install
-node index.js
+```
 
-### collector
-cd collector
-npm install
-node collector.js
+### API (Express)
+```bash
+npm run api
+```
 
-### web
-cd web
-npm install
-npm run dev
+### Frontend (Next.js)
+```bash
+npm run web
+```
+
+### Banco de dados
+Criar instância Postgres e executar o schema:
+```bash
+psql $DATABASE_URL -f db/schema.sql
+```
+
+### Coletor
+```bash
+npm run collector
+```
+
+## Scripts de dados
+
+### Processar todos os agentes (consumo + modulação + contabilização)
+```bash
+node scripts/rodar-modulacao-batch.js
+```
+
+### Backfill de dados por perfil (rodar uma vez após migração)
+```bash
+node scripts/backfill-perfil.js
+node scripts/rodar-modulacao-batch.js
+```
+
+## Variáveis de ambiente
+
+```
+DATABASE_URL=postgres://...
+API_URL=http://localhost:3001
+NEXT_PUBLIC_API_URL=http://localhost:3001
+```

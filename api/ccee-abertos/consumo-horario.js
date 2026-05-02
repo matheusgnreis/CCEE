@@ -192,10 +192,10 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
   };
 
   const agregado        = {};
+  const agregadoPerfil  = {};
   let   encontrou       = false;
   let   siglasAmostra   = new Set();
   let   subBrutoAmostra = new Set();
-  const vistosKey       = new Set(); // dedup quando ambos os filtros batem na mesma linha
 
   const headers = await downloadExclusivo(recurso.url, () => streamCsv(recurso.url, (row) => {
     const sigla = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
@@ -238,6 +238,13 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
       agregado[key] = { sigla_perfil_agente: siglaPerfilAgente, mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
     }
     agregado[key].consumo_mwh += consumo;
+
+    // Agrega também por perfil individual (sigla da linha, não da empresa)
+    const keyPerfil = `${sigla}|${periodo}|${submercado}`;
+    if (!agregadoPerfil[keyPerfil]) {
+      agregadoPerfil[keyPerfil] = { sigla_perfil: sigla, mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
+    }
+    agregadoPerfil[keyPerfil].consumo_mwh += consumo;
   }));
 
   console.log(`  Submercado bruto (amostra): ${[...subBrutoAmostra].join(", ")}`);
@@ -250,12 +257,17 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
   }
 
   const resultado = Object.values(agregado).sort((a, b) => a.periodo - b.periodo);
+  const resultadoPerfil = Object.values(agregadoPerfil).sort((a, b) =>
+    a.sigla_perfil.localeCompare(b.sigla_perfil) || a.periodo - b.periodo
+  );
   const subs = [...new Set(resultado.map(r => r.submercado))];
+  const perfis = [...new Set(resultadoPerfil.map(r => r.sigla_perfil))];
   console.log(`  Submercados no consumo: ${subs.join(", ") || "(nenhum)"}`);
+  console.log(`  Perfis encontrados: ${perfis.join(", ") || "(nenhum)"}`);
   console.log(`  Período mín/máx: ${resultado[0]?.periodo} – ${resultado[resultado.length - 1]?.periodo}`);
-  console.log(`  ✅ ${resultado.length} períodos para "${siglaPerfilAgente}"`);
+  console.log(`  ✅ ${resultado.length} períodos | ${resultadoPerfil.length} períodos por perfil`);
 
-  return resultado;
+  return { resultado, resultadoPerfil };
 }
 
 async function mesesDisponiveis() {
