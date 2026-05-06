@@ -33,11 +33,14 @@ const pool = new Pool({
 });
 
 const AGENTES = [
-  "ACOFORJA", "BR METALS", "CEMIG GERA CAMARGOS CONV", "CEMIG H COMERCIALIZACAO",
+  // Com 2026-03 em ccee_dados mas sem modulação calculada
+  "ACOFORJA", "ACUMENT", "ARCOR", "BR METALS",
   "JSPS", "LPA", "MCCAIN", "MINASLIGAS", "PARTAGEMSB", "PNSN",
   "PSCG", "PSM", "PSRG", "PSSG", "SHOP 3 AMERICAS", "SHOP BOULEVARD CAMPOS I",
   "SHOP PATIO ARAPIRACA", "SHOPPING POCOS DE CALDAS", "SHOP SANTANA PARQUE",
-  "SUPER BH 001", "SUPERMERCADOS BH ATAC1", "UTE WD", "VIBRA",
+  "SUPER BH 001", "SUPERMERCADOS BH ATAC1", "VIBRA",
+  // Ainda em 2026-02 no banco — batch buscará 2026-03 e calculará meses pendentes anteriores
+  "CEMIG GERA CAMARGOS CONV", "CEMIG H COMERCIALIZACAO", "UTE WD",
 ];
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
