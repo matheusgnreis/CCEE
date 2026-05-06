@@ -32,16 +32,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-const AGENTES = [
-  // Com 2026-03 em ccee_dados mas sem modulação calculada
-  "ACOFORJA", "ACUMENT", "ARCOR", "BR METALS",
-  "JSPS", "LPA", "MCCAIN", "MINASLIGAS", "PARTAGEMSB", "PNSN",
-  "PSCG", "PSM", "PSRG", "PSSG", "SHOP 3 AMERICAS", "SHOP BOULEVARD CAMPOS I",
-  "SHOP PATIO ARAPIRACA", "SHOPPING POCOS DE CALDAS", "SHOP SANTANA PARQUE",
-  "SUPER BH 001", "SUPERMERCADOS BH ATAC1", "VIBRA",
-  // Ainda em 2026-02 no banco — batch buscará 2026-03 e calculará meses pendentes anteriores
-  "CEMIG GERA CAMARGOS CONV", "CEMIG H COMERCIALIZACAO", "UTE WD",
-];
+// Lista completa de agentes — carregada do banco em carregarMeta()
+// Não precisa manter manualmente: qualquer agente em ccee_agentes é processado
+let AGENTES = [];
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 
@@ -111,13 +104,13 @@ async function streamGzip(url, onLinha) {
 // ─── Carga de metadados do banco ──────────────────────────────────────────────
 
 async function carregarMeta() {
-  // Razão social por agente (para filtrar consumo por NOME_EMPRESARIAL)
-  const rMeta = await pool.query(
-    "SELECT agente, razao_social FROM ccee_agentes WHERE agente = ANY($1)",
-    [AGENTES]
-  );
+  // Carrega todos os agentes do banco (sem lista hardcoded)
+  const rTodos = await pool.query("SELECT agente, razao_social FROM ccee_agentes ORDER BY agente");
+  AGENTES = rTodos.rows.map(r => r.agente);
+  console.log(`[meta] ${AGENTES.length} agentes carregados do banco`);
+
   const razaoMap = {};
-  rMeta.rows.forEach(r => { razaoMap[r.agente] = r.razao_social; });
+  rTodos.rows.forEach(r => { razaoMap[r.agente] = r.razao_social; });
 
   // Usinas por agente (para filtrar geração por SIGLA_USINA)
   const rUsinas = await pool.query(
@@ -151,24 +144,32 @@ async function carregarMeta() {
 // ─── Meses pendentes ──────────────────────────────────────────────────────────
 
 async function mesesPendentesPorAgente() {
-  const [rModCarga, rModGer, rDados] = await Promise.all([
-    pool.query("SELECT agente, mes_referencia FROM ccee_modulacao       WHERE agente = ANY($1)", [AGENTES]),
+  // Meses disponíveis no CKAN (fonte da verdade — independe do ccee_dados)
+  const recursosCKAN = await listarConsumo();
+  const mesesCKAN    = recursosCKAN.map(r => r.mes).filter(m => m >= PRIMEIRO_MES);
+  console.log(`[pendentes] CKAN: ${mesesCKAN.length} meses disponíveis (${mesesCKAN[0]} → ${mesesCKAN[mesesCKAN.length - 1]})`);
+
+  const [rModCarga, rModGer, rGerHoraria] = await Promise.all([
+    pool.query("SELECT agente, mes_referencia FROM ccee_modulacao        WHERE agente = ANY($1)", [AGENTES]),
     pool.query("SELECT agente, mes_referencia FROM ccee_modulacao_geracao WHERE agente = ANY($1)", [AGENTES]),
-    pool.query("SELECT agente, mes             FROM ccee_dados          WHERE agente = ANY($1) AND mes >= $2 ORDER BY mes", [AGENTES, PRIMEIRO_MES]),
+    pool.query("SELECT DISTINCT agente, mes_referencia FROM ccee_geracao_horaria WHERE agente = ANY($1) AND mes_referencia >= $2", [AGENTES, PRIMEIRO_MES]),
   ]);
 
   const cargaOk = new Set(rModCarga.rows.map(r => `${r.agente}|${r.mes_referencia}`));
   const gerOk   = new Set(rModGer.rows.map(r => `${r.agente}|${r.mes_referencia}`));
+  const temGer  = new Set(rGerHoraria.rows.map(r => `${r.agente}|${r.mes_referencia}`));
 
-  // pendCarga[mes] = [agente, ...], pendGer[mes] = [agente, ...]
   const pendCarga = {}, pendGer = {};
-  for (const { agente, mes } of rDados.rows) {
-    if (!cargaOk.has(`${agente}|${mes}`)) {
-      (pendCarga[mes] = pendCarga[mes] || []).push(agente);
-    }
-    // geração só para agentes com usinas
-    if (!gerOk.has(`${agente}|${mes}`)) {
-      (pendGer[mes] = pendGer[mes] || []).push(agente);
+  for (const mes of mesesCKAN) {
+    for (const agente of AGENTES) {
+      // Carga: pendente se não tem modulação para este mês
+      if (!cargaOk.has(`${agente}|${mes}`)) {
+        (pendCarga[mes] = pendCarga[mes] || []).push(agente);
+      }
+      // Geração: pendente só para agentes que têm dados de geração horária
+      if (temGer.has(`${agente}|${mes}`) && !gerOk.has(`${agente}|${mes}`)) {
+        (pendGer[mes] = pendGer[mes] || []).push(agente);
+      }
     }
   }
 
