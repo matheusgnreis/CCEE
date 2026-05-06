@@ -4,8 +4,14 @@
 
 const { fetchTodasPaginas, normalizarMes } = require("./utils");
 
-// resource_id por ano — adicionar anos futuros aqui
-const DATASET_IDS = {
+// Dataset novo (pld_horario_YYYY) — campo PLD_HORA, mais atualizado
+const DATASET_IDS_V2 = {
+  2025: "2a180a6b-f092-43eb-9f82-a48798b803dc",
+  2026: "3f279d6b-1069-42f7-9b0a-217b084729c4",
+};
+
+// Dataset antigo — campo PLD, fallback para meses não cobertos pelo v2
+const DATASET_IDS_V1 = {
   2025: "7267ead9-6039-4ce1-93f3-3471ae33bd98",
   2026: "554cc6f2-9f1e-4163-8a04-573b4aafcbc1",
 };
@@ -16,38 +22,51 @@ const DATASET_IDS = {
  * @param {string} [submercado] - filtrar submercado (opcional)
  * @returns {Promise<Array<{ mes_referencia, periodo, submercado, pld_rs_mwh }>>}
  */
-async function buscarPldHorario(mes, submercado = null) {
-  const ano = parseInt(mes.slice(0, 4), 10);
-  const datasetId = DATASET_IDS[ano];
+const SUB_MAP = { SUDESTE: "SE", SUL: "S", NORDESTE: "NE", NORTE: "N" };
 
-  if (!datasetId) {
-    const disponiveis = Object.keys(DATASET_IDS).join(", ");
-    throw new Error(`PLD horário não disponível para ${ano}. Anos disponíveis: ${disponiveis}`);
-  }
-
-  // MES_REFERENCIA no CKAN está em formato AAAAMM (ex: 202503)
-  const mesFormatado = mes.replace("-", "");
-
-  const filtros = { MES_REFERENCIA: mesFormatado };
-  if (submercado) filtros.SUBMERCADO = submercado.toUpperCase();
-
-  console.log(`\n📥 PLD horário | mês=${mes}${submercado ? ` | sub=${submercado}` : ""}`);
-
-  const registros = await fetchTodasPaginas(datasetId, filtros);
-  console.log(`  ✅ ${registros.length} registros de PLD`);
-
-  // Normaliza submercado para código curto — igual ao consumo horário
-  const SUB_MAP = { SUDESTE: "SE", SUL: "S", NORDESTE: "NE", NORTE: "N" };
-
+function normalizarRegistrosPld(registros, campoPreco) {
   return registros.map(r => {
     const subBruto = (r.SUBMERCADO || "").trim().toUpperCase();
     return {
       mes_referencia: normalizarMes(r.MES_REFERENCIA),
       periodo:        parseInt(r.PERIODO_COMERCIALIZACAO, 10),
       submercado:     SUB_MAP[subBruto] || subBruto,
-      pld_rs_mwh:     parseFloat((r.PLD || "0").toString().replace(",", ".")) || 0,
+      pld_rs_mwh:     parseFloat((r[campoPreco] || "0").toString().replace(",", ".")) || 0,
     };
   }).filter(r => r.periodo && r.submercado);
+}
+
+async function buscarPldHorario(mes, submercado = null) {
+  const ano          = parseInt(mes.slice(0, 4), 10);
+  const mesFormatado = mes.replace("-", "");
+  const filtros      = { MES_REFERENCIA: mesFormatado };
+  if (submercado) filtros.SUBMERCADO = submercado.toUpperCase();
+
+  console.log(`\n📥 PLD horário | mês=${mes}${submercado ? ` | sub=${submercado}` : ""}`);
+
+  // 1. Tenta dataset novo (PLD_HORA — mais atualizado)
+  const idV2 = DATASET_IDS_V2[ano];
+  if (idV2) {
+    const registros = await fetchTodasPaginas(idV2, filtros);
+    if (registros.length > 0) {
+      console.log(`  ✅ ${registros.length} registros de PLD (v2)`);
+      return normalizarRegistrosPld(registros, "PLD_HORA")
+        .sort((a, b) => a.periodo - b.periodo || a.submercado.localeCompare(b.submercado));
+    }
+    console.log(`  ⚠ Nenhum dado no dataset v2 para ${mes} — tentando v1...`);
+  }
+
+  // 2. Fallback para dataset antigo (PLD)
+  const idV1 = DATASET_IDS_V1[ano];
+  if (!idV1) {
+    const disponiveis = Object.keys(DATASET_IDS_V1).join(", ");
+    throw new Error(`PLD horário não disponível para ${ano}. Anos com dados: ${disponiveis}`);
+  }
+
+  const registros = await fetchTodasPaginas(idV1, filtros);
+  console.log(`  ✅ ${registros.length} registros de PLD (v1)`);
+  return normalizarRegistrosPld(registros, "PLD")
+    .sort((a, b) => a.periodo - b.periodo || a.submercado.localeCompare(b.submercado));
 }
 
 /**
@@ -63,7 +82,10 @@ async function buscarPldHorarioMapa(mes, submercado = null) {
 }
 
 function anosDisponiveis() {
-  return Object.keys(DATASET_IDS).map(Number);
+  return [...new Set([
+    ...Object.keys(DATASET_IDS_V2),
+    ...Object.keys(DATASET_IDS_V1),
+  ])].map(Number).sort();
 }
 
 module.exports = { buscarPldHorario, buscarPldHorarioMapa, anosDisponiveis };

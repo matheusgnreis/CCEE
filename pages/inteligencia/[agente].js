@@ -138,9 +138,24 @@ export default function AgenteDashboard() {
         if (json.error) throw new Error(json.error);
 
         if (json.length > 0) {
-          // Agente já existe no banco — fluxo normal
+          // Agente já existe no banco — busca sem ?mes para o backend verificar
+          // se há mês mais recente na CCEE (freshness check). O mês selecionado
+          // virá da resposta, não do histórico local.
           setHistorico(json);
-          setMesSelecionado(json[json.length - 1].mes);
+          const r2    = await fetch(`${API_URL}/inteligencia/${encoded}`);
+          const dados = await r2.json();
+          if (dados.error) throw new Error(dados.error);
+
+          fetchedMesRef.current = dados.mes;
+          setDadosMes(dados);
+          setMesSelecionado(dados.mes);
+
+          // Se o backend trouxe um mês mais novo, re-busca histórico atualizado
+          if (dados.mes > json[json.length - 1].mes) {
+            const r3   = await fetch(`${API_URL}/inteligencia/${encoded}/historico`);
+            const hist = await r3.json();
+            if (Array.isArray(hist)) setHistorico(hist);
+          }
         } else {
           // Primeiro acesso — busca no Power BI (sem filtro de mês = mais recente)
           const r2    = await fetch(`${API_URL}/inteligencia/${encoded}`);

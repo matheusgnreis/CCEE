@@ -11,9 +11,28 @@ const { buscarGeracaoHoraria }    = require("./ccee-abertos/geracao-horaria");
 const { buscarUsinas }            = require("./ccee-abertos/geracao");
 const { buscarContabilizacao }    = require("./ccee-abertos/contabilizacao");
 const { buscarMesRecente }        = require("./ccee-abertos/mcp");
-const { buscarConsumoHorario }    = require("./ccee-abertos/consumo-horario");
+const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require("./ccee-abertos/consumo-horario");
 const { buscarPldHorario, buscarPldHorarioMapa } = require("./ccee-abertos/pld-horario");
 const { limparJobsTravados }      = require("./cleanup-jobs");
+const cron                        = require("node-cron");
+
+// Cache do mês mais recente disponível nas cargas da CCEE (TTL 1 hora)
+let _mesCCEECache = { mes: null, ts: 0 };
+async function ultimoMesDisponivelCCEE() {
+  const agora = Date.now();
+  if (_mesCCEECache.mes && agora - _mesCCEECache.ts < 60 * 60 * 1000) {
+    return _mesCCEECache.mes;
+  }
+  try {
+    const recursos = await listarRecursosConsumo();
+    const mes = recursos[recursos.length - 1]?.mes || null;
+    if (mes) _mesCCEECache = { mes, ts: agora };
+    return mes;
+  } catch (e) {
+    console.warn("[freshness] Erro ao consultar meses disponíveis na CCEE:", e.message);
+    return _mesCCEECache.mes || null; // retorna cache antigo se houver
+  }
+}
 
 const app = express();
 
@@ -50,11 +69,13 @@ const limitePowerBI = rateLimit({
 app.use(limiteGeral);
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: process.env.NODE_ENV === "production" ? 10 : 4, // local usa menos para não disputar com Render
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 30000,
+  connectionString:          process.env.DATABASE_URL,
+  ssl:                       { rejectUnauthorized: false },
+  max:                       process.env.NODE_ENV === "production" ? 10 : 4,
+  idleTimeoutMillis:         60000,   // fecha conexão idle depois de 60s
+  connectionTimeoutMillis:   30000,
+  keepAlive:                 true,    // TCP keepalive — evita queda durante downloads longos
+  keepAliveInitialDelayMillis: 10000, // começa a enviar probes após 10s de idle
 });
 
 pool.on("error", (err) => {
@@ -274,9 +295,9 @@ function extrairMetadados(result, agente) {
 
 // ─── Power BI ─────────────────────────────────────────────────────────────────
 
-async function buscarPowerBI(agente, mes) {
+async function buscarPowerBI(agente, mes, usarMaisRecente = false) {
   mes = mes || mesReferencia();
-  console.log("Buscando no Power BI:", agente, "| mês:", mes);
+  console.log("Buscando no Power BI:", agente, "| mês:", mes, usarMaisRecente ? "| filtro: (mais recente)" : "");
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -303,7 +324,7 @@ async function buscarPowerBI(agente, mes) {
                 Where: [
                   { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`       } }]] } } },
                   { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"           } }]] } } },
-                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: filtroMesAno(mes)   } }]] } } }
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: usarMaisRecente ? "'(mais recente)'" : filtroMesAno(mes) } }]] } } }
                 ]
               }
             }
@@ -548,7 +569,7 @@ async function buscarPowerBISimples(agente, mes) {
                 Where: [
                   { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`     } }]] } } },
                   { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
-                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: filtroMesAno(mes) } }]] } } }
+                  { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: usarMaisRecente ? "'(mais recente)'" : filtroMesAno(mes) } }]] } } }
                 ]
               }
             }
@@ -834,8 +855,8 @@ async function salvarDados(dado) {
   `, [dado.agente, dado.consumo, dado.compra, dado.mcp, dado.resultado, dado.resultado_mcp, dado.balanco_energetico, dado.geracao ?? null, dado.venda ?? null, dado.consumo_geracao ?? null, dado.mes]);
 }
 
-async function fetchSalvarRetornar(agente, mes) {
-  const { dados, historico, metadados } = await buscarPowerBI(agente, mes);
+async function fetchSalvarRetornar(agente, mes, usarMaisRecente = false) {
+  const { dados, historico, metadados } = await buscarPowerBI(agente, mes, usarMaisRecente);
   await salvarAgente(metadados);    // deve vir primeiro (FK)
   await salvarHistorico(historico); // ON CONFLICT DO NOTHING — não sobrescreve Q0
   await salvarDados(dados);         // ON CONFLICT DO UPDATE — sempre atualiza o mês consultado
@@ -993,48 +1014,84 @@ app.get("/inteligencia/:agente", limitePowerBI, async (req, res) => {
     return res.status(400).json({ error: "Nome de agente inválido" });
 
   const agente = normalizarAgente(agenteRaw);
-  const mes    = req.query.mes || mesReferencia();
 
-  if (!/^\d{4}-\d{2}$/.test(mes))
-    return res.status(400).json({ error: "Formato de mês inválido (esperado: YYYY-MM)" });
+  // Mês explícito do usuário (seletor) — vai direto ao banco/PowerBI sem checar CCEE
+  if (req.query.mes) {
+    const mes = req.query.mes;
+    if (!/^\d{4}-\d{2}$/.test(mes))
+      return res.status(400).json({ error: "Formato de mês inválido (esperado: YYYY-MM)" });
 
-  console.log("Consultando agente:", agente, "| mês:", mes);
+    console.log("Consultando agente:", agente, "| mês:", mes);
 
-  try {
+    if (req.query.refresh)
+      return res.json(await fetchSalvarRetornar(agente, mes));
+
     const r = await pool.query(`
       SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
       FROM ccee_dados d
       LEFT JOIN ccee_agentes a USING (agente)
-      WHERE d.agente = $1 AND d.mes = $2
-      LIMIT 1
+      WHERE d.agente = $1 AND d.mes = $2 LIMIT 1
     `, [agente, mes]);
-
-    if (req.query.refresh) {
-      console.log("Refresh forçado via GET para:", agente, "| mês:", mes);
-      return res.json(await fetchSalvarRetornar(agente, mes));
-    }
 
     if (r.rows.length > 0) {
       const row = r.rows[0];
+      if (row.resultado !== null) { console.log("Dado retornado do banco"); return res.json(row); }
+      return res.json(await fetchSalvarRetornarSimples(agente, mes));
+    }
+    return res.json(await fetchSalvarRetornar(agente, mes));
+  }
 
-      // Verifica se há mês mais recente disponível na API aberta
-      if (!req.query.mes) {
-        const mesMaxDB  = await pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente]);
-        const mesDB     = mesMaxDB.rows[0]?.mes;
-        const mesRecente = await buscarMesRecente(agente);
-        console.log(`Freshness check | banco="${mesDB}" | CCEE="${mesRecente}"`);
+  // Sem mês explícito: bate no MCP primeiro para saber o mês mais recente,
+  // depois compara com o banco e decide o que buscar.
+  console.log("Consultando agente:", agente, "| mês: (auto)");
 
-        if (mesRecente && mesDB && mesRecente > mesDB) {
-          console.log(`Dados desatualizados — buscando mês ${mesRecente} no Power BI...`);
-          return res.json(await fetchSalvarRetornar(agente, mesRecente));
-        }
+  try {
+    const [mesRecente, rMaxDB] = await Promise.all([
+      ultimoMesDisponivelCCEE(),
+      pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente]),
+    ]);
+    const mesDB = rMaxDB.rows[0]?.mes || null;
+
+    // Mês alvo = o mais recente entre CCEE e banco (CCEE tem prioridade se for mais novo)
+    const mes = mesRecente && (!mesDB || mesRecente >= mesDB)
+      ? mesRecente
+      : (mesDB || mesReferencia());
+
+    console.log(`Freshness | CCEE="${mesRecente}" banco="${mesDB}" → usando "${mes}"`);
+
+    // CCEE tem mês mais novo que o banco → busca da fonte
+    if (mesRecente && (!mesDB || mesRecente > mesDB)) {
+      console.log(`Dados desatualizados — buscando ${mes} no Power BI...`);
+      const novosDados = await fetchSalvarRetornar(agente, mes, true);
+
+      // Se o mês novo voltou zerado, ainda não foi liquidado pela CCEE para este agente.
+      // Apaga a entrada vazia do banco e retorna o mês anterior.
+      const vazio = !novosDados.consumo && !novosDados.mcp && !novosDados.balanco_energetico;
+      if (vazio && mesDB) {
+        console.log(`Mês ${mes} sem dados para "${agente}" — removendo e retornando ${mesDB}`);
+        await pool.query("DELETE FROM ccee_dados WHERE agente = $1 AND mes = $2", [agente, mes]);
+        const rAnterior = await pool.query(`
+          SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
+          FROM ccee_dados d LEFT JOIN ccee_agentes a USING (agente)
+          WHERE d.agente = $1 AND d.mes = $2 LIMIT 1
+        `, [agente, mesDB]);
+        if (rAnterior.rows.length > 0) return res.json(rAnterior.rows[0]);
       }
 
-      if (row.resultado !== null) {
-        console.log("Dado retornado do banco");
-        return res.json(row);
-      }
-      console.log("Dados incompletos no banco, buscando Q0+Q2 no Power BI...");
+      return res.json(novosDados);
+    }
+
+    // Banco já tem o mês mais recente — retorna do banco
+    const r = await pool.query(`
+      SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
+      FROM ccee_dados d
+      LEFT JOIN ccee_agentes a USING (agente)
+      WHERE d.agente = $1 AND d.mes = $2 LIMIT 1
+    `, [agente, mes]);
+
+    if (r.rows.length > 0) {
+      const row = r.rows[0];
+      if (row.resultado !== null) { console.log("Dado retornado do banco"); return res.json(row); }
       return res.json(await fetchSalvarRetornarSimples(agente, mes));
     }
 
@@ -1138,10 +1195,11 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
       ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = $1", [agente])).rows[0]?.mes
       : null;
 
-    const precisaAtualizar = !maxCargasDB || (mes && mes > maxCargasDB);
+    const maxDadosDB = (await pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente])).rows[0]?.mes;
+    const precisaAtualizar = !maxCargasDB || (maxDadosDB && maxDadosDB > maxCargasDB);
 
     if (precisaAtualizar) {
-      console.log(`[cargas] Buscando na API aberta | banco="${maxCargasDB}" | solicitado="${mes}"...`);
+      console.log(`[cargas] Buscando na API aberta | banco="${maxCargasDB}" | dados_mais_recente="${maxDadosDB}"...`);
       const metaAgente  = razaoSocialParam
         ? { rows: [{ razao_social: razaoSocialParam }] }
         : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
@@ -1212,10 +1270,11 @@ app.get("/inteligencia/:agente/usinas", async (req, res) => {
       ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_usinas WHERE agente = $1", [agente])).rows[0]?.mes
       : null;
 
-    const precisaAtualizar = !maxUsinaDB || (mes && mes > maxUsinaDB);
+    const maxDadosDBU = (await pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente])).rows[0]?.mes;
+    const precisaAtualizar = !maxUsinaDB || (maxDadosDBU && maxDadosDBU > maxUsinaDB);
 
     if (precisaAtualizar) {
-      console.log(`[usinas] Buscando na API aberta | banco="${maxUsinaDB}" | solicitado="${mes}"...`);
+      console.log(`[usinas] Buscando na API aberta | banco="${maxUsinaDB}" | dados_mais_recente="${maxDadosDBU}"...`);
       const metaAgente  = razaoSocialParam
         ? { rows: [{ razao_social: razaoSocialParam }] }
         : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
@@ -2055,6 +2114,27 @@ app.get("/inteligencia/:agente/modulacao-perfil", async (req, res) => {
 const PRIMEIRO_MES_PLD = "2025-01"; // PLD horário disponível a partir deste mês
 const modulacaoEmAndamento = new Set(); // evita batch duplo por agente
 
+// Retry para erros transientes de conexão (queda de pool durante download longo)
+async function comRetry(fn, tentativas = 3, label = "") {
+  for (let i = 1; i <= tentativas; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const transiente = err.message?.includes("Connection terminated")
+                      || err.message?.includes("connection timeout")
+                      || err.message?.includes("ECONNRESET")
+                      || err.code === "57P01"; // admin_shutdown
+      if (transiente && i < tentativas) {
+        const espera = i * 4000;
+        console.warn(`[retry${label ? " " + label : ""}] tentativa ${i}/${tentativas} falhou: ${err.message} — aguardando ${espera}ms`);
+        await new Promise(r => setTimeout(r, espera));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 async function processarMesModulacao(agente, mes) {
   console.log(`\n[modulacao] ── Iniciando ${agente} | ${mes} ──────────────────────`);
 
@@ -2241,7 +2321,10 @@ async function dispararModulacaoBackground(agente) {
     try {
       for (const mes of mesesPendentes) {
         try {
-          const status = await processarMesModulacao(agente, mes);
+          const status = await comRetry(
+            () => processarMesModulacao(agente, mes),
+            3, `${agente} ${mes}`
+          );
           console.log(`[modulacao-auto] ${agente} ${mes}: ${status}`);
         } catch (err) {
           console.warn(`[modulacao-auto] Erro em ${agente} ${mes}: ${err.message}`);
@@ -2452,7 +2535,10 @@ async function dispararModulacaoGeracaoBackground(agente) {
     try {
       for (const mes of mesesPendentes) {
         try {
-          const status = await processarMesModulacaoGeracao(agente, mes, siglasUsinas);
+          const status = await comRetry(
+            () => processarMesModulacaoGeracao(agente, mes, siglasUsinas),
+            3, `${agente} ${mes}`
+          );
           console.log(`[mod-ger-auto] ${agente} ${mes}: ${status}`);
         } catch (err) {
           console.warn(`[mod-ger-auto] Erro em ${agente} ${mes}: ${err.message}`);
@@ -2642,6 +2728,33 @@ if (process.env.NODE_ENV !== "test") {
     );
   }, 4 * 60 * 1000);
 }
+
+// GET /admin/modulacao/pendentes — lista agentes com modulação faltante
+app.get("/admin/modulacao/pendentes", async (_req, res) => {
+  try {
+    const pendentes = await queryPendentes();
+    return res.json({
+      timestamp:        new Date().toISOString(),
+      primeiro_mes_pld: PRIMEIRO_MES_PLD,
+      total_agentes:    pendentes.length,
+      total_meses:      pendentes.reduce((s, p) => s + p.total_pendentes, 0),
+      pendentes,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /admin/modulacao/processar-pendentes — dispara processamento manual
+app.post("/admin/modulacao/processar-pendentes", async (_req, res) => {
+  console.log("[admin] Processamento manual de pendentes solicitado.");
+  try {
+    const result = await processarTodosPendentes();
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 // POST /admin/modulacao/:agente — dispara manualmente o job de modulação (carga + geração)
 app.post("/admin/modulacao/:agente", async (req, res) => {
@@ -2879,6 +2992,109 @@ app.get("/pld/resumo", async (_req, res) => {
   }
 });
 
+// ─── Pendentes: agentes com modulação faltante ────────────────────────────────
+
+async function queryPendentes() {
+  const r = await pool.query(`
+    SELECT
+      sub.agente,
+      json_agg(sub.mes ORDER BY sub.mes) FILTER (WHERE sub.tipo = 'carga')   AS meses_carga,
+      json_agg(sub.mes ORDER BY sub.mes) FILTER (WHERE sub.tipo = 'geracao') AS meses_geracao
+    FROM (
+      SELECT cd.agente, cd.mes, 'carga' AS tipo
+      FROM ccee_dados cd
+      WHERE cd.mes >= $1 AND cd.consumo IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM ccee_modulacao cm
+          WHERE cm.agente = cd.agente AND cm.mes_referencia = cd.mes
+        )
+      UNION ALL
+      SELECT DISTINCT gh.agente, gh.mes_referencia AS mes, 'geracao' AS tipo
+      FROM ccee_geracao_horaria gh
+      WHERE gh.mes_referencia >= $1
+        AND NOT EXISTS (
+          SELECT 1 FROM ccee_modulacao_geracao mg
+          WHERE mg.agente = gh.agente AND mg.mes_referencia = gh.mes_referencia
+        )
+    ) sub
+    GROUP BY sub.agente
+    ORDER BY sub.agente
+  `, [PRIMEIRO_MES_PLD]);
+
+  return r.rows.map(row => ({
+    agente:          row.agente,
+    meses_carga:     row.meses_carga     || [],
+    meses_geracao:   row.meses_geracao   || [],
+    total_pendentes: (row.meses_carga?.length || 0) + (row.meses_geracao?.length || 0),
+  }));
+}
+
+// Atualiza ccee_dados para agentes cujo último mês fica abaixo do mês mais recente
+// disponível no banco (algum agente já buscou o mês novo → usamos como referência).
+async function atualizarDadosAtrasados() {
+  // Consulta cargas CCEE para descobrir o mês mais recente disponível (com cache 1h)
+  const mesAlvo = await ultimoMesDisponivelCCEE();
+  if (!mesAlvo) {
+    console.warn("[dados-auto] Não foi possível determinar o mês mais recente nas cargas CCEE.");
+    return;
+  }
+
+  console.log(`[dados-auto] Mês mais recente nas cargas CCEE: ${mesAlvo}`);
+
+  const rAtrasados = await pool.query(`
+    SELECT agente, MAX(mes) AS ultimo_mes
+    FROM ccee_dados
+    GROUP BY agente
+    HAVING MAX(mes) < $1
+    ORDER BY agente
+  `, [mesAlvo]);
+
+  if (!rAtrasados.rows.length) {
+    console.log(`[dados-auto] Todos os agentes já têm dados até ${mesAlvo}.`);
+    return;
+  }
+
+  console.log(`[dados-auto] ${rAtrasados.rows.length} agentes atrasados (alvo=${mesAlvo}). Atualizando...`);
+
+  for (const { agente, ultimo_mes } of rAtrasados.rows) {
+    try {
+      await comRetry(() => fetchSalvarRetornar(agente, mesAlvo, true), 2, `dados ${agente}`);
+      console.log(`[dados-auto] ${agente}: ${ultimo_mes} → ${mesAlvo}`);
+    } catch (err) {
+      console.warn(`[dados-auto] ${agente}: erro ao atualizar — ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 1500)); // pausa entre agentes
+  }
+}
+
+async function processarTodosPendentes() {
+  // 1. Garante que todos os agentes têm o mês mais recente em ccee_dados
+  await atualizarDadosAtrasados();
+
+  // 2. Agora verifica pendentes de modulação (já com ccee_dados atualizado)
+  const pendentes = await queryPendentes();
+  if (!pendentes.length) {
+    console.log("[pendentes] Nenhuma modulação pendente.");
+    return { processados: 0, pendentes: [] };
+  }
+
+  console.log(`[pendentes] ${pendentes.length} agentes com modulação pendente.`);
+
+  let processados = 0;
+  for (const { agente, meses_carga, meses_geracao } of pendentes) {
+    if (modulacaoEmAndamento.has(agente) || modulacaoGeracaoEmAndamento.has(agente)) {
+      console.log(`[pendentes] ${agente}: já em andamento, pulando.`);
+      continue;
+    }
+    console.log(`[pendentes] → ${agente}: ${meses_carga.length} carga + ${meses_geracao.length} geração pendentes`);
+    dispararModulacaoBackground(agente);
+    processados++;
+    if (processados < pendentes.length) await new Promise(r => setTimeout(r, 3000));
+  }
+
+  return { processados, pendentes };
+}
+
 const PORT = process.env.PORT || 3001;
 if (require.main === module) {
   app.listen(PORT, async () => {
@@ -2897,6 +3113,19 @@ if (require.main === module) {
     limparJobsTravados(pool).catch(err =>
       console.error("[startup] Falha no cleanup de jobs:", err.message)
     );
+
+    // Cron: processa modulações pendentes 4× por dia (06h, 11h, 16h, 21h horário do servidor)
+    cron.schedule("0 6,11,16,21 * * *", async () => {
+      console.log(`\n[cron ${new Date().toISOString()}] Verificando modulações pendentes...`);
+      try {
+        const { processados, pendentes } = await processarTodosPendentes();
+        console.log(`[cron] Concluído: ${processados}/${pendentes.length} agentes disparados.`);
+      } catch (e) {
+        console.error("[cron] Erro:", e.message);
+      }
+    });
+
+    console.log("[cron] Agendado: verificação de pendentes às 06h, 11h, 16h, 21h.");
   });
 }
 
