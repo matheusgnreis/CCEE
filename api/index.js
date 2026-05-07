@@ -1228,15 +1228,32 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
     }
 
     // Monta query com filtros opcionais
+    const SUB_MAP_FULL = { SE: "SUDESTE", S: "SUL", NE: "NORDESTE", N: "NORTE" };
     const conditions = ["agente = $1"];
     const params     = [agente];
     let   idx        = 2;
 
-    if (mesEfetivo)  { conditions.push(`mes_referencia = $${idx++}`);      params.push(mesEfetivo); }
-    if (estado)      { conditions.push(`estado_uf = $${idx++}`);           params.push(estado.toUpperCase()); }
-    if (cidade)      { conditions.push(`cidade ILIKE $${idx++}`);          params.push(cidade); }
-    if (ramo)        { conditions.push(`ramo_atividade ILIKE $${idx++}`);  params.push(ramo); }
-    if (submercado)  { conditions.push(`submercado ILIKE $${idx++}`);      params.push(submercado); }
+    if (mesEfetivo) { conditions.push(`mes_referencia = $${idx++}`); params.push(mesEfetivo); }
+
+    // Estado: aceita múltiplos valores separados por vírgula (ex: "MG,SP")
+    if (estado) {
+      const estados = estado.toUpperCase().split(",").map(e => e.trim()).filter(Boolean);
+      if (estados.length === 1) {
+        conditions.push(`estado_uf = $${idx++}`);
+        params.push(estados[0]);
+      } else if (estados.length > 1) {
+        conditions.push(`estado_uf = ANY($${idx++})`);
+        params.push(estados);
+      }
+    }
+
+    if (cidade)     { conditions.push(`cidade ILIKE $${idx++}`);         params.push(cidade); }
+    if (ramo)       { conditions.push(`ramo_atividade ILIKE $${idx++}`); params.push(ramo); }
+    if (submercado) {
+      const subFull = SUB_MAP_FULL[submercado.toUpperCase()] || submercado;
+      conditions.push(`submercado ILIKE $${idx++}`);
+      params.push(subFull);
+    }
 
     const r = await pool.query(`
       SELECT * FROM ccee_cargas

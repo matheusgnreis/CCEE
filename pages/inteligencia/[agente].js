@@ -78,7 +78,7 @@ export default function AgenteDashboard() {
   const [cargas,         setCargas]         = useState([]);
   const [mesCargas,      setMesCargas]      = useState(null);
   const [loadingCargas,  setLoadingCargas]  = useState(false);
-  const [filtroEstado,   setFiltroEstado]   = useState("");
+  const [filtroEstados,  setFiltroEstados]  = useState([]); // múltiplos estados
   const [filtroCidade,   setFiltroCidade]   = useState("");
   const [filtroRamo,     setFiltroRamo]     = useState("");
   const [filtroSub,      setFiltroSub]      = useState("");
@@ -201,7 +201,7 @@ export default function AgenteDashboard() {
     if (!agente || !mesSelecionado) return;
     const params = new URLSearchParams();
     params.set("mes", mesSelecionado);
-    if (filtroEstado) params.set("estado",     filtroEstado);
+    if (filtroEstados.length) params.set("estado", filtroEstados.join(","));
     if (filtroCidade) params.set("cidade",     filtroCidade);
     if (filtroRamo)   params.set("ramo",       filtroRamo);
     if (filtroSub)    params.set("submercado", filtroSub);
@@ -215,7 +215,7 @@ export default function AgenteDashboard() {
       })
       .catch(err => setError(`Cargas: ${err.message}`))
       .finally(() => setLoadingCargas(false));
-  }, [agente, mesSelecionado, filtroEstado, filtroCidade, filtroRamo, filtroSub]);
+  }, [agente, mesSelecionado, filtroEstados, filtroCidade, filtroRamo, filtroSub]);
 
   // ── 4. Curvas de carga e geração típicas em pu (carrega uma vez por agente)
   useEffect(() => {
@@ -829,29 +829,56 @@ export default function AgenteDashboard() {
             </div>
 
             {/* Filtros */}
-            <div style={s.filtros}>
-              <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} style={s.filtroSelect}>
-                <option value="">Todos os estados</option>
-                {[...new Set(cargas.map(c => c.estado_uf).filter(Boolean))].sort().map(e => (
-                  <option key={e} value={e}>{e}</option>
-                ))}
-              </select>
-              <input
-                placeholder="Cidade"
-                value={filtroCidade}
-                onChange={e => setFiltroCidade(e.target.value)}
-                style={s.filtroInput}
-              />
-              <input
-                placeholder="Ramo de atividade"
-                value={filtroRamo}
-                onChange={e => setFiltroRamo(e.target.value)}
-                style={s.filtroInput}
-              />
-              <select value={filtroSub} onChange={e => setFiltroSub(e.target.value)} style={s.filtroSelect}>
-                <option value="">Todos submercados</option>
-                {SUBMERCADOS.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              {/* Pills de estado — clique para selecionar/desselecionar múltiplos */}
+              {cargas.length > 0 && (() => {
+                const estados = [...new Set(cargas.map(c => c.estado_uf).filter(Boolean))].sort();
+                if (estados.length <= 1) return null;
+                return (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    <span style={{ fontSize: 12, color: "#94a3b8", marginRight: 4 }}>Estado:</span>
+                    {estados.map(e => {
+                      const ativo = filtroEstados.includes(e);
+                      return (
+                        <button key={e} onClick={() => setFiltroEstados(prev =>
+                          prev.includes(e) ? prev.filter(x => x !== e) : [...prev, e]
+                        )} style={{
+                          padding: "3px 10px", fontSize: 12, fontWeight: 600, borderRadius: 20, cursor: "pointer",
+                          border: `1px solid ${ativo ? "#2563eb" : "#e2e8f0"}`,
+                          background: ativo ? "#2563eb" : "#f8fafc",
+                          color: ativo ? "#fff" : "#64748b",
+                          transition: "all 0.15s",
+                        }}>{e}</button>
+                      );
+                    })}
+                    {filtroEstados.length > 0 && (
+                      <button onClick={() => setFiltroEstados([])} style={{
+                        fontSize: 11, color: "#94a3b8", background: "none", border: "none", cursor: "pointer", padding: "3px 6px",
+                      }}>limpar</button>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Outros filtros em linha */}
+              <div style={s.filtros}>
+                <input
+                  placeholder="Cidade"
+                  value={filtroCidade}
+                  onChange={e => setFiltroCidade(e.target.value)}
+                  style={s.filtroInput}
+                />
+                <input
+                  placeholder="Ramo de atividade"
+                  value={filtroRamo}
+                  onChange={e => setFiltroRamo(e.target.value)}
+                  style={s.filtroInput}
+                />
+                <select value={filtroSub} onChange={e => setFiltroSub(e.target.value)} style={s.filtroSelect}>
+                  <option value="">Todos submercados</option>
+                  {SUBMERCADOS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
             </div>
 
             {/* Cards resumo */}
