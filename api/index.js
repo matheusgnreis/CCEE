@@ -1195,11 +1195,11 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
       ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = $1", [agente])).rows[0]?.mes
       : null;
 
-    const maxDadosDB = (await pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente])).rows[0]?.mes;
-    const precisaAtualizar = !maxCargasDB || (maxDadosDB && maxDadosDB > maxCargasDB);
+    const mesRecenteCCEE = await ultimoMesDisponivelCCEE();
+    const precisaAtualizar = !maxCargasDB || (mesRecenteCCEE && mesRecenteCCEE > maxCargasDB);
 
     if (precisaAtualizar) {
-      console.log(`[cargas] Buscando na API aberta | banco="${maxCargasDB}" | dados_mais_recente="${maxDadosDB}"...`);
+      console.log(`[cargas] Buscando na API aberta | banco="${maxCargasDB}" | CCEE="${mesRecenteCCEE}"...`);
       const metaAgente  = razaoSocialParam
         ? { rows: [{ razao_social: razaoSocialParam }] }
         : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
@@ -1270,11 +1270,11 @@ app.get("/inteligencia/:agente/usinas", async (req, res) => {
       ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_usinas WHERE agente = $1", [agente])).rows[0]?.mes
       : null;
 
-    const maxDadosDBU = (await pool.query("SELECT MAX(mes) AS mes FROM ccee_dados WHERE agente = $1", [agente])).rows[0]?.mes;
-    const precisaAtualizar = !maxUsinaDB || (maxDadosDBU && maxDadosDBU > maxUsinaDB);
+    const mesRecenteCCEEU = await ultimoMesDisponivelCCEE();
+    const precisaAtualizar = !maxUsinaDB || (mesRecenteCCEEU && mesRecenteCCEEU > maxUsinaDB);
 
     if (precisaAtualizar) {
-      console.log(`[usinas] Buscando na API aberta | banco="${maxUsinaDB}" | dados_mais_recente="${maxDadosDBU}"...`);
+      console.log(`[usinas] Buscando na API aberta | banco="${maxUsinaDB}" | CCEE="${mesRecenteCCEEU}"...`);
       const metaAgente  = razaoSocialParam
         ? { rows: [{ razao_social: razaoSocialParam }] }
         : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
