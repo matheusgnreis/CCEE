@@ -543,7 +543,7 @@ async function buscarPowerBI(agente, mes, usarMaisRecente = false) {
 
 // Busca apenas Q0 (financeiro) + Q2 (metadados) — usado quando a linha já existe
 // no banco mas resultado IS NULL (histórico salvo, dados financeiros ainda faltam)
-async function buscarPowerBISimples(agente, mes) {
+async function buscarPowerBISimples(agente, mes, usarMaisRecente = false) {
   console.log("Buscando Q0+Q2 no Power BI:", agente, "| mês:", mes);
 
   const controller = new AbortController();
