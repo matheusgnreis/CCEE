@@ -909,7 +909,7 @@ async function salvarCargas(agente, siglaPerfilAgente, registros) {
       $14::text[], $15::text[],
       $16::numeric[], $17::numeric[], $18::numeric[], $19::numeric[]
     )
-    ON CONFLICT (sigla_parcela_carga, mes_referencia) DO NOTHING
+    ON CONFLICT (agente, sigla_parcela_carga, mes_referencia) DO NOTHING
   `, [
     registros.map(() => agente),
     registros.map(() => siglaPerfilAgente),

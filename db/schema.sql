@@ -70,7 +70,7 @@ CREATE TABLE ccee_cargas (
   consumo_cativo_parc_livre     NUMERIC,
   consumo_total                 NUMERIC,
   created_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT uniq_carga_mes UNIQUE (sigla_parcela_carga, mes_referencia)
+  CONSTRAINT uniq_carga_agente_mes UNIQUE (agente, sigla_parcela_carga, mes_referencia)
 );
 
 CREATE INDEX idx_ccee_cargas_agente     ON ccee_cargas (agente);
