@@ -79,6 +79,7 @@ export default function AgenteDashboard() {
   const [mesCargas,      setMesCargas]      = useState(null);
   const [loadingCargas,  setLoadingCargas]  = useState(false);
   const [filtroEstados,  setFiltroEstados]  = useState([]); // múltiplos estados
+  const [todosEstados,   setTodosEstados]   = useState([]); // lista completa (sem filtro)
   const [filtroCidade,   setFiltroCidade]   = useState("");
   const [filtroRamo,     setFiltroRamo]     = useState("");
   const [filtroSub,      setFiltroSub]      = useState("");
@@ -128,6 +129,8 @@ export default function AgenteDashboard() {
     setHistorico([]);
     setDadosMes(null);
     setMesSelecionado(null);
+    setFiltroEstados([]);
+    setTodosEstados([]);
     fetchedMesRef.current = null;
 
     const encoded = encodeURIComponent(agente);
@@ -211,7 +214,14 @@ export default function AgenteDashboard() {
       .then(r => r.json())
       .then(json => {
         if (json.error) setError(`Cargas: ${json.error}`);
-        else { setCargas(json.registros); setMesCargas(json.mes); }
+        else {
+          setCargas(json.registros);
+          setMesCargas(json.mes);
+          // Guarda lista completa de estados apenas quando não há filtro ativo
+          if (!filtroEstados.length) {
+            setTodosEstados([...new Set(json.registros.map(c => c.estado_uf).filter(Boolean))].sort());
+          }
+        }
       })
       .catch(err => setError(`Cargas: ${err.message}`))
       .finally(() => setLoadingCargas(false));
@@ -831,9 +841,8 @@ export default function AgenteDashboard() {
             {/* Filtros */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
               {/* Pills de estado — clique para selecionar/desselecionar múltiplos */}
-              {cargas.length > 0 && (() => {
-                const estados = [...new Set(cargas.map(c => c.estado_uf).filter(Boolean))].sort();
-                if (estados.length <= 1) return null;
+              {todosEstados.length > 1 && (() => {
+                const estados = todosEstados;
                 return (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                     <span style={{ fontSize: 12, color: "#94a3b8", marginRight: 4 }}>Estado:</span>
