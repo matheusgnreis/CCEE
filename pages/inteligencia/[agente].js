@@ -20,7 +20,15 @@ const METRICAS = [
   { key: "mcp",                label: "MCP",                color: "#d97706", unidade: "R$"  },
   { key: "resultado_mcp",      label: "Resultado final",      color: "#7c3aed", unidade: "R$"  },
   { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2", unidade: "MWm" },
-  { key: "mcp_rs_mwh",         label: "Custo MCP",          color: "#ea580c", unidade: "R$/MWh", apenasComValor: true },
+  {
+    key: "mcp_rs_mwh", unidade: "R$/MWh", apenasComValor: true,
+    label:   "MCP R$/MWh",
+    labelFn: v => v == null ? "MCP R$/MWh" : Number(v) >= 0 ? "Ganho MCP" : "Custo MCP",
+    colorFn: v => v == null ? "#94a3b8"    : Number(v) >= 0 ? "#16a34a"   : "#ea580c",
+    color:   "#ea580c",
+  },
+  { key: "mre_mais",  label: "MRE+", color: "#0891b2", unidade: "MWm", apenasComValor: true },
+  { key: "mre_menos", label: "MRE-", color: "#f59e0b", unidade: "MWm", apenasComValor: true },
 ];
 
 const GRAFICOS = [
@@ -479,11 +487,15 @@ export default function AgenteDashboard() {
                 const negativo = !loadingMes
                   && ["mcp", "resultado", "resultado_mcp"].includes(m.key)
                   && Number(val) < 0;
-                const cor = loadingMes ? "#d1d5db" : negativo ? "#dc2626" : m.color;
+                const cor = loadingMes ? "#d1d5db"
+                  : negativo           ? "#dc2626"
+                  : m.colorFn          ? m.colorFn(val)
+                  : m.color;
+                const label = m.labelFn ? m.labelFn(val) : m.label;
 
                 return (
                   <div key={m.key} style={{ ...s.card, ...(negativo ? s.cardAlerta : {}) }}>
-                    <p style={s.cardLabel}>{m.label}</p>
+                    <p style={s.cardLabel}>{label}</p>
                     <p className="card-value" style={{ ...s.cardValue, color: cor }}>
                       {!loadingMes && val != null && m.unidade === "R$" && (
                         <span style={{ fontSize: 13, fontWeight: 600, color: "#94a3b8" }}>R$</span>

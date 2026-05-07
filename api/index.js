@@ -155,6 +155,8 @@ function extrairDados(result, agente, mes) {
     geracao:            Number(map["Geração"])               || null,
     venda:              Number(map["Venda"])                 || null,
     consumo_geracao:    Number(map["Cons.da Ger."])          || null,
+    mre_mais:           map["MRE +"]  != null ? (Number(map["MRE +"]) || null)  : null,
+    mre_menos:          map["MRE -"]  != null ? (Number(map["MRE -"]) || null)  : null,
     mes
   };
 }
@@ -847,8 +849,8 @@ async function salvarDados(dado) {
   const mcpRsMwh = calcMcpRsMwh(dado.mcp, dado.consumo, dado.mes);
   await pool.query(`
     INSERT INTO ccee_dados
-      (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, geracao, venda, consumo_geracao, mcp_rs_mwh, mes)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, geracao, venda, consumo_geracao, mcp_rs_mwh, mre_mais, mre_menos, mes)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     ON CONFLICT (agente, mes) DO UPDATE SET
       consumo            = EXCLUDED.consumo,
       compra             = EXCLUDED.compra,
@@ -860,8 +862,10 @@ async function salvarDados(dado) {
       venda              = COALESCE(EXCLUDED.venda,           ccee_dados.venda),
       consumo_geracao    = COALESCE(EXCLUDED.consumo_geracao, ccee_dados.consumo_geracao),
       mcp_rs_mwh         = EXCLUDED.mcp_rs_mwh,
+      mre_mais           = COALESCE(EXCLUDED.mre_mais,        ccee_dados.mre_mais),
+      mre_menos          = COALESCE(EXCLUDED.mre_menos,       ccee_dados.mre_menos),
       created_at         = NOW()
-  `, [dado.agente, dado.consumo, dado.compra, dado.mcp, dado.resultado, dado.resultado_mcp, dado.balanco_energetico, dado.geracao ?? null, dado.venda ?? null, dado.consumo_geracao ?? null, mcpRsMwh, dado.mes]);
+  `, [dado.agente, dado.consumo, dado.compra, dado.mcp, dado.resultado, dado.resultado_mcp, dado.balanco_energetico, dado.geracao ?? null, dado.venda ?? null, dado.consumo_geracao ?? null, mcpRsMwh, dado.mre_mais ?? null, dado.mre_menos ?? null, dado.mes]);
 }
 
 async function fetchSalvarRetornar(agente, mes, usarMaisRecente = false) {
