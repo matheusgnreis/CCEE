@@ -836,11 +836,19 @@ async function salvarHistorico(rows) {
   console.log(`Histórico: ${rows.length} meses salvos para ${agente}`);
 }
 
+function calcMcpRsMwh(mcp, consumo, mes) {
+  if (!mcp || !consumo || consumo <= 0 || !mes) return null;
+  const [ano, mesNum] = mes.split("-").map(Number);
+  const horas = new Date(ano, mesNum, 0).getDate() * 24;
+  return Math.round((mcp / (consumo * horas)) * 10000) / 10000;
+}
+
 async function salvarDados(dado) {
+  const mcpRsMwh = calcMcpRsMwh(dado.mcp, dado.consumo, dado.mes);
   await pool.query(`
     INSERT INTO ccee_dados
-      (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, geracao, venda, consumo_geracao, mes)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, geracao, venda, consumo_geracao, mcp_rs_mwh, mes)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     ON CONFLICT (agente, mes) DO UPDATE SET
       consumo            = EXCLUDED.consumo,
       compra             = EXCLUDED.compra,
@@ -851,8 +859,9 @@ async function salvarDados(dado) {
       geracao            = COALESCE(EXCLUDED.geracao,         ccee_dados.geracao),
       venda              = COALESCE(EXCLUDED.venda,           ccee_dados.venda),
       consumo_geracao    = COALESCE(EXCLUDED.consumo_geracao, ccee_dados.consumo_geracao),
+      mcp_rs_mwh         = EXCLUDED.mcp_rs_mwh,
       created_at         = NOW()
-  `, [dado.agente, dado.consumo, dado.compra, dado.mcp, dado.resultado, dado.resultado_mcp, dado.balanco_energetico, dado.geracao ?? null, dado.venda ?? null, dado.consumo_geracao ?? null, dado.mes]);
+  `, [dado.agente, dado.consumo, dado.compra, dado.mcp, dado.resultado, dado.resultado_mcp, dado.balanco_energetico, dado.geracao ?? null, dado.venda ?? null, dado.consumo_geracao ?? null, mcpRsMwh, dado.mes]);
 }
 
 async function fetchSalvarRetornar(agente, mes, usarMaisRecente = false) {
@@ -874,6 +883,7 @@ async function fetchSalvarRetornarSimples(agente, mes) {
 function combinarResposta(dados, meta) {
   return {
     ...dados,
+    mcp_rs_mwh:     calcMcpRsMwh(dados.mcp, dados.consumo, dados.mes),
     razao_social:   meta?.razao_social  ?? null,
     sigla:          meta?.sigla         ?? null,
     cnpj:           meta?.cnpj          ?? null,
@@ -1130,7 +1140,11 @@ app.get("/inteligencia/:agente/historico", async (req, res) => {
       );
     }
 
-    return res.json(r.rows);
+    const rows = r.rows.map(row => ({
+      ...row,
+      mcp_rs_mwh: row.mcp_rs_mwh ?? calcMcpRsMwh(row.mcp, row.consumo, row.mes),
+    }));
+    return res.json(rows);
   } catch (e) {
     console.error("Erro:", e.message);
     return res.status(500).json({ error: e.message });

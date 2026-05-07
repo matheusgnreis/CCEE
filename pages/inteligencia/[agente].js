@@ -20,6 +20,7 @@ const METRICAS = [
   { key: "mcp",                label: "MCP",                color: "#d97706", unidade: "R$"  },
   { key: "resultado_mcp",      label: "Resultado final",      color: "#7c3aed", unidade: "R$"  },
   { key: "balanco_energetico", label: "Balanço Energético", color: "#0891b2", unidade: "MWm" },
+  { key: "mcp_rs_mwh",         label: "Custo MCP",          color: "#ea580c", unidade: "R$/MWh", apenasComValor: true },
 ];
 
 const GRAFICOS = [
@@ -53,6 +54,14 @@ const GRAFICOS = [
     unidade: "R$",
     linhas: [
       { key: "mcp", label: "MCP", color: "#d97706" },
+    ],
+  },
+  {
+    titulo: "Custo MCP por MWh",
+    unidade: "R$/MWh",
+    skipIfAllNull: "mcp_rs_mwh",
+    linhas: [
+      { key: "mcp_rs_mwh", label: "Custo MCP", color: "#ea580c" },
     ],
   },
 ];
@@ -482,6 +491,9 @@ export default function AgenteDashboard() {
                       {loadingMes ? "—" : fmt(val)}
                       {!loadingMes && val != null && m.unidade === "MWm" && (
                         <span style={{ fontSize: 11, fontWeight: 400, color: "#94a3b8" }}>MWm</span>
+                      )}
+                      {!loadingMes && val != null && m.unidade === "R$/MWh" && (
+                        <span style={{ fontSize: 11, fontWeight: 400, color: "#94a3b8" }}>R$/MWh</span>
                       )}
                       {negativo && <span style={s.alertaIcon} title="Aporte necessário na CCEE">⚠</span>}
                     </p>

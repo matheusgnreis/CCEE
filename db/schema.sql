@@ -43,6 +43,7 @@ CREATE TABLE ccee_dados (
   geracao            NUMERIC,
   venda              NUMERIC,
   consumo_geracao    NUMERIC,
+  mcp_rs_mwh         NUMERIC,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT uniq_agente_mes UNIQUE (agente, mes)
 );
