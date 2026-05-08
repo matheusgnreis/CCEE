@@ -2153,7 +2153,7 @@ const PRIMEIRO_MES_PLD = "2025-01"; // PLD horário disponível a partir deste m
 const modulacaoEmAndamento = new Set(); // evita batch duplo por agente
 
 // Classes que não têm consumo próprio → skip consumo horário
-const CLASSES_SEM_CONSUMO = new Set(["Gerador", "Produtor Independente", "Comercializador"]);
+const CLASSES_SEM_CONSUMO = new Set(["Gerador", "Comercializador"]);
 // Classes sem nenhum processamento
 const CLASSES_SKIP_TOTAL  = new Set(["Comercializador"]);
 
@@ -3089,7 +3089,7 @@ async function queryPendentes() {
       FROM ccee_dados cd
       JOIN ccee_agentes a USING (agente)
       WHERE cd.mes >= $1
-        AND a.classe NOT IN ('Comercializador', 'Gerador', 'Produtor Independente')
+        AND a.classe NOT IN ('Comercializador', 'Gerador')
         AND cd.consumo IS NOT NULL
         AND NOT EXISTS (
           SELECT 1 FROM ccee_modulacao cm
