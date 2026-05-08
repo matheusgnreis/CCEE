@@ -1181,10 +1181,11 @@ app.get("/inteligencia/:agente/modulacao", async (req, res) => {
       `, [agente, PRIMEIRO_MES_PLD])
     ]);
 
-    const calculando = modulacaoEmAndamento.has(agente);
+    const calculando = modulacaoEmAndamento.has(agente) || modulacaoGeracaoEmAndamento.has(agente);
 
     return res.json({
       calculando,
+      fila_global: { ativa: filaProcessamento.ativa, tamanho: filaProcessamento.tamanho },
       total_meses: Number(totalMeses.rows[0].total),
       calculados:  resultados.rows.length,
       resultados:  resultados.rows,
@@ -2151,6 +2152,40 @@ app.get("/inteligencia/:agente/modulacao-perfil", async (req, res) => {
 const PRIMEIRO_MES_PLD = "2025-01"; // PLD horário disponível a partir deste mês
 const modulacaoEmAndamento = new Set(); // evita batch duplo por agente
 
+// Classes que não têm consumo próprio → skip consumo horário
+const CLASSES_SEM_CONSUMO = new Set(["Gerador", "Produtor Independente", "Comercializador"]);
+// Classes sem nenhum processamento
+const CLASSES_SKIP_TOTAL  = new Set(["Comercializador"]);
+
+// ─── Fila global de processamento (max 1 download simultâneo) ─────────────────
+const filaProcessamento = (() => {
+  const fila   = []; // [{ fn, label }]
+  let rodando  = false;
+
+  async function processar() {
+    if (rodando || !fila.length) return;
+    rodando = true;
+    const { fn, label } = fila.shift();
+    console.log(`[fila] ▶ ${label} | restam ${fila.length}`);
+    try { await fn(); }
+    catch (e) { console.warn(`[fila] Erro em ${label}:`, e.message); }
+    finally {
+      rodando = false;
+      setImmediate(processar);
+    }
+  }
+
+  return {
+    get tamanho() { return fila.length; },
+    get ativa()   { return rodando; },
+    enqueue(fn, label) {
+      if (fila.some(j => j.label === label)) return; // sem duplicata
+      fila.push({ fn, label });
+      processar();
+    },
+  };
+})();
+
 // Retry para erros transientes de conexão (queda de pool durante download longo)
 async function comRetry(fn, tentativas = 3, label = "") {
   for (let i = 1; i <= tentativas; i++) {
@@ -2324,7 +2359,13 @@ async function processarMesModulacao(agente, mes) {
   return resultados.length ? "done" : "no_results";
 }
 
-async function dispararModulacaoBackground(agente) {
+async function dispararModulacaoBackground(agente, classe) {
+  // Comercializadores e geradores não têm consumo próprio para processar
+  if (!classe) {
+    const r = await pool.query("SELECT classe FROM ccee_agentes WHERE agente = $1", [agente]);
+    classe = r.rows[0]?.classe;
+  }
+  if (CLASSES_SEM_CONSUMO.has(classe)) return;
   if (modulacaoEmAndamento.has(agente)) return;
 
   const [calculados, todos, maxPorMesRows] = await Promise.all([
@@ -2341,8 +2382,7 @@ async function dispararModulacaoBackground(agente) {
     .map(r => r.mes)
     .filter(m => {
       if (m < PRIMEIRO_MES_PLD) return false;
-      if (!calculadosSet.has(m)) return true; // ainda não calculado
-      // Já calculado — verifica se período está errado (indexação base 0 antiga)
+      if (!calculadosSet.has(m)) return true;
       const [ano, mesNum] = m.split("-").map(Number);
       const maxEsperado   = new Date(ano, mesNum, 0).getDate() * 24;
       const maxAtual      = maxPorMes[m] || 0;
@@ -2351,10 +2391,10 @@ async function dispararModulacaoBackground(agente) {
 
   if (!mesesPendentes.length) return;
 
-  modulacaoEmAndamento.add(agente);
-  console.log(`[modulacao-auto] ${agente}: ${mesesPendentes.length} meses pendentes`);
+  console.log(`[modulacao-auto] ${agente}: ${mesesPendentes.length} meses enfileirados`);
 
-  setImmediate(async () => {
+  filaProcessamento.enqueue(async () => {
+    modulacaoEmAndamento.add(agente);
     try {
       for (const mes of mesesPendentes) {
         try {
@@ -2371,7 +2411,7 @@ async function dispararModulacaoBackground(agente) {
       modulacaoEmAndamento.delete(agente);
       console.log(`[modulacao-auto] ${agente}: batch concluído`);
     }
-  });
+  }, `consumo|${agente}`);
 }
 
 // ─── Modulação de Geração ─────────────────────────────────────────────────────
@@ -2530,15 +2570,20 @@ async function processarMesModulacaoGeracao(agente, mes, siglasUsinas) {
 
 const modulacaoGeracaoEmAndamento = new Set();
 
-async function dispararModulacaoGeracaoBackground(agente) {
+async function dispararModulacaoGeracaoBackground(agente, classe) {
+  // Comercializadores não têm geração própria
+  if (!classe) {
+    const r = await pool.query("SELECT classe FROM ccee_agentes WHERE agente = $1", [agente]);
+    classe = r.rows[0]?.classe;
+  }
+  if (CLASSES_SKIP_TOTAL.has(classe)) return;
   if (modulacaoGeracaoEmAndamento.has(agente)) return;
 
-  // Busca siglas das usinas do agente no banco
   const rUsinas = await pool.query(
     "SELECT DISTINCT sigla_parcela_usina FROM ccee_usinas WHERE agente = $1 AND sigla_parcela_usina IS NOT NULL",
     [agente]
   );
-  if (!rUsinas.rows.length) return; // sem usinas, não calcula
+  if (!rUsinas.rows.length) return;
 
   const siglasUsinas = rUsinas.rows.map(r => r.sigla_parcela_usina);
 
@@ -2565,10 +2610,10 @@ async function dispararModulacaoGeracaoBackground(agente) {
 
   if (!mesesPendentes.length) return;
 
-  modulacaoGeracaoEmAndamento.add(agente);
-  console.log(`[mod-ger-auto] ${agente}: ${mesesPendentes.length} meses | ${siglasUsinas.length} usinas`);
+  console.log(`[mod-ger-auto] ${agente}: ${mesesPendentes.length} meses enfileirados | ${siglasUsinas.length} usinas`);
 
-  setImmediate(async () => {
+  filaProcessamento.enqueue(async () => {
+    modulacaoGeracaoEmAndamento.add(agente);
     try {
       for (const mes of mesesPendentes) {
         try {
@@ -2585,7 +2630,7 @@ async function dispararModulacaoGeracaoBackground(agente) {
       modulacaoGeracaoEmAndamento.delete(agente);
       console.log(`[mod-ger-auto] ${agente}: batch concluído`);
     }
-  });
+  }, `geracao|${agente}`);
 }
 
 // GET /inteligencia/:agente/modulacao-geracao
@@ -3035,31 +3080,40 @@ async function queryPendentes() {
   const r = await pool.query(`
     SELECT
       sub.agente,
+      sub.classe,
       json_agg(sub.mes ORDER BY sub.mes) FILTER (WHERE sub.tipo = 'carga')   AS meses_carga,
       json_agg(sub.mes ORDER BY sub.mes) FILTER (WHERE sub.tipo = 'geracao') AS meses_geracao
     FROM (
-      SELECT cd.agente, cd.mes, 'carga' AS tipo
+      -- Consumo: apenas classes que têm consumo próprio
+      SELECT cd.agente, a.classe, cd.mes, 'carga' AS tipo
       FROM ccee_dados cd
-      WHERE cd.mes >= $1 AND cd.consumo IS NOT NULL
+      JOIN ccee_agentes a USING (agente)
+      WHERE cd.mes >= $1
+        AND a.classe NOT IN ('Comercializador', 'Gerador', 'Produtor Independente')
+        AND cd.consumo IS NOT NULL
         AND NOT EXISTS (
           SELECT 1 FROM ccee_modulacao cm
           WHERE cm.agente = cd.agente AND cm.mes_referencia = cd.mes
         )
       UNION ALL
-      SELECT DISTINCT gh.agente, gh.mes_referencia AS mes, 'geracao' AS tipo
+      -- Geração: todos exceto Comercializadores
+      SELECT DISTINCT gh.agente, a.classe, gh.mes_referencia AS mes, 'geracao' AS tipo
       FROM ccee_geracao_horaria gh
+      JOIN ccee_agentes a USING (agente)
       WHERE gh.mes_referencia >= $1
+        AND a.classe NOT IN ('Comercializador')
         AND NOT EXISTS (
           SELECT 1 FROM ccee_modulacao_geracao mg
           WHERE mg.agente = gh.agente AND mg.mes_referencia = gh.mes_referencia
         )
     ) sub
-    GROUP BY sub.agente
+    GROUP BY sub.agente, sub.classe
     ORDER BY sub.agente
   `, [PRIMEIRO_MES_PLD]);
 
   return r.rows.map(row => ({
     agente:          row.agente,
+    classe:          row.classe,
     meses_carga:     row.meses_carga     || [],
     meses_geracao:   row.meses_geracao   || [],
     total_pendentes: (row.meses_carga?.length || 0) + (row.meses_geracao?.length || 0),
@@ -3118,15 +3172,17 @@ async function processarTodosPendentes() {
   console.log(`[pendentes] ${pendentes.length} agentes com modulação pendente.`);
 
   let processados = 0;
-  for (const { agente, meses_carga, meses_geracao } of pendentes) {
-    if (modulacaoEmAndamento.has(agente) || modulacaoGeracaoEmAndamento.has(agente)) {
+  for (const { agente, classe, meses_carga, meses_geracao } of pendentes) {
+    const emAndamento = modulacaoEmAndamento.has(agente) || modulacaoGeracaoEmAndamento.has(agente);
+    const naFila      = filaProcessamento.tamanho > 0;
+    if (emAndamento) {
       console.log(`[pendentes] ${agente}: já em andamento, pulando.`);
       continue;
     }
-    console.log(`[pendentes] → ${agente}: ${meses_carga.length} carga + ${meses_geracao.length} geração pendentes`);
-    dispararModulacaoBackground(agente);
+    console.log(`[pendentes] → ${agente} (${classe}): ${meses_carga.length} carga + ${meses_geracao.length} geração | fila: ${filaProcessamento.tamanho}`);
+    if (meses_carga.length)   dispararModulacaoBackground(agente, classe);
+    if (meses_geracao.length) dispararModulacaoGeracaoBackground(agente, classe);
     processados++;
-    if (processados < pendentes.length) await new Promise(r => setTimeout(r, 3000));
   }
 
   return { processados, pendentes };
