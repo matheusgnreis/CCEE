@@ -838,15 +838,17 @@ async function salvarHistorico(rows) {
   console.log(`Histórico: ${rows.length} meses salvos para ${agente}`);
 }
 
-function calcMcpRsMwh(mcp, consumo, mes) {
-  if (!mcp || !consumo || consumo <= 0 || !mes) return null;
+function calcMcpRsMwh(mcp, consumo, mes, balanco = null) {
+  if (!mcp || !mes) return null;
+  const divisor = (consumo > 0) ? consumo : (balanco && balanco !== 0 ? balanco : null);
+  if (!divisor) return null;
   const [ano, mesNum] = mes.split("-").map(Number);
   const horas = new Date(ano, mesNum, 0).getDate() * 24;
-  return Math.round((mcp / (consumo * horas)) * 10000) / 10000;
+  return Math.round((mcp / (divisor * horas)) * 10000) / 10000;
 }
 
 async function salvarDados(dado) {
-  const mcpRsMwh = calcMcpRsMwh(dado.mcp, dado.consumo, dado.mes);
+  const mcpRsMwh = calcMcpRsMwh(dado.mcp, dado.consumo, dado.mes, dado.balanco_energetico);
   await pool.query(`
     INSERT INTO ccee_dados
       (agente, consumo, compra, mcp, resultado, resultado_mcp, balanco_energetico, geracao, venda, consumo_geracao, mcp_rs_mwh, mre_mais, mre_menos, mes)
@@ -887,7 +889,7 @@ async function fetchSalvarRetornarSimples(agente, mes) {
 function combinarResposta(dados, meta) {
   return {
     ...dados,
-    mcp_rs_mwh:     calcMcpRsMwh(dados.mcp, dados.consumo, dados.mes),
+    mcp_rs_mwh:     calcMcpRsMwh(dados.mcp, dados.consumo, dados.mes, dados.balanco_energetico),
     razao_social:   meta?.razao_social  ?? null,
     sigla:          meta?.sigla         ?? null,
     cnpj:           meta?.cnpj          ?? null,
@@ -1146,7 +1148,7 @@ app.get("/inteligencia/:agente/historico", async (req, res) => {
 
     const rows = r.rows.map(row => ({
       ...row,
-      mcp_rs_mwh: row.mcp_rs_mwh ?? calcMcpRsMwh(row.mcp, row.consumo, row.mes),
+      mcp_rs_mwh: row.mcp_rs_mwh ?? calcMcpRsMwh(row.mcp, row.consumo, row.mes, row.balanco_energetico),
     }));
     return res.json(rows);
   } catch (e) {
