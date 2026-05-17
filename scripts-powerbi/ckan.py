@@ -7,10 +7,12 @@ Sem dependências externas — stdlib Python 3.10+ apenas.
 """
 
 import csv
+import functools
 import gzip
 import io
 import json
 import math
+import re
 import time
 import unicodedata
 import urllib.parse
@@ -20,29 +22,21 @@ from pathlib import Path
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 
-CKAN_SEARCH = "https://dadosabertos.ccee.org.br/api/3/action/datastore_search"
-CKAN_PKG    = "https://dadosabertos.ccee.org.br/api/3/action/package_show"
+CKAN_BASE   = "https://dadosabertos.ccee.org.br/api/3/action"
+CKAN_SEARCH = f"{CKAN_BASE}/datastore_search"
+CKAN_PKG    = f"{CKAN_BASE}/package_show"
+CKAN_RES    = f"{CKAN_BASE}/resource_show"
 USER_AGENT  = "Mozilla/5.0 (compatible; CCEEMonitor-Python/1.0)"
 PAGE_SIZE   = 1000
 TIMEOUT_API = 20    # segundos — chamadas CKAN paginadas
 TIMEOUT_DL  = 900   # segundos — download de arquivo GZIP grande
 
-# IDs dos datasets CKAN por tipo e ano
-DATASETS_CARGAS = {
-    2024: "b854f7bc-94a3-423a-96b7-2d4756ec77d1",
-    2025: "c88d04a6-fe42-413b-b7bf-86e390494fb0",
-    2026: "cf753cb8-3a01-4ff0-abda-020be5908c41",
-}
-DATASETS_USINAS = {
-    2024: "5c64e360-0252-4849-9dbb-8a61cb2af8f0",
-    2025: "45d04e27-ba84-44e9-8e53-e186b44d0a49",
-    2026: "7c33c984-c4d5-486a-a68d-0b034ccc9580",
-}
-DATASETS_CONTAB = {
-    2024: "d47f9660-28d6-4542-9dbc-9648e13b3c67",
-    2025: "76d1cf4c-da8c-47a5-9f0d-8b50079be960",
-    2026: "f8512d8c-9c0f-4f73-b2d2-911545084d9b",
-}
+# Seeds: apenas UM resource_id por tipo (qualquer ano serve).
+# O resto dos anos é descoberto automaticamente via CKAN.
+SEED_CARGAS = "b854f7bc-94a3-423a-96b7-2d4756ec77d1"  # cargas 2024
+SEED_USINAS = "5c64e360-0252-4849-9dbb-8a61cb2af8f0"  # usinas 2024
+SEED_CONTAB = "d47f9660-28d6-4542-9dbc-9648e13b3c67"  # contab 2024
+
 DATASET_CONSUMO_HORARIO = "consumo_horario_perfil_agente"
 DATASET_GERACAO_HORARIA = "geracao_horaria_usina"
 
@@ -83,6 +77,40 @@ def _get(url: str, timeout: int = TIMEOUT_API) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
+
+# ─── Descoberta dinâmica de datasets por ano ──────────────────────────────────
+
+@functools.lru_cache(maxsize=None)
+def _datasets_por_ano(seed_resource_id: str) -> dict[int, str]:
+    """
+    A partir de um resource_id seed, descobre o package no CKAN e retorna
+    {ano: resource_id} para todos os anos disponíveis.
+    Cache em memória — só chama o CKAN uma vez por execução por tipo.
+    """
+    # 1. Descobre o package_id do resource seed
+    data = _get(f"{CKAN_RES}?id={seed_resource_id}")
+    if not data.get("success"):
+        raise RuntimeError(f"CKAN resource_show falhou para seed {seed_resource_id}")
+    package_id = data["result"]["package_id"]
+
+    # 2. Lista todos os resources do package
+    pkg = _get(f"{CKAN_PKG}?id={package_id}")
+    if not pkg.get("success"):
+        raise RuntimeError(f"CKAN package_show falhou para {package_id}")
+
+    datasets: dict[int, str] = {}
+    for res in pkg["result"].get("resources", []):
+        texto = res.get("name", "") + " " + (res.get("description") or "")
+        m = re.search(r"\b(20\d{2})\b", texto)
+        if m:
+            datasets[int(m.group(1))] = res["id"]
+
+    if not datasets:
+        raise RuntimeError(f"Nenhum ano encontrado no package {package_id}")
+
+    anos = sorted(datasets)
+    print(f"    [CKAN] {len(datasets)} anos descobertos: {anos[0]}–{anos[-1]}")
+    return datasets
 
 # ─── CKAN paginado ────────────────────────────────────────────────────────────
 
@@ -141,7 +169,7 @@ def buscar_cargas(nome_empresarial: str | None, sigla: str | None = None) -> lis
         return []
 
     print(f"  Cargas ({campo}={valor}):")
-    registros = _buscar_por_anos(DATASETS_CARGAS, {campo: valor}, "cargas")
+    registros = _buscar_por_anos(_datasets_por_ano(SEED_CARGAS), {campo: valor}, "cargas")
     registros.sort(key=lambda r: (r.get("mes_referencia", ""), r.get("sigla_parcela_carga", "")))
     return registros
 
@@ -151,7 +179,7 @@ def buscar_usinas(nome_empresarial: str) -> list[dict]:
     """Busca parcelas de usina (geração) por NOME_EMPRESARIAL."""
     valor = nome_empresarial.strip().upper()
     print(f"  Usinas (NOME_EMPRESARIAL={valor}):")
-    registros = _buscar_por_anos(DATASETS_USINAS, {"NOME_EMPRESARIAL": valor}, "usinas")
+    registros = _buscar_por_anos(_datasets_por_ano(SEED_USINAS), {"NOME_EMPRESARIAL": valor}, "usinas")
     registros.sort(key=lambda r: (r.get("mes_referencia", ""), r.get("sigla_ativo", "")))
     return registros
 
@@ -169,7 +197,7 @@ def buscar_contabilizacao(nome_empresarial: str) -> list[dict]:
     """Busca contabilização de montante por NOME_EMPRESARIAL."""
     valor = nome_empresarial.strip().upper()
     print(f"  Contabilização (NOME_EMPRESARIAL={valor}):")
-    registros = _buscar_por_anos(DATASETS_CONTAB, {"NOME_EMPRESARIAL": valor}, "contab")
+    registros = _buscar_por_anos(_datasets_por_ano(SEED_CONTAB), {"NOME_EMPRESARIAL": valor}, "contab")
 
     for r in registros:
         for campo in CAMPOS_NUM_CONTAB:
