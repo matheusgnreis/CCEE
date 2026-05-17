@@ -1,256 +1,481 @@
 """
 buscar_dados.py
 ===============
-Busca dados de agentes CCEE via API e salva em CSV para uso no Power BI.
+Busca dados de agentes CCEE diretamente do Power BI e salva em CSV.
+Não depende de nenhum servidor intermediário.
 
 Uso:
     python buscar_dados.py
-    python buscar_dados.py --api http://localhost:3001
     python buscar_dados.py --agentes minha_lista.txt
     python buscar_dados.py --mes 2026-03
+    python buscar_dados.py --modo a          # acumula sem sobrescrever
 """
 
 import argparse
+import calendar
 import csv
 import json
-import os
-import sys
+import math
 import time
-import urllib.parse
 import urllib.request
-from datetime import datetime
+import urllib.error
+from datetime import date, datetime
 from pathlib import Path
 
-# ─── Configuração ─────────────────────────────────────────────────────────────
+# ─── Credenciais Power BI (CCEE) ──────────────────────────────────────────────
 
-DEFAULT_API  = "https://ccee-api.onrender.com"   # substitua pela URL do Render
-OUTPUT_DIR   = Path("csv_export")
-DELAY_S      = 1.2   # pausa entre requisições (respeita rate limit da API)
-TIMEOUT_S    = 30
+POWERBI_RESOURCE_KEY = "f6267020-1b73-4885-8920-19a9d09f1395"
+POWERBI_MODEL_ID     = 7427061
+POWERBI_URL          = (
+    "https://wabi-brazil-south-b-primary-api.analysis.windows.net"
+    "/public/reports/querydata?synchronous=true"
+)
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Configuração geral ────────────────────────────────────────────────────────
 
-def get_json(url, timeout=TIMEOUT_S):
-    req = urllib.request.Request(url, headers={"User-Agent": "CCEE-PowerBI-Exporter/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+OUTPUT_DIR = Path("csv_export")
+DELAY_S    = 1.5   # pausa entre agentes
+TIMEOUT_S  = 20
+
+# ─── Helpers de data ──────────────────────────────────────────────────────────
+
+def mes_referencia() -> str:
+    """Estima o mês de referência (igual à lógica Node.js)."""
+    hoje  = date.today()
+    offset = 3 if hoje.day <= 5 else 2
+    ano, mes = hoje.year, hoje.month - offset
+    if mes <= 0:
+        mes += 12
+        ano -= 1
+    return f"{ano:04d}-{mes:02d}"
+
+def filtro_mes_ano(mes: str) -> str:
+    """Converte YYYY-MM → '(mais recente)' ou 'YYYY/MM' para filtro Power BI."""
+    if mes == mes_referencia():
+        return "'(mais recente)'"
+    return f"'{mes.replace('-', '/')}'"
+
+def horas_do_mes(mes: str) -> int:
+    ano, m = int(mes[:4]), int(mes[5:7])
+    return calendar.monthrange(ano, m)[1] * 24
+
+def ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# ─── Power BI — queries ────────────────────────────────────────────────────────
+
+def _q_filtro_mes(agente: str, mes: str, usar_mais_recente: bool) -> dict:
+    filtro_val = "'(mais recente)'" if usar_mais_recente else filtro_mes_ano(mes)
+    return {
+        "Query": {"Commands": [{"SemanticQueryDataShapeCommand": {"Query": {
+            "Version": 2,
+            "From": [
+                {"Name": "s", "Entity": "SEGURANCA_MERCADO", "Type": 0},
+                {"Name": "t", "Entity": "TabelaBusca",       "Type": 0},
+                {"Name": "c", "Entity": "CALENDARIO",        "Type": 0},
+            ],
+            "Select": [
+                {"Column":      {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "DS_ACR"}},
+                {"Aggregation": {"Expression": {"Column": {"Expression": {"SourceRef": {"Source": "s"}},
+                                 "Property": "VL_ACR"}}, "Function": 0}},
+            ],
+            "Where": [
+                {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                    "Property": "Valor"}}], "Values": [[{"Literal": {"Value": f"'{agente}'"}}]]}}},
+                {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                    "Property": "Tipo"}}], "Values": [[{"Literal": {"Value": "'Agente'"}}]]}}},
+                {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "c"}},
+                    "Property": "FiltroMesAno"}}], "Values": [[{"Literal": {"Value": filtro_val}}]]}}},
+            ],
+        }}}]}
+    }
+
+def _q_serie(agente: str, medida_a: str, medida_b: str, proj: list, suppress: list) -> dict:
+    """Query histórica genérica (Queries 1, 3, 4)."""
+    selects = [
+        {"Column":      {"Expression": {"SourceRef": {"Source": "c"}}, "Property": "ANO"}},
+        {"Column":      {"Expression": {"SourceRef": {"Source": "c"}}, "Property": "MES_NOME"}},
+        {"Aggregation": {"Expression": {"Column": {"Expression": {"SourceRef": {"Source": "c"}},
+                         "Property": "MES_ANO_FORMATADO"}}, "Function": 3}},
+        {"Measure":     {"Expression": {"SourceRef": {"Source": "m"}}, "Property": medida_a}},
+        {"Measure":     {"Expression": {"SourceRef": {"Source": "m"}}, "Property": medida_b}},
+    ]
+    return {
+        "Query": {"Commands": [{"SemanticQueryDataShapeCommand": {
+            "Query": {
+                "Version": 2,
+                "From": [
+                    {"Name": "c", "Entity": "CALENDARIO",         "Type": 0},
+                    {"Name": "m", "Entity": "MEDIDAS_CALCULADAS", "Type": 0},
+                    {"Name": "t", "Entity": "TabelaBusca",        "Type": 0},
+                ],
+                "Select": selects,
+                "Where": [
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                        "Property": "Tipo"}}], "Values": [[{"Literal": {"Value": "'Agente'"}}]]}}},
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                        "Property": "Valor"}}], "Values": [[{"Literal": {"Value": f"'{agente}'"}}]]}}},
+                    {"Condition": {"Between": {
+                        "Expression": {"Column": {"Expression": {"SourceRef": {"Source": "c"}}, "Property": "DATA"}},
+                        "LowerBound": {"DateSpan": {"Expression": {"DateAdd": {"Expression": {"DateAdd": {
+                            "Expression": {"Now": {}}, "Amount": 1, "TimeUnit": 0}},
+                            "Amount": -2, "TimeUnit": 3}}, "TimeUnit": 0}},
+                        "UpperBound": {"DateSpan": {"Expression": {"Now": {}}, "TimeUnit": 0}},
+                    }}},
+                ],
+                "OrderBy": [{"Direction": 1, "Expression": {"Aggregation": {"Expression": {"Column": {
+                    "Expression": {"SourceRef": {"Source": "c"}},
+                    "Property": "MES_ANO_FORMATADO"}}, "Function": 3}}}],
+            },
+            "Binding": {
+                "Primary": {"Groupings": [{"Projections": proj}]},
+                "DataReduction": {"DataVolume": 4, "Primary": {"Window": {"Count": 1000}}},
+                "SuppressedJoinPredicates": suppress,
+                "Version": 1,
+            },
+        }}]},
+    }
+
+def _q_metadados(agente: str) -> dict:
+    return {
+        "Query": {"Commands": [{"SemanticQueryDataShapeCommand": {
+            "Query": {
+                "Version": 2,
+                "From": [
+                    {"Name": "s", "Entity": "SEGURANCA_MERCADO",  "Type": 0},
+                    {"Name": "m", "Entity": "MEDIDAS_CALCULADAS", "Type": 0},
+                    {"Name": "t", "Entity": "TabelaBusca",        "Type": 0},
+                    {"Name": "c", "Entity": "CALENDARIO",         "Type": 0},
+                ],
+                "Select": [
+                    {"Column":  {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "NM_CSSE"}},
+                    {"Column":  {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "NM_RZOA_SOCI"}},
+                    {"Column":  {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "SG_AGEN"}},
+                    {"Column":  {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "CNPJ_Formatado"}},
+                    {"Column":  {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "DS_STAT_AGEN"}},
+                    {"Measure": {"Expression": {"SourceRef": {"Source": "m"}}, "Property": "Capital Social"}},
+                ],
+                "Where": [
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                        "Property": "Tipo"}}], "Values": [[{"Literal": {"Value": "'Agente'"}}]]}}},
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "c"}},
+                        "Property": "FiltroMesAno"}}], "Values": [[{"Literal": {"Value": "'(mais recente)'"}}]]}}},
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                        "Property": "Valor"}}], "Values": [[{"Literal": {"Value": f"'{agente}'"}}]]}}},
+                ],
+            },
+            "Binding": {
+                "Primary": {"Groupings": [{"Projections": [0, 1, 2, 3, 4, 5]}]},
+                "DataReduction": {"DataVolume": 3, "Primary": {"Window": {"Count": 500}}},
+                "Version": 1,
+            },
+        }}]},
+    }
+
+def montar_body(agente: str, mes: str, usar_mais_recente: bool) -> dict:
+    return {
+        "version":  "1.0.0",
+        "modelId":  POWERBI_MODEL_ID,
+        "queries":  [
+            _q_filtro_mes(agente, mes, usar_mais_recente),                           # Q0 financeiro
+            _q_serie(agente, "Balanco_Energetico", "MCP",      [0,1,2,3,4], [2]),   # Q1 balanço+MCP
+            _q_metadados(agente),                                                     # Q2 metadados
+            _q_serie(agente, "Recurso",            "Requisito", [0,1,2,3,4], [2]),   # Q3 compra+consumo
+            _q_serie(agente, "Montante Gerado",    "Compra",    [0,1,2,3,4,5,6], [2,5,6]),  # Q4 geração
+        ],
+        "cancelQueries": [],
+    }
+
+# ─── Power BI — chamada HTTP ───────────────────────────────────────────────────
+
+def chamar_powerbi(body: dict) -> dict:
+    data = json.dumps(body).encode()
+    req  = urllib.request.Request(
+        POWERBI_URL,
+        data=data,
+        headers={
+            "Content-Type":       "application/json",
+            "X-PowerBI-ResourceKey": POWERBI_RESOURCE_KEY,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
         return json.loads(r.read().decode())
 
-def salvar_csv(caminho: Path, linhas: list[dict], modo="w"):
+# ─── Power BI — parsing DSR ───────────────────────────────────────────────────
+
+def _resultado_por_job(json_resp: dict) -> dict:
+    job_ids = json_resp.get("jobIds", [])
+    results = json_resp.get("results", [])
+    por_id  = {r["jobId"]: r for r in results}
+    return {i: por_id.get(jid) for i, jid in enumerate(job_ids)}
+
+def extrair_financeiro(result) -> dict:
+    """Q0: PH[1].DM1 → map {DS_ACR: VL_ACR}"""
+    dsr = result and result.get("result", {}).get("data", {}).get("dsr", {})
+    dm  = dsr.get("DS", [{}])[0].get("PH", [None, {}])[1].get("DM1") if dsr else None
+    if not dm:
+        return {}
+    mp = {}
+    for x in dm:
+        c = x.get("C", [])
+        if len(c) >= 2:
+            mp[c[0]] = c[1]
+    return mp
+
+def extrair_serie_dsr(result, campo_a: str, campo_b: str) -> list[dict]:
+    """Q1/Q3: PH[0].DM0 com bitmask Ø/R → lista de {mes, campo_a, campo_b}"""
+    dsr  = result and result.get("result", {}).get("data", {}).get("dsr", {})
+    ds   = dsr.get("DS", [{}])[0] if dsr else {}
+    dm   = ds.get("PH", [{}])[0].get("DM0")
+    if not dm:
+        return []
+    meses = ds.get("ValueDicts", {}).get("D1", [])
+    N     = 5
+    prev  = [None] * N
+    rows  = []
+    for item in dm:
+        C    = item.get("C", [])
+        full = [None] * N
+        ci   = 0
+        if "Ø" in item:
+            mask = item["Ø"]
+            for i in range(N):
+                full[i] = None if (mask & (1 << i)) else (C[ci] if ci < len(C) else None)
+                if not (mask & (1 << i)):
+                    ci += 1
+        else:
+            mask = item.get("R", 0)
+            for i in range(N):
+                full[i] = prev[i] if (mask & (1 << i)) else (C[ci] if ci < len(C) else None)
+                if not (mask & (1 << i)):
+                    ci += 1
+        prev = full
+        mes_val = meses[full[2]] if isinstance(full[2], int) and full[2] < len(meses) else full[2]
+        if not isinstance(mes_val, str):
+            continue
+        mes = mes_val.replace("/", "-")
+        if len(mes) != 7:
+            continue
+        va = float(full[3]) if full[3] is not None else 0.0
+        vb = float(full[4]) if full[4] is not None else 0.0
+        rows.append({"mes": mes, campo_a: va, campo_b: vb})
+    return rows
+
+def extrair_metadados(result) -> dict:
+    """Q2: PH[0].DM0 primeira linha → metadados do agente"""
+    dsr   = result and result.get("result", {}).get("data", {}).get("dsr", {})
+    ds    = dsr.get("DS", [{}])[0] if dsr else {}
+    dm    = ds.get("PH", [{}])[0].get("DM0")
+    dicts = ds.get("ValueDicts", {})
+    if not dm:
+        return {}
+    row = dm[0]
+    C   = row.get("C", [])
+    def d(key, idx):
+        if isinstance(idx, str):
+            return idx
+        lst = dicts.get(key, [])
+        return lst[idx] if isinstance(idx, int) and idx < len(lst) else None
+    return {
+        "classe":        d("D0", C[0]) if len(C) > 0 else None,
+        "razao_social":  d("D1", C[1]) if len(C) > 1 else None,
+        "sigla":         d("D2", C[2]) if len(C) > 2 else None,
+        "cnpj":          d("D3", C[3]) if len(C) > 3 else None,
+        "situacao":      d("D4", C[4]) if len(C) > 4 else None,
+        "capital_social": float(C[5]) if len(C) > 5 and C[5] is not None else 0,
+    }
+
+# ─── Cálculos ─────────────────────────────────────────────────────────────────
+
+def calc_mcp_rs_mwh(mcp, consumo, balanco, mes) -> float | None:
+    if not mcp or not mes:
+        return None
+    divisor = consumo if (consumo and consumo > 0) else (balanco if balanco and balanco != 0 else None)
+    if not divisor:
+        return None
+    h = horas_do_mes(mes)
+    return round(mcp / (divisor * h), 4)
+
+# ─── Busca principal por agente ───────────────────────────────────────────────
+
+def buscar_agente(agente: str, mes: str | None) -> dict:
+    """
+    Retorna:
+        {"status": "ok", "historico": [...], "mes": "YYYY-MM", "meta": {...}}
+        {"status": "nao_encontrado", "motivo": "..."}
+        {"status": "erro", "motivo": "..."}
+    """
+    mes_alvo          = mes or mes_referencia()
+    usar_mais_recente = mes is None
+
+    try:
+        body = montar_body(agente, mes_alvo, usar_mais_recente)
+        resp = chamar_powerbi(body)
+    except urllib.error.HTTPError as e:
+        return {"status": "erro", "motivo": f"HTTP {e.code}"}
+    except Exception as e:
+        return {"status": "erro", "motivo": str(e)}
+
+    por_idx = _resultado_por_job(resp)
+
+    # Metadados
+    meta = extrair_metadados(por_idx.get(2))
+
+    # Financeiro do mês (Q0)
+    fin_map = extrair_financeiro(por_idx.get(0))
+    if not fin_map:
+        return {"status": "nao_encontrado", "motivo": "sem dados financeiros no Power BI"}
+
+    # Séries históricas
+    serie_bal_mcp  = extrair_serie_dsr(por_idx.get(1), "balanco_energetico", "mcp")
+    serie_rec_req  = extrair_serie_dsr(por_idx.get(3), "compra",             "consumo")
+    serie_ger      = extrair_serie_dsr(por_idx.get(4), "geracao",            "_compra2")
+
+    # Merge histórico
+    hist_map: dict[str, dict] = {}
+    for s in (serie_bal_mcp, serie_rec_req, serie_ger):
+        for r in s:
+            m = r["mes"]
+            if m not in hist_map:
+                hist_map[m] = {"mes": m}
+            hist_map[m].update({k: v for k, v in r.items() if k != "mes" and not k.startswith("_")})
+
+    # Mês efetivo = último do histórico ou mes_alvo
+    mes_efetivo = sorted(hist_map.keys())[-1] if hist_map else mes_alvo
+
+    # Dados do mês atual (do Q0)
+    dados_mes = {
+        "consumo":            float(fin_map.get("Consumo", 0) or 0),
+        "compra":             float(fin_map.get("Compra",  0) or 0),
+        "mcp":                float(fin_map.get("MCP",     0) or 0),
+        "resultado":          float(fin_map.get("Resultado com Ajustes", 0) or 0),
+        "resultado_mcp":      float(fin_map.get("Resultado do MCP", 0) or 0),
+        "balanco_energetico": float(fin_map.get("Balanço Energético", 0) or 0),
+        "geracao":            fin_map.get("Geração"),
+        "venda":              fin_map.get("Venda"),
+        "consumo_geracao":    fin_map.get("Cons.da Ger."),
+        "mre_mais":           fin_map.get("MRE +"),
+        "mre_menos":          fin_map.get("MRE -"),
+    }
+
+    # Garante que o mês atual está no histórico com dados completos
+    if mes_efetivo not in hist_map:
+        hist_map[mes_efetivo] = {"mes": mes_efetivo}
+    hist_map[mes_efetivo].update({k: v for k, v in dados_mes.items() if v is not None})
+
+    # Adiciona mcp_rs_mwh e metadados em cada linha do histórico
+    historico = []
+    for m, row in sorted(hist_map.items()):
+        mcp_v    = row.get("mcp")
+        cons_v   = row.get("consumo")
+        bal_v    = row.get("balanco_energetico")
+        rs_mwh   = calc_mcp_rs_mwh(mcp_v, cons_v, bal_v, m)
+        historico.append({
+            "agente":             agente,
+            "mes":                m,
+            "consumo":            row.get("consumo"),
+            "compra":             row.get("compra"),
+            "mcp":                row.get("mcp"),
+            "resultado":          row.get("resultado"),
+            "resultado_mcp":      row.get("resultado_mcp"),
+            "balanco_energetico": row.get("balanco_energetico"),
+            "geracao":            row.get("geracao"),
+            "venda":              row.get("venda"),
+            "consumo_geracao":    row.get("consumo_geracao"),
+            "mcp_rs_mwh":         rs_mwh,
+            "mre_mais":           row.get("mre_mais"),
+            "mre_menos":          row.get("mre_menos"),
+            **{k: meta.get(k) for k in ("razao_social", "sigla", "cnpj", "classe", "situacao", "capital_social")},
+        })
+
+    return {"status": "ok", "historico": historico, "mes": mes_efetivo, "meta": meta}
+
+# ─── CSV ──────────────────────────────────────────────────────────────────────
+
+CAMPOS_DADOS = [
+    "agente", "mes", "consumo", "compra", "mcp", "resultado", "resultado_mcp",
+    "balanco_energetico", "geracao", "venda", "consumo_geracao",
+    "mcp_rs_mwh", "mre_mais", "mre_menos",
+    "razao_social", "sigla", "cnpj", "classe", "situacao", "capital_social",
+]
+
+CAMPOS_NAO_ENCONTRADOS = ["agente", "motivo", "timestamp"]
+
+def salvar_csv(caminho: Path, linhas: list[dict], campos: list[str], modo: str = "w"):
     if not linhas:
         return
     caminho.parent.mkdir(parents=True, exist_ok=True)
     escrever_header = modo == "w" or not caminho.exists()
     with open(caminho, modo, newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=linhas[0].keys(), delimiter=";")
+        w = csv.DictWriter(f, fieldnames=campos, delimiter=";", extrasaction="ignore")
         if escrever_header:
             w.writeheader()
         w.writerows(linhas)
 
-def ler_lista_agentes(caminho: str) -> list[str]:
+def ler_agentes(caminho: str) -> list[str]:
     agentes = []
     with open(caminho, encoding="utf-8") as f:
         for linha in f:
-            linha = linha.strip()
-            if linha and not linha.startswith("#"):
-                agentes.append(linha)
+            l = linha.strip()
+            if l and not l.startswith("#"):
+                agentes.append(l)
     return agentes
-
-def timestamp():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-# ─── Funções de busca ─────────────────────────────────────────────────────────
-
-def buscar_historico(api: str, agente: str) -> list[dict]:
-    """Busca série histórica completa do agente."""
-    url = f"{api}/inteligencia/{urllib.parse.quote(agente)}/historico"
-    return get_json(url)
-
-def buscar_mes(api: str, agente: str, mes: str | None = None) -> dict:
-    """Busca dados do mês mais recente (ou mês específico) do agente."""
-    url = f"{api}/inteligencia/{urllib.parse.quote(agente)}"
-    if mes:
-        url += f"?mes={mes}"
-    return get_json(url)
-
-def buscar_cargas(api: str, agente: str, mes: str) -> list[dict]:
-    """Busca parcelas de carga do agente no mês."""
-    url = f"{api}/inteligencia/{urllib.parse.quote(agente)}/cargas?mes={mes}"
-    try:
-        return get_json(url)
-    except Exception:
-        return []
-
-def buscar_modulacao(api: str, agente: str) -> dict | None:
-    """Busca resultado de modulação horária do agente."""
-    url = f"{api}/inteligencia/{urllib.parse.quote(agente)}/modulacao"
-    try:
-        return get_json(url)
-    except Exception:
-        return None
-
-# ─── Processamento principal ──────────────────────────────────────────────────
-
-def processar_agente(api: str, agente: str, mes: str | None) -> dict:
-    """
-    Retorna:
-        { "status": "ok", "historico": [...], "mes_atual": {...}, "cargas": [...] }
-        { "status": "nao_encontrado", "motivo": "..." }
-        { "status": "erro", "motivo": "..." }
-    """
-    try:
-        historico = buscar_historico(api, agente)
-        if not historico:
-            return {"status": "nao_encontrado", "motivo": "histórico vazio"}
-
-        mes_atual = buscar_mes(api, agente, mes)
-        if mes_atual.get("error"):
-            return {"status": "nao_encontrado", "motivo": mes_atual["error"]}
-
-        mes_ref = mes_atual.get("mes") or (historico[-1]["mes"] if historico else None)
-        cargas  = buscar_cargas(api, agente, mes_ref) if mes_ref else []
-        mod     = buscar_modulacao(api, agente)
-
-        return {
-            "status":    "ok",
-            "historico": historico,
-            "mes_atual": mes_atual,
-            "cargas":    cargas,
-            "modulacao": mod,
-        }
-
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {"status": "nao_encontrado", "motivo": f"HTTP 404"}
-        return {"status": "erro", "motivo": f"HTTP {e.code}"}
-    except Exception as e:
-        return {"status": "erro", "motivo": str(e)}
-
-def flatten_historico(agente: str, historico: list[dict]) -> list[dict]:
-    """Normaliza linhas do histórico para o CSV ccee_dados."""
-    campos = [
-        "agente", "mes", "consumo", "compra", "mcp", "resultado",
-        "resultado_mcp", "balanco_energetico", "geracao", "venda",
-        "consumo_geracao", "mcp_rs_mwh", "mre_mais", "mre_menos",
-        "razao_social", "sigla", "cnpj", "classe", "situacao", "capital_social",
-    ]
-    rows = []
-    for h in historico:
-        row = {c: h.get(c, "") for c in campos}
-        row["agente"] = agente
-        rows.append(row)
-    return rows
-
-def flatten_cargas(cargas: list[dict]) -> list[dict]:
-    campos = [
-        "agente", "mes_referencia", "sigla_parcela_carga", "nome_empresarial",
-        "cidade", "estado_uf", "ramo_atividade", "submercado",
-        "consumo_acl", "consumo_total", "capacidade_carga",
-    ]
-    return [{c: r.get(c, "") for c in campos} for r in cargas]
-
-def flatten_modulacao(agente: str, mod: dict | None) -> list[dict]:
-    if not mod or not mod.get("resultados"):
-        return []
-    campos = [
-        "agente", "mes_referencia", "submercado",
-        "consumo_total_mwh", "n_horas",
-        "soma_curva_rs", "soma_flat_rs", "custo_modulacao_rs_mwh",
-    ]
-    rows = []
-    for r in mod["resultados"]:
-        row = {c: r.get(c, "") for c in campos}
-        row["agente"] = agente
-        rows.append(row)
-    return rows
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Exporta dados CCEE para CSV (Power BI)")
-    parser.add_argument("--api",      default=DEFAULT_API,  help="URL base da API")
-    parser.add_argument("--agentes",  default="agentes.txt", help="Arquivo com lista de agentes")
-    parser.add_argument("--mes",      default=None,         help="Mês específico (YYYY-MM)")
-    parser.add_argument("--modo",     default="w",          choices=["w", "a"],
-                        help="w=sobrescreve, a=acumula (append)")
+    parser = argparse.ArgumentParser(description="Exporta dados CCEE (Power BI direto) para CSV")
+    parser.add_argument("--agentes", default="agentes.txt")
+    parser.add_argument("--mes",     default=None, help="Mês específico YYYY-MM (padrão: mais recente)")
+    parser.add_argument("--modo",    default="w", choices=["w", "a"],
+                        help="w=sobrescreve CSVs, a=acumula")
     args = parser.parse_args()
 
-    agentes = ler_lista_agentes(args.agentes)
-    print(f"[{timestamp()}] {len(agentes)} agentes | API: {args.api}")
-    print(f"[{timestamp()}] Saída: {OUTPUT_DIR.resolve()}\n")
+    agentes = ler_agentes(args.agentes)
+    print(f"[{ts()}] {len(agentes)} agente(s) | mês: {args.mes or 'mais recente'}\n")
 
     todos_dados     = []
-    todas_cargas    = []
-    toda_modulacao  = []
     nao_encontrados = []
     erros           = []
 
     for i, agente in enumerate(agentes, 1):
         print(f"[{i:>3}/{len(agentes)}] {agente}... ", end="", flush=True)
-        resultado = processar_agente(args.api, agente, args.mes)
+        r = buscar_agente(agente, args.mes)
 
-        if resultado["status"] == "ok":
-            hist_rows = flatten_historico(agente, resultado["historico"])
-            carg_rows = flatten_cargas(resultado["cargas"])
-            mod_rows  = flatten_modulacao(agente, resultado["modulacao"])
-
-            todos_dados.extend(hist_rows)
-            todas_cargas.extend(carg_rows)
-            toda_modulacao.extend(mod_rows)
-
-            mes_ref = resultado["mes_atual"].get("mes", "?")
-            print(f"✅  {len(hist_rows)} meses | {len(carg_rows)} cargas | mês={mes_ref}")
-
-        elif resultado["status"] == "nao_encontrado":
-            nao_encontrados.append({
-                "agente":    agente,
-                "motivo":    resultado["motivo"],
-                "timestamp": timestamp(),
-            })
-            print(f"⚠  não encontrado — {resultado['motivo']}")
-
+        if r["status"] == "ok":
+            todos_dados.extend(r["historico"])
+            classe = r["meta"].get("classe", "")
+            print(f"✅  {len(r['historico'])} meses | mês={r['mes']} | {classe}")
+        elif r["status"] == "nao_encontrado":
+            nao_encontrados.append({"agente": agente, "motivo": r["motivo"], "timestamp": ts()})
+            print(f"⚠   não encontrado — {r['motivo']}")
         else:
-            erros.append({
-                "agente":    agente,
-                "motivo":    resultado["motivo"],
-                "timestamp": timestamp(),
-            })
-            print(f"❌  erro — {resultado['motivo']}")
+            erros.append({"agente": agente, "motivo": r["motivo"], "timestamp": ts()})
+            print(f"❌  erro — {r['motivo']}")
 
         if i < len(agentes):
             time.sleep(DELAY_S)
 
-    # Salvar CSVs
-    print(f"\n[{timestamp()}] Salvando arquivos...")
+    print(f"\n[{ts()}] Salvando...")
 
     if todos_dados:
         p = OUTPUT_DIR / "ccee_dados.csv"
-        salvar_csv(p, todos_dados, args.modo)
-        print(f"  ccee_dados.csv          → {len(todos_dados)} linhas")
-
-    if todas_cargas:
-        p = OUTPUT_DIR / "ccee_cargas.csv"
-        salvar_csv(p, todas_cargas, args.modo)
-        print(f"  ccee_cargas.csv         → {len(todas_cargas)} linhas")
-
-    if toda_modulacao:
-        p = OUTPUT_DIR / "ccee_modulacao.csv"
-        salvar_csv(p, toda_modulacao, args.modo)
-        print(f"  ccee_modulacao.csv      → {len(toda_modulacao)} linhas")
+        salvar_csv(p, todos_dados, CAMPOS_DADOS, args.modo)
+        print(f"  ccee_dados.csv       → {len(todos_dados)} linhas")
 
     if nao_encontrados:
         p = OUTPUT_DIR / "nao_encontrados.csv"
-        salvar_csv(p, nao_encontrados, "a")   # sempre acumula
-        print(f"  nao_encontrados.csv     → {len(nao_encontrados)} novos registros")
+        salvar_csv(p, nao_encontrados, CAMPOS_NAO_ENCONTRADOS, "a")
+        print(f"  nao_encontrados.csv  → {len(nao_encontrados)} registro(s)")
 
     if erros:
         p = OUTPUT_DIR / "erros.csv"
-        salvar_csv(p, erros, "a")
-        print(f"  erros.csv               → {len(erros)} novos registros")
+        salvar_csv(p, erros, CAMPOS_NAO_ENCONTRADOS, "a")
+        print(f"  erros.csv            → {len(erros)} registro(s)")
 
-    print(f"\n[{timestamp()}] Concluído.")
-    print(f"  ✅ ok: {len(agentes) - len(nao_encontrados) - len(erros)}")
-    print(f"  ⚠  não encontrados: {len(nao_encontrados)}")
-    print(f"  ❌ erros: {len(erros)}")
+    print(f"\n[{ts()}] Concluído — ✅ {len(todos_dados) and len(agentes)-len(nao_encontrados)-len(erros)} ok"
+          f" | ⚠ {len(nao_encontrados)} não encontrados | ❌ {len(erros)} erros")
 
 if __name__ == "__main__":
     main()

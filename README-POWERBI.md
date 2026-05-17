@@ -51,9 +51,10 @@ se ainda falha → permanece em nao_encontrados.csv
 ## 2. Pré-requisitos
 
 - **Python 3.10+** — [download](https://www.python.org/downloads/)
-  - Sem dependências externas — usa apenas bibliotecas padrão
+  - Sem dependências externas — usa apenas bibliotecas padrão (`json`, `csv`, `urllib`, `calendar`)
 - **Power BI Desktop** (gratuito) — [download](https://powerbi.microsoft.com/pt-br/desktop/)
-- Acesso à API CCEE Monitor (Render ou local)
+
+> Os scripts chamam diretamente o Power BI da CCEE e não dependem de nenhum servidor ou API intermediária.
 
 ---
 
@@ -69,17 +70,7 @@ cd CCEE/scripts-powerbi
 # Ou apenas baixar a pasta scripts-powerbi/
 ```
 
-### 3.2 Configurar a URL da API
-
-Abrir `buscar_dados.py` e alterar a linha:
-
-```python
-DEFAULT_API = "https://ccee-api.onrender.com"   # ← sua URL aqui
-```
-
-Ou passar via argumento: `--api http://localhost:3001`
-
-### 3.3 Montar a lista de agentes
+### 3.2 Montar a lista de agentes
 
 Editar `agentes.txt` — um agente por linha, exatamente como aparece na CCEE:
 
@@ -105,9 +96,6 @@ python buscar_dados.py
 
 # Busca mês específico
 python buscar_dados.py --mes 2026-03
-
-# Usando API local
-python buscar_dados.py --api http://localhost:3001
 
 # Acumular no CSV existente (não sobrescreve)
 python buscar_dados.py --modo a
@@ -437,7 +425,7 @@ python agendar.py --intervalo 24
 cd /d %~dp0
 python buscar_dados.py --modo w
 python reprocessar_nao_encontrados.py
-echo Atualizado em %date% %time% >> ..\log_atualizacao.txt
+echo Atualizado em %date% %time% >> log_atualizacao.txt
 ```
 
 2. Abrir **Agendador de Tarefas** → Criar Tarefa Básica

@@ -1,86 +1,75 @@
 """
 reprocessar_nao_encontrados.py
 ================================
-Lê csv_export/nao_encontrados.csv e tenta buscar novamente cada agente.
-Agentes encontrados saem do arquivo; os que permanecem sem resultado ficam.
+Relê csv_export/nao_encontrados.csv e tenta buscar novamente cada agente.
+Encontrados → movidos para ccee_dados.csv. Permanecem no arquivo apenas os que
+continuam sem resultado.
 
 Uso:
     python reprocessar_nao_encontrados.py
-    python reprocessar_nao_encontrados.py --api http://localhost:3001
+    python reprocessar_nao_encontrados.py --mes 2026-03
 """
 
 import argparse
 import csv
-import sys
+import time
 from pathlib import Path
 from buscar_dados import (
-    DEFAULT_API, OUTPUT_DIR, DELAY_S,
-    processar_agente, flatten_historico, flatten_cargas, flatten_modulacao,
-    salvar_csv, timestamp,
+    OUTPUT_DIR, DELAY_S, CAMPOS_DADOS, CAMPOS_NAO_ENCONTRADOS,
+    buscar_agente, salvar_csv, ts,
 )
-import time
 
-NAO_ENCONTRADOS_CSV = OUTPUT_DIR / "nao_encontrados.csv"
+NAO_ENCONTRADOS = OUTPUT_DIR / "nao_encontrados.csv"
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api", default=DEFAULT_API)
+    parser.add_argument("--mes", default=None)
     args = parser.parse_args()
 
-    if not NAO_ENCONTRADOS_CSV.exists():
-        print("Arquivo nao_encontrados.csv não encontrado. Nada a reprocessar.")
+    if not NAO_ENCONTRADOS.exists():
+        print("nao_encontrados.csv não existe. Nada a reprocessar.")
         return
 
-    with open(NAO_ENCONTRADOS_CSV, encoding="utf-8-sig") as f:
+    with open(NAO_ENCONTRADOS, encoding="utf-8-sig") as f:
         pendentes = list(csv.DictReader(f, delimiter=";"))
 
     if not pendentes:
-        print("Nenhum agente pendente.")
+        print("Arquivo vazio.")
         return
 
-    print(f"[{timestamp()}] {len(pendentes)} agentes para reprocessar\n")
+    print(f"[{ts()}] {len(pendentes)} agente(s) para reprocessar\n")
 
+    todos_dados     = []
     ainda_pendentes = []
-    todos_dados    = []
-    todas_cargas   = []
-    toda_modulacao = []
 
     for i, row in enumerate(pendentes, 1):
         agente = row["agente"]
         print(f"[{i:>3}/{len(pendentes)}] {agente}... ", end="", flush=True)
+        r = buscar_agente(agente, args.mes)
 
-        resultado = processar_agente(args.api, agente, None)
-
-        if resultado["status"] == "ok":
-            todos_dados.extend(flatten_historico(agente, resultado["historico"]))
-            todas_cargas.extend(flatten_cargas(resultado["cargas"]))
-            toda_modulacao.extend(flatten_modulacao(agente, resultado["modulacao"]))
-            print(f"✅  encontrado agora!")
+        if r["status"] == "ok":
+            todos_dados.extend(r["historico"])
+            print(f"✅  encontrado — {len(r['historico'])} meses")
         else:
-            ainda_pendentes.append({**row, "ultima_tentativa": timestamp()})
-            print(f"⚠  ainda {resultado['status']} — {resultado['motivo']}")
+            ainda_pendentes.append({**row, "timestamp": ts()})
+            print(f"⚠   ainda {r['status']} — {r['motivo']}")
 
         if i < len(pendentes):
             time.sleep(DELAY_S)
 
-    # Acumula nos CSVs principais
     if todos_dados:
-        salvar_csv(OUTPUT_DIR / "ccee_dados.csv", todos_dados, "a")
-    if todas_cargas:
-        salvar_csv(OUTPUT_DIR / "ccee_cargas.csv", todas_cargas, "a")
-    if toda_modulacao:
-        salvar_csv(OUTPUT_DIR / "ccee_modulacao.csv", toda_modulacao, "a")
+        salvar_csv(OUTPUT_DIR / "ccee_dados.csv", todos_dados, CAMPOS_DADOS, "a")
+        print(f"\nccee_dados.csv: +{len(todos_dados)} linhas acumuladas")
 
-    # Reescreve nao_encontrados apenas com os que ainda falharam
     if ainda_pendentes:
-        salvar_csv(NAO_ENCONTRADOS_CSV, ainda_pendentes, "w")
-        print(f"\n{len(ainda_pendentes)} agente(s) permanecem em nao_encontrados.csv")
+        salvar_csv(NAO_ENCONTRADOS, ainda_pendentes, CAMPOS_NAO_ENCONTRADOS, "w")
+        print(f"{len(ainda_pendentes)} agente(s) permanecem em nao_encontrados.csv")
     else:
-        NAO_ENCONTRADOS_CSV.unlink()
-        print("\nTodos os agentes foram encontrados! nao_encontrados.csv removido.")
+        NAO_ENCONTRADOS.unlink()
+        print("Todos encontrados! nao_encontrados.csv removido.")
 
-    print(f"[{timestamp()}] Concluído.")
+    print(f"[{ts()}] Concluído.")
 
 
 if __name__ == "__main__":
