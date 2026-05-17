@@ -399,8 +399,9 @@ CAMPOS_DADOS = [
     "mcp_rs_mwh", "mre_mais", "mre_menos",
     "razao_social", "sigla", "cnpj", "classe", "situacao", "capital_social",
 ]
-
 CAMPOS_NAO_ENCONTRADOS = ["agente", "motivo", "timestamp"]
+CAMPOS_CONSUMO_H = ["agente", "mes_referencia", "periodo", "submercado", "consumo_mwh"]
+CAMPOS_GERACAO_H = ["agente", "mes_referencia", "sigla_usina", "periodo", "submercado", "geracao_mwmed"]
 
 def salvar_csv(caminho: Path, linhas: list[dict], campos: list[str], modo: str = "w"):
     if not linhas:
@@ -425,49 +426,175 @@ def ler_agentes(caminho: str) -> list[str]:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Exporta dados CCEE (Power BI direto) para CSV")
-    parser.add_argument("--agentes", default="agentes.txt")
-    parser.add_argument("--mes",     default=None, help="Mês específico YYYY-MM (padrão: mais recente)")
-    parser.add_argument("--modo",    default="w", choices=["w", "a"],
-                        help="w=sobrescreve CSVs, a=acumula")
+    parser = argparse.ArgumentParser(description="Exporta dados CCEE para CSV (Power BI + CKAN direto)")
+    parser.add_argument("--agentes",  default="agentes.txt")
+    parser.add_argument("--mes",      default=None,  help="Mês específico YYYY-MM (padrão: mais recente)")
+    parser.add_argument("--modo",     default="w",   choices=["w", "a"])
+    parser.add_argument("--horario",  action="store_true",
+                        help="Baixa consumo horário e geração horária (arquivos grandes ~400MB)")
+    parser.add_argument("--sem-ckan", action="store_true",
+                        help="Pula cargas, usinas e contabilização (só Power BI)")
     args = parser.parse_args()
 
+    from ckan import (
+        buscar_cargas, buscar_usinas, buscar_contabilizacao,
+        buscar_consumo_horario, buscar_geracao_horaria,
+        remover_acentos,
+    )
+
     agentes = ler_agentes(args.agentes)
-    print(f"[{ts()}] {len(agentes)} agente(s) | mês: {args.mes or 'mais recente'}\n")
+    print(f"[{ts()}] {len(agentes)} agente(s) | mês: {args.mes or 'mais recente'}")
+    print(f"[{ts()}] CKAN: {'NÃO' if args.sem_ckan else 'SIM'} | Horário: {'SIM' if args.horario else 'NÃO (use --horario)'}\n")
 
-    todos_dados     = []
-    nao_encontrados = []
-    erros           = []
+    todos_dados      = []
+    todas_cargas     = []
+    todas_usinas     = []
+    toda_contab      = []
+    nao_encontrados  = []
+    erros            = []
 
+    # Coleta metadados de cada agente (para usar nos downloads horários)
+    metas: dict[str, dict] = {}  # agente → meta
+
+    # ── 1. Power BI + CKAN paginado por agente ────────────────────────────────
     for i, agente in enumerate(agentes, 1):
-        print(f"[{i:>3}/{len(agentes)}] {agente}... ", end="", flush=True)
+        print(f"\n[{i:>3}/{len(agentes)}] {'─'*50}")
+        print(f"  Power BI: {agente}... ", end="", flush=True)
         r = buscar_agente(agente, args.mes)
 
-        if r["status"] == "ok":
-            todos_dados.extend(r["historico"])
-            classe = r["meta"].get("classe", "")
-            print(f"✅  {len(r['historico'])} meses | mês={r['mes']} | {classe}")
-        elif r["status"] == "nao_encontrado":
-            nao_encontrados.append({"agente": agente, "motivo": r["motivo"], "timestamp": ts()})
-            print(f"⚠   não encontrado — {r['motivo']}")
-        else:
-            erros.append({"agente": agente, "motivo": r["motivo"], "timestamp": ts()})
-            print(f"❌  erro — {r['motivo']}")
+        if r["status"] != "ok":
+            motivo = r["motivo"]
+            bucket = nao_encontrados if r["status"] == "nao_encontrado" else erros
+            bucket.append({"agente": agente, "motivo": motivo, "timestamp": ts()})
+            print(f"{'⚠' if r['status'] == 'nao_encontrado' else '❌'}  {motivo}")
+            continue
+
+        todos_dados.extend(r["historico"])
+        meta  = r["meta"]
+        metas[agente] = meta
+        razao = meta.get("razao_social") or ""
+        classe = meta.get("classe", "")
+        print(f"✅  {len(r['historico'])} meses | mês={r['mes']} | {classe}")
+
+        if not args.sem_ckan:
+            # Cargas
+            try:
+                cargas = buscar_cargas(razao or None, agente)
+                for c in cargas:
+                    c["agente"] = agente
+                todas_cargas.extend(cargas)
+            except Exception as e:
+                print(f"  ⚠ Cargas: {e}")
+
+            # Usinas (só para quem tem geração)
+            if razao:
+                try:
+                    usinas = buscar_usinas(razao)
+                    for u in usinas:
+                        u["agente"] = agente
+                    todas_usinas.extend(usinas)
+                except Exception as e:
+                    print(f"  ⚠ Usinas: {e}")
+
+            # Contabilização
+            if razao:
+                try:
+                    contab = buscar_contabilizacao(razao)
+                    for c in contab:
+                        c["agente"] = agente
+                    toda_contab.extend(contab)
+                except Exception as e:
+                    print(f"  ⚠ Contabilização: {e}")
 
         if i < len(agentes):
             time.sleep(DELAY_S)
 
-    print(f"\n[{ts()}] Salvando...")
+    # ── 2. Downloads horários (um arquivo por mês, filtra todos os agentes) ───
+    if args.horario and metas:
+        # Descobre todos os meses presentes nos dados
+        meses_unicos = sorted({r["mes"] for r in todos_dados})
+
+        # Prepara filtros de consumo: {sigla: razao_social_norm}
+        filtro_consumo = {
+            ag: remover_acentos((m.get("razao_social") or "").strip().upper())
+            for ag, m in metas.items()
+        }
+
+        # Prepara filtros de geração: {agente: [sigla_usinas]}
+        filtro_geracao: dict[str, list[str]] = {}
+        for u in todas_usinas:
+            ag = u.get("agente", "")
+            su = (u.get("sigla_parcela_usina") or u.get("sigla_ativo") or "").strip().upper()
+            if ag and su:
+                filtro_geracao.setdefault(ag, []).append(su)
+
+        todos_consumo_h  = []
+        toda_geracao_h   = []
+
+        print(f"\n[{ts()}] Downloads horários — {len(meses_unicos)} mês(es)\n")
+        for mes in meses_unicos:
+            print(f"── {mes} ──")
+            try:
+                res_consumo = buscar_consumo_horario(mes, filtro_consumo)
+                for rows in res_consumo.values():
+                    todos_consumo_h.extend(rows)
+            except Exception as e:
+                print(f"  ⚠ Consumo horário {mes}: {e}")
+
+            if filtro_geracao:
+                try:
+                    res_geracao = buscar_geracao_horaria(mes, filtro_geracao)
+                    for rows in res_geracao.values():
+                        toda_geracao_h.extend(rows)
+                except Exception as e:
+                    print(f"  ⚠ Geração horária {mes}: {e}")
+
+        if todos_consumo_h:
+            p = OUTPUT_DIR / "ccee_consumo_horario.csv"
+            salvar_csv(p, todos_consumo_h, CAMPOS_CONSUMO_H, args.modo)
+            print(f"  ccee_consumo_horario.csv  → {len(todos_consumo_h):,} linhas")
+
+        if toda_geracao_h:
+            p = OUTPUT_DIR / "ccee_geracao_horaria.csv"
+            salvar_csv(p, toda_geracao_h, CAMPOS_GERACAO_H, args.modo)
+            print(f"  ccee_geracao_horaria.csv  → {len(toda_geracao_h):,} linhas")
+
+    # ── 3. Salvar CSVs principais ─────────────────────────────────────────────
+    print(f"\n[{ts()}] Salvando CSVs...")
 
     if todos_dados:
         p = OUTPUT_DIR / "ccee_dados.csv"
         salvar_csv(p, todos_dados, CAMPOS_DADOS, args.modo)
-        print(f"  ccee_dados.csv       → {len(todos_dados)} linhas")
+        print(f"  ccee_dados.csv            → {len(todos_dados)} linhas")
+
+    if todas_cargas:
+        campos_c = ["agente","mes_referencia","sigla_parcela_carga","nome_empresarial",
+                    "cidade","estado_uf","ramo_atividade","submercado",
+                    "consumo_acl","consumo_total","capacidade_carga"]
+        p = OUTPUT_DIR / "ccee_cargas.csv"
+        salvar_csv(p, todas_cargas, campos_c, args.modo)
+        print(f"  ccee_cargas.csv           → {len(todas_cargas)} linhas")
+
+    if todas_usinas:
+        campos_u = ["agente","mes_referencia","sigla_ativo","sigla_parcela_usina",
+                    "fonte_energia_primaria","submercado","estado_uf",
+                    "cap_t","geracao_centro_gravidade"]
+        p = OUTPUT_DIR / "ccee_usinas.csv"
+        salvar_csv(p, todas_usinas, campos_u, args.modo)
+        print(f"  ccee_usinas.csv           → {len(todas_usinas)} linhas")
+
+    if toda_contab:
+        campos_k = ["agente","mes_referencia","sigla_perfil_agente","nome_empresarial",
+                    "valor_tm_mcp","compensacao_mre","valor_encargo","valor_ajuste_exposicao",
+                    "resultado_financeiro_er","resultado_final"]
+        p = OUTPUT_DIR / "ccee_contabilizacao.csv"
+        salvar_csv(p, toda_contab, campos_k, args.modo)
+        print(f"  ccee_contabilizacao.csv   → {len(toda_contab)} linhas")
 
     if nao_encontrados:
         p = OUTPUT_DIR / "nao_encontrados.csv"
         salvar_csv(p, nao_encontrados, CAMPOS_NAO_ENCONTRADOS, "a")
-        print(f"  nao_encontrados.csv  → {len(nao_encontrados)} registro(s)")
+        print(f"  nao_encontrados.csv       → {len(nao_encontrados)} registro(s)")
 
     if erros:
         p = OUTPUT_DIR / "erros.csv"

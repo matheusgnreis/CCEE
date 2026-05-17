@@ -91,15 +91,33 @@ REVAL SERRAS APE
 ### 4.1 Busca principal
 
 ```bash
-# Busca todos da lista com o mês mais recente disponível
+# Busca Power BI + cargas + usinas + contabilização (mês mais recente)
 python buscar_dados.py
 
-# Busca mês específico
+# Inclui também consumo horário e geração horária (arquivos ~400MB por mês)
+python buscar_dados.py --horario
+
+# Mês específico
 python buscar_dados.py --mes 2026-03
 
-# Acumular no CSV existente (não sobrescreve)
+# Só Power BI, sem CKAN (mais rápido)
+python buscar_dados.py --sem-ckan
+
+# Acumular nos CSVs existentes sem sobrescrever
 python buscar_dados.py --modo a
 ```
+
+**CSVs gerados:**
+
+| Arquivo | Fonte | Conteúdo |
+|---|---|---|
+| `ccee_dados.csv` | Power BI | Série histórica mensal por agente |
+| `ccee_cargas.csv` | CKAN | Parcelas de carga |
+| `ccee_usinas.csv` | CKAN | Unidades geradoras |
+| `ccee_contabilizacao.csv` | CKAN | Contabilização de montante |
+| `ccee_consumo_horario.csv` | CKAN GZIP | Consumo horário (só com `--horario`) |
+| `ccee_geracao_horaria.csv` | CKAN GZIP | Geração horária (só com `--horario`) |
+| `nao_encontrados.csv` | — | Agentes não encontrados para reprocessar |
 
 **Saída no terminal:**
 ```
