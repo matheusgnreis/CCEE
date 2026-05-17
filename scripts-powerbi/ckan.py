@@ -11,8 +11,6 @@ import gzip
 import io
 import json
 import math
-import os
-import tempfile
 import time
 import unicodedata
 import urllib.parse
@@ -201,55 +199,63 @@ def _listar_recursos_ckan(dataset_slug: str) -> list[dict]:
             recursos.append({"mes": f"{m.group(1)}-{m.group(2)}", "url": r["url"]})
     return sorted(recursos, key=lambda x: x["mes"])
 
-def _download_para_temp(url: str) -> str:
-    """Faz download do arquivo para um arquivo temporário. Retorna o caminho."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=TIMEOUT_DL) as resp:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
-            baixados = 0
-            while chunk := resp.read(131072):  # 128KB por vez
-                tmp.write(chunk)
-                baixados += len(chunk)
-                if baixados % (10 * 1024 * 1024) == 0:  # a cada 10MB
-                    print(f"    {baixados // 1024 // 1024} MB baixados...", flush=True)
-            return tmp.name
+class _PrependStream(io.RawIOBase):
+    """Recoloca bytes já lidos no início do stream (para detecção de magic bytes)."""
+    def __init__(self, prefix: bytes, source):
+        self._head   = io.BytesIO(prefix)
+        self._source = source
+
+    def readinto(self, b):
+        data = self._head.read(len(b))
+        if not data:
+            data = self._source.read(len(b))
+        if not data:
+            return 0
+        b[:len(data)] = data
+        return len(data)
+
+    def readable(self):
+        return True
+
 
 def _stream_csv_gzip(url: str, processar_linha) -> int:
     """
-    Baixa arquivo (GZIP ou plain CSV), detecta formato e chama
-    processar_linha(row: dict) para cada linha.
-    Retorna o total de linhas processadas.
+    Streaming direto HTTP → descompressão GZIP on-the-fly → parse linha a linha.
+    Nenhum arquivo temporário é gravado em disco.
     """
-    print(f"    Baixando: {url}")
-    tmp_path = _download_para_temp(url)
-    total = 0
-    try:
-        # Detecta gzip pelos primeiros bytes
-        with open(tmp_path, "rb") as f:
-            magic = f.read(2)
-        is_gzip = magic == b"\x1f\x8b"
-        print(f"    Formato: {'GZIP' if is_gzip else 'plain CSV'}")
+    print(f"    {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=TIMEOUT_DL) as resp:
+        # Lê 2 bytes para detectar magic GZIP (0x1F 0x8B)
+        peek    = resp.read(2)
+        is_gzip = peek == b"\x1f\x8b"
+        print(f"    Formato: {'GZIP' if is_gzip else 'plain CSV'}", flush=True)
 
-        opener = gzip.open if is_gzip else open
-        with opener(tmp_path, "rt", encoding="utf-8", errors="replace") as f:
-            reader = None
-            sep    = None
-            for raw_line in f:
-                line = raw_line.rstrip("\r\n")
-                if not line:
-                    continue
-                if reader is None:
-                    # Primeira linha → headers
-                    sep = ";" if ";" in line else ","
-                    headers = [h.strip('"').strip() for h in line.split(sep)]
-                    reader  = headers
-                    continue
-                vals = [v.strip('"').strip() for v in line.split(sep)]
-                row  = {headers[i]: (vals[i] if i < len(vals) else "") for i in range(len(headers))}
-                processar_linha(row)
-                total += 1
-    finally:
-        os.unlink(tmp_path)
+        # Reconstrói stream com os 2 bytes de volta
+        raw = io.BufferedReader(_PrependStream(peek, resp), buffer_size=131072)
+
+        f = (io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8", errors="replace")
+             if is_gzip else
+             io.TextIOWrapper(raw, encoding="utf-8", errors="replace"))
+
+        headers = None
+        sep     = None
+        total   = 0
+
+        for raw_line in f:
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
+            if headers is None:
+                sep     = ";" if ";" in line else ","
+                headers = [h.strip('"').strip() for h in line.split(sep)]
+                continue
+            vals = [v.strip('"').strip() for v in line.split(sep)]
+            row  = {headers[i]: (vals[i] if i < len(vals) else "") for i in range(len(headers))}
+            processar_linha(row)
+            total += 1
+            if total % 500_000 == 0:
+                print(f"    {total:,} linhas...", flush=True)
 
     print(f"    {total:,} linhas processadas")
     return total
