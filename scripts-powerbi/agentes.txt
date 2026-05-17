@@ -1,0 +1,7 @@
+# Lista de agentes para busca — um por linha
+# Linhas começando com # são ignoradas
+# Use o nome exato do agente na CCEE (ex: como aparece no Power BI)
+AXIA NORDESTE
+AXIA SUDESTE
+AXIA NORTE
+CEMIG GERA CAMARGOS CONV

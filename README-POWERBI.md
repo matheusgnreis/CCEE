@@ -1,211 +1,251 @@
-# CCEE Monitor — Guia de Replicação em Power BI
+# CCEE Monitor — Power BI via Python
 
-Este guia descreve como replicar o CCEE Monitor (sistema web Node.js + PostgreSQL + React) inteiramente dentro do **Power BI Desktop**, usando arquivos CSV como fonte de dados.
+Guia para buscar dados de agentes CCEE via API, salvar em CSV e visualizar no Power BI Desktop.  
+Não requer banco de dados — tudo fica em arquivos locais.
 
 ---
 
 ## Sumário
 
-1. [Visão geral da conversão](#1-visão-geral-da-conversão)
+1. [Visão geral](#1-visão-geral)
 2. [Pré-requisitos](#2-pré-requisitos)
-3. [Exportar dados do PostgreSQL para CSV](#3-exportar-dados-do-postgresql-para-csv)
-4. [Estrutura dos arquivos CSV](#4-estrutura-dos-arquivos-csv)
-5. [Configurar o modelo no Power BI Desktop](#5-configurar-o-modelo-no-power-bi-desktop)
-6. [Power Query — transformações](#6-power-query--transformações)
-7. [Medidas DAX — cálculos equivalentes](#7-medidas-dax--cálculos-equivalentes)
-8. [Visuais — reproduzindo o dashboard](#8-visuais--reproduzindo-o-dashboard)
-9. [Atualização de dados](#9-atualização-de-dados)
-10. [Limitações conhecidas](#10-limitações-conhecidas)
+3. [Configuração inicial](#3-configuração-inicial)
+4. [Como usar os scripts Python](#4-como-usar-os-scripts-python)
+5. [Estrutura dos arquivos CSV gerados](#5-estrutura-dos-arquivos-csv-gerados)
+6. [Configurar o modelo no Power BI Desktop](#6-configurar-o-modelo-no-power-bi-desktop)
+7. [Power Query — transformações](#7-power-query--transformações)
+8. [Medidas DAX — cálculos equivalentes](#8-medidas-dax--cálculos-equivalentes)
+9. [Visuais — reproduzindo o dashboard](#9-visuais--reproduzindo-o-dashboard)
+10. [Atualização agendada](#10-atualização-agendada)
 
 ---
 
-## 1. Visão geral da conversão
+## 1. Visão geral
 
-| Componente original | Equivalente Power BI |
-|---|---|
-| PostgreSQL (banco relacional) | Arquivos CSV + modelo Power BI |
-| Node.js / Express (API) | Power Query (M) + Python opcional |
-| React + Recharts (frontend) | Relatório Power BI Desktop |
-| Cálculos JS (`calcMcpRsMwh`, etc.) | Medidas DAX |
-| Filtros e drill-down de mês/agente | Segmentações de dados (Slicers) |
-| Cards de métricas | Visual "Cartão" ou "Cartão de múltiplas linhas" |
-| Gráficos históricos (line chart) | Visual "Gráfico de linhas" |
-| Curva horária (area chart) | Visual "Gráfico de área" |
-| Tabela de cargas / usinas | Visual "Tabela" |
+```
+agentes.txt          → lista de agentes desejados
+       ↓
+buscar_dados.py      → chama a API para cada agente
+       ↓
+csv_export/
+├── ccee_dados.csv          ← série histórica mensal
+├── ccee_cargas.csv         ← parcelas de carga
+├── ccee_modulacao.csv      ← resultado de modulação horária
+└── nao_encontrados.csv     ← agentes não encontrados (para reprocessar)
+       ↓
+Power BI Desktop     → importa os CSVs e monta o relatório
+```
+
+**Fluxo de agente não encontrado:**
+```
+nao_encontrados.csv
+       ↓
+reprocessar_nao_encontrados.py   ← tenta novamente
+       ↓
+se encontrado → move para ccee_dados.csv
+se ainda falha → permanece em nao_encontrados.csv
+```
 
 ---
 
 ## 2. Pré-requisitos
 
+- **Python 3.10+** — [download](https://www.python.org/downloads/)
+  - Sem dependências externas — usa apenas bibliotecas padrão
 - **Power BI Desktop** (gratuito) — [download](https://powerbi.microsoft.com/pt-br/desktop/)
-- **Python 3.10+** (opcional, para scripts de exportação e atualização automática)
-  - Bibliotecas: `psycopg2`, `pandas` → `pip install psycopg2-binary pandas`
-- Acesso ao banco PostgreSQL do projeto (string de conexão `DATABASE_URL`)
-- Ou: arquivos CSV já exportados (seção 3)
+- Acesso à API CCEE Monitor (Render ou local)
 
 ---
 
-## 3. Exportar dados do PostgreSQL para CSV
+## 3. Configuração inicial
 
-### Opção A — Script Python (recomendado)
+### 3.1 Clonar / baixar os scripts
 
-Crie um arquivo `exportar_csv.py` na raiz do projeto:
+```bash
+# Se tiver acesso ao repositório:
+git clone https://github.com/matheusgnreis/CCEE.git
+cd CCEE/scripts-powerbi
+
+# Ou apenas baixar a pasta scripts-powerbi/
+```
+
+### 3.2 Configurar a URL da API
+
+Abrir `buscar_dados.py` e alterar a linha:
 
 ```python
-import os
-import pandas as pd
-import psycopg2
-from sqlalchemy import create_engine
-
-DATABASE_URL = os.environ["DATABASE_URL"]
-engine = create_engine(DATABASE_URL.replace("postgres://", "postgresql://"))
-
-TABELAS = [
-    "ccee_agentes",
-    "ccee_dados",
-    "ccee_cargas",
-    "ccee_usinas",
-    "ccee_modulacao",
-    "ccee_modulacao_geracao",
-    "ccee_contabilizacao",
-    "ccee_consumo_horario",   # grande (~136 MB) — omita se não precisar das curvas horárias
-    "ccee_geracao_horaria",   # grande (~112 MB) — idem
-]
-
-os.makedirs("csv_export", exist_ok=True)
-
-for tabela in TABELAS:
-    print(f"Exportando {tabela}...")
-    df = pd.read_sql(f"SELECT * FROM {tabela}", engine)
-    df.to_csv(f"csv_export/{tabela}.csv", index=False, sep=";", decimal=",")
-    print(f"  {len(df)} linhas → csv_export/{tabela}.csv")
-
-print("Concluído.")
+DEFAULT_API = "https://ccee-api.onrender.com"   # ← sua URL aqui
 ```
 
-Execute:
+Ou passar via argumento: `--api http://localhost:3001`
+
+### 3.3 Montar a lista de agentes
+
+Editar `agentes.txt` — um agente por linha, exatamente como aparece na CCEE:
+
+```text
+# Linhas com # são ignoradas
+AXIA NORDESTE
+AXIA SUDESTE
+CEMIG GERA CAMARGOS CONV
+REVAL SERRAS APE
+```
+
+> **Dica:** O nome do agente é case-insensitive na API — ela normaliza automaticamente.
+
+---
+
+## 4. Como usar os scripts Python
+
+### 4.1 Busca principal
+
 ```bash
-set DATABASE_URL=sua_string_de_conexao
-python exportar_csv.py
+# Busca todos da lista com o mês mais recente disponível
+python buscar_dados.py
+
+# Busca mês específico
+python buscar_dados.py --mes 2026-03
+
+# Usando API local
+python buscar_dados.py --api http://localhost:3001
+
+# Acumular no CSV existente (não sobrescreve)
+python buscar_dados.py --modo a
 ```
 
-### Opção B — psql direto
+**Saída no terminal:**
+```
+[2026-05-08 10:00:00] 4 agentes | API: https://ccee-api.onrender.com
+[  1/4] AXIA NORDESTE...     ✅  23 meses | 0 cargas | mês=2026-03
+[  2/4] AXIA SUDESTE...      ✅  23 meses | 0 cargas | mês=2026-03
+[  3/4] NOME ERRADO...       ⚠  não encontrado — HTTP 404
+[  4/4] REVAL SERRAS APE...  ✅  18 meses | 5 cargas | mês=2026-03
 
-```sql
-\COPY ccee_agentes      TO 'csv_export/ccee_agentes.csv'      CSV HEADER DELIMITER ';';
-\COPY ccee_dados        TO 'csv_export/ccee_dados.csv'        CSV HEADER DELIMITER ';';
-\COPY ccee_cargas       TO 'csv_export/ccee_cargas.csv'       CSV HEADER DELIMITER ';';
-\COPY ccee_usinas       TO 'csv_export/ccee_usinas.csv'       CSV HEADER DELIMITER ';';
-\COPY ccee_modulacao    TO 'csv_export/ccee_modulacao.csv'    CSV HEADER DELIMITER ';';
-\COPY ccee_contabilizacao TO 'csv_export/ccee_contabilizacao.csv' CSV HEADER DELIMITER ';';
+Salvando arquivos...
+  ccee_dados.csv     → 64 linhas
+  ccee_cargas.csv    → 10 linhas
+  nao_encontrados.csv → 1 novo registro
+```
+
+### 4.2 Reprocessar não encontrados
+
+Após verificar os nomes corretos em `nao_encontrados.csv`:
+
+```bash
+# Editar nao_encontrados.csv com o nome corrigido, depois:
+python reprocessar_nao_encontrados.py
+```
+
+O script tenta novamente cada agente do arquivo. Os encontrados são movidos para `ccee_dados.csv`; os que permanecem falhando ficam no arquivo.
+
+### 4.3 Atualização em loop (agendada localmente)
+
+```bash
+# Roda agora + repete a cada 24 horas
+python agendar.py
+
+# A cada 6 horas
+python agendar.py --intervalo 6
+
+# Roda uma única vez e sai
+python agendar.py --intervalo 0
 ```
 
 ---
 
-## 4. Estrutura dos arquivos CSV
+## 5. Estrutura dos arquivos CSV gerados
 
-### `ccee_agentes.csv`
+### `ccee_dados.csv` — série histórica mensal
+
 | Coluna | Tipo | Descrição |
 |---|---|---|
-| agente | texto | Identificador único (chave primária) |
-| razao_social | texto | Razão social completa |
-| sigla | texto | Sigla do agente |
-| cnpj | texto | CNPJ formatado |
-| classe | texto | Consumidor Livre, Gerador, Comercializador, etc. |
-| situacao | texto | Aderido, Desligado, etc. |
-| capital_social | número | Capital social em R$ |
-
-### `ccee_dados.csv`
-| Coluna | Tipo | Descrição |
-|---|---|---|
-| agente | texto | FK → ccee_agentes |
-| mes | texto | Formato `YYYY-MM` |
+| agente | texto | Nome do agente |
+| mes | texto | `YYYY-MM` |
 | consumo | número | Consumo em MWm |
 | compra | número | Compra em MWm |
 | mcp | número | Custo MCP total em R$ |
 | resultado | número | Resultado com ajustes em R$ |
 | resultado_mcp | número | Resultado final em R$ |
 | balanco_energetico | número | Balanço energético em MWm |
-| geracao | número | Geração em MWm (nulo para consumidores) |
+| geracao | número | Geração em MWm (vazio para consumidores) |
 | venda | número | Venda em MWm |
 | consumo_geracao | número | Consumo da geração em MWm |
-| mcp_rs_mwh | número | Custo MCP por MWh em R$/MWh (calculado) |
+| mcp_rs_mwh | número | Custo MCP por MWh em R$/MWh |
 | mre_mais | número | MRE+ em MWm |
 | mre_menos | número | MRE- em MWm |
+| razao_social | texto | Razão social |
+| sigla | texto | Sigla |
+| cnpj | texto | CNPJ |
+| classe | texto | Consumidor Livre, Gerador, etc. |
+| situacao | texto | Aderido, Desligado, etc. |
+| capital_social | número | Capital social em R$ |
 
-### `ccee_cargas.csv`
-Parcelas de carga por agente/mês. Colunas principais:
-`agente`, `mes_referencia`, `sigla_parcela_carga`, `cidade`, `estado_uf`, `ramo_atividade`, `submercado`, `consumo_acl`, `consumo_total`
+### `ccee_cargas.csv` — parcelas de carga
 
-### `ccee_modulacao.csv`
-Resultado da modulação horária por submercado:
+`agente`, `mes_referencia`, `sigla_parcela_carga`, `nome_empresarial`, `cidade`, `estado_uf`, `ramo_atividade`, `submercado`, `consumo_acl`, `consumo_total`, `capacidade_carga`
+
+### `ccee_modulacao.csv` — modulação horária
+
 `agente`, `mes_referencia`, `submercado`, `consumo_total_mwh`, `n_horas`, `soma_curva_rs`, `soma_flat_rs`, `custo_modulacao_rs_mwh`
 
-### `ccee_consumo_horario.csv` *(opcional — arquivo grande)*
-`agente`, `mes_referencia`, `periodo` (1–744), `submercado`, `consumo_mwh`
+### `nao_encontrados.csv` — para reprocessar
+
+| Coluna | Descrição |
+|---|---|
+| agente | Nome buscado |
+| motivo | Motivo da falha (HTTP 404, histórico vazio, etc.) |
+| timestamp | Quando ocorreu |
+| ultima_tentativa | Última vez que tentou reprocessar |
 
 ---
 
-## 5. Configurar o modelo no Power BI Desktop
+## 6. Configurar o modelo no Power BI Desktop
 
-### 5.1 Importar os CSVs
+### 6.1 Importar os CSVs
 
-1. Abrir **Power BI Desktop**
-2. **Início → Obter dados → Texto/CSV**
-3. Importar cada arquivo da pasta `csv_export/`
-4. Na janela de pré-visualização, clicar em **Transformar dados** (não "Carregar")
+1. **Início → Obter dados → Texto/CSV**
+2. Selecionar `ccee_dados.csv` → **Transformar dados**
+3. Repetir para `ccee_cargas.csv` e `ccee_modulacao.csv`
 
-### 5.2 Relacionamentos entre tabelas
+### 6.2 Tabela de calendário
 
-No **Editor de Modelo** (ícone de diagrama na barra lateral), criar os relacionamentos:
-
-| De | Para | Tipo |
-|---|---|---|
-| `ccee_dados[agente]` | `ccee_agentes[agente]` | Muitos para um |
-| `ccee_cargas[agente]` | `ccee_agentes[agente]` | Muitos para um |
-| `ccee_cargas[mes_referencia]` | `ccee_dados[mes]` | Muitos para muitos* |
-| `ccee_modulacao[agente]` | `ccee_agentes[agente]` | Muitos para um |
-| `ccee_usinas[agente]` | `ccee_agentes[agente]` | Muitos para um |
-
-> *Para evitar ambiguidade, use uma tabela de calendário como ponte (seção 6.1).
-
-### 5.3 Tabela de calendário (obrigatória)
-
-Criar via DAX em **Modelagem → Nova tabela**:
+Em **Modelagem → Nova tabela**:
 
 ```dax
 Calendario =
 ADDCOLUMNS(
     CALENDAR(DATE(2024,1,1), DATE(2027,12,31)),
-    "Ano",          YEAR([Date]),
-    "Mes",          MONTH([Date]),
-    "MesAno",       FORMAT([Date], "YYYY-MM"),
-    "MesNome",      FORMAT([Date], "MMM/YY"),
-    "Trimestre",    "T" & QUARTER([Date]) & "/" & YEAR([Date]),
-    "Ordem",        YEAR([Date]) * 100 + MONTH([Date])
+    "Ano",      YEAR([Date]),
+    "Mes",      MONTH([Date]),
+    "MesAno",   FORMAT([Date], "YYYY-MM"),
+    "MesNome",  FORMAT([Date], "MMM/YY"),
+    "Ordem",    YEAR([Date]) * 100 + MONTH([Date])
 )
 ```
 
-Relacionar:
-- `Calendario[MesAno]` → `ccee_dados[mes]` (muitos para um)
-- `Calendario[MesAno]` → `ccee_modulacao[mes_referencia]` (muitos para um)
-- `Calendario[MesAno]` → `ccee_cargas[mes_referencia]` (muitos para um)
+### 6.3 Relacionamentos
+
+| De | Para | Cardinalidade |
+|---|---|---|
+| `ccee_dados[agente]` | `ccee_dados[agente]` (auto) | — |
+| `Calendario[MesAno]` | `ccee_dados[mes]` | 1 para muitos |
+| `Calendario[MesAno]` | `ccee_cargas[mes_referencia]` | 1 para muitos |
+| `Calendario[MesAno]` | `ccee_modulacao[mes_referencia]` | 1 para muitos |
 
 ---
 
-## 6. Power Query — transformações
+## 7. Power Query — transformações
 
-No **Editor do Power Query (M)**, aplicar as seguintes transformações após importar os CSVs:
+No **Editor do Power Query**, aplicar após importar:
 
-### 6.1 `ccee_dados` — tipos e coluna de data
+### `ccee_dados`
 
 ```m
 let
-    Fonte = Csv.Document(File.Contents("csv_export\ccee_dados.csv"),
-                [Delimiter=";", Columns=15, Encoding=65001, QuoteStyle=QuoteStyle.None]),
+    Fonte     = Csv.Document(File.Contents("csv_export\ccee_dados.csv"),
+                    [Delimiter=";", Encoding=65001]),
     Cabecalho = Table.PromoteHeaders(Fonte),
-    Tipos = Table.TransformColumnTypes(Cabecalho, {
-        {"agente",             type text},
+    Tipos     = Table.TransformColumnTypes(Cabecalho, {
         {"mes",                type text},
         {"consumo",            type number},
         {"compra",             type number},
@@ -215,55 +255,41 @@ let
         {"balanco_energetico", type number},
         {"geracao",            type number},
         {"venda",              type number},
-        {"consumo_geracao",    type number},
         {"mcp_rs_mwh",         type number},
         {"mre_mais",           type number},
-        {"mre_menos",          type number}
-    }),
-    -- Colunas auxiliares de data
-    ComAno = Table.AddColumn(Tipos, "Ano",  each Number.From(Text.Start([mes], 4))),
-    ComMes = Table.AddColumn(ComAno, "NumMes", each Number.From(Text.End([mes], 2))),
-    -- Horas do mês (para cálculo de MWh)
-    ComHoras = Table.AddColumn(ComMes, "HorasDoMes", each
-        Date.Day(Date.EndOfMonth(#date([Ano], [NumMes], 1))) * 24
-    )
-in
-    ComHoras
-```
-
-### 6.2 `ccee_agentes` — tipos
-
-```m
-let
-    Fonte    = Csv.Document(File.Contents("csv_export\ccee_agentes.csv"),
-                [Delimiter=";", Encoding=65001]),
-    Cabecalho = Table.PromoteHeaders(Fonte),
-    Tipos    = Table.TransformColumnTypes(Cabecalho, {
-        {"agente",        type text},
-        {"razao_social",  type text},
-        {"sigla",         type text},
-        {"cnpj",          type text},
-        {"classe",        type text},
-        {"situacao",      type text},
-        {"capital_social",type number}
+        {"mre_menos",          type number},
+        {"capital_social",     type number}
     })
 in
     Tipos
 ```
 
-### 6.3 `ccee_modulacao` — tipos
+### `ccee_cargas`
+
+```m
+let
+    Fonte     = Csv.Document(File.Contents("csv_export\ccee_cargas.csv"),
+                    [Delimiter=";", Encoding=65001]),
+    Cabecalho = Table.PromoteHeaders(Fonte),
+    Tipos     = Table.TransformColumnTypes(Cabecalho, {
+        {"consumo_acl",    type number},
+        {"consumo_total",  type number},
+        {"capacidade_carga", type number}
+    })
+in
+    Tipos
+```
+
+### `ccee_modulacao`
 
 ```m
 let
     Fonte     = Csv.Document(File.Contents("csv_export\ccee_modulacao.csv"),
-                 [Delimiter=";", Encoding=65001]),
+                    [Delimiter=";", Encoding=65001]),
     Cabecalho = Table.PromoteHeaders(Fonte),
     Tipos     = Table.TransformColumnTypes(Cabecalho, {
-        {"agente",                 type text},
-        {"mes_referencia",         type text},
-        {"submercado",             type text},
         {"consumo_total_mwh",      type number},
-        {"n_horas",                type number},
+        {"n_horas",                Int64.Type},
         {"soma_curva_rs",          type number},
         {"soma_flat_rs",           type number},
         {"custo_modulacao_rs_mwh", type number}
@@ -272,137 +298,65 @@ in
     Tipos
 ```
 
-### 6.4 `ccee_consumo_horario` — pivotamento para curva horária *(opcional)*
-
-```m
-let
-    Fonte     = Csv.Document(File.Contents("csv_export\ccee_consumo_horario.csv"),
-                 [Delimiter=";", Encoding=65001]),
-    Cabecalho = Table.PromoteHeaders(Fonte),
-    Tipos     = Table.TransformColumnTypes(Cabecalho, {
-        {"agente",         type text},
-        {"mes_referencia", type text},
-        {"periodo",        Int64.Type},
-        {"submercado",     type text},
-        {"consumo_mwh",    type number}
-    }),
-    -- Adiciona hora do dia (1–24) e dia do mês
-    ComDia  = Table.AddColumn(Tipos,  "Dia",  each Number.IntegerDivide([periodo]-1, 24) + 1),
-    ComHora = Table.AddColumn(ComDia, "Hora", each Number.Mod([periodo]-1, 24) + 1)
-in
-    ComHora
-```
-
 ---
 
-## 7. Medidas DAX — cálculos equivalentes
+## 8. Medidas DAX — cálculos equivalentes
 
-Criar as medidas abaixo em **Modelagem → Nova medida** (vincular à tabela `ccee_dados`):
-
-### 7.1 Métricas básicas do mês selecionado
+### Métricas básicas
 
 ```dax
-[Consumo MWm] =
-SUM(ccee_dados[consumo])
-
-[Compra MWm] =
-SUM(ccee_dados[compra])
-
-[MCP Total R$] =
-SUM(ccee_dados[mcp])
-
-[Resultado R$] =
-SUM(ccee_dados[resultado])
-
-[Resultado Final R$] =
-SUM(ccee_dados[resultado_mcp])
-
-[Balanço Energético MWm] =
-SUM(ccee_dados[balanco_energetico])
-
-[Geração MWm] =
-SUM(ccee_dados[geracao])
-
-[MRE+ MWm] =
-SUM(ccee_dados[mre_mais])
-
-[MRE- MWm] =
-SUM(ccee_dados[mre_menos])
+[Consumo MWm]           = SUM(ccee_dados[consumo])
+[Compra MWm]            = SUM(ccee_dados[compra])
+[MCP Total R$]          = SUM(ccee_dados[mcp])
+[Resultado R$]          = SUM(ccee_dados[resultado])
+[Resultado Final R$]    = SUM(ccee_dados[resultado_mcp])
+[Balanço MWm]           = SUM(ccee_dados[balanco_energetico])
+[Geração MWm]           = SUM(ccee_dados[geracao])
+[MRE+ MWm]              = SUM(ccee_dados[mre_mais])
+[MRE- MWm]              = SUM(ccee_dados[mre_menos])
 ```
 
-### 7.2 Custo MCP por MWh (equivalente ao `calcMcpRsMwh` do Node.js)
+### Custo MCP por MWh
 
 ```dax
 [Custo MCP R$/MWh] =
-VAR TotalMCP     = SUM(ccee_dados[mcp])
-VAR TotalConsumo = SUM(ccee_dados[consumo])
-VAR TotalBalanco = SUM(ccee_dados[balanco_energetico])
-
--- Horas do mês (via tabela Calendario ou cálculo direto)
-VAR MesAtual = MAX(ccee_dados[mes])
-VAR Ano      = VALUE(LEFT(MesAtual, 4))
-VAR NumMes   = VALUE(RIGHT(MesAtual, 2))
-VAR HorasMes = DAY(EOMONTH(DATE(Ano, NumMes, 1), 0)) * 24
-
-VAR Divisor  =
-    IF(TotalConsumo > 0,
-        TotalConsumo * HorasMes,                         -- usa consumo
-        IF(TotalBalanco <> 0, TotalBalanco * HorasMes, BLANK()) -- fallback balanço
-    )
-
-RETURN
-    IF(NOT ISBLANK(Divisor), DIVIDE(TotalMCP, Divisor))
+VAR mcp      = SUM(ccee_dados[mcp])
+VAR consumo  = SUM(ccee_dados[consumo])
+VAR balanco  = SUM(ccee_dados[balanco_energetico])
+VAR mes      = MAX(ccee_dados[mes])
+VAR ano      = VALUE(LEFT(mes, 4))
+VAR numMes   = VALUE(RIGHT(mes, 2))
+VAR horas    = DAY(EOMONTH(DATE(ano, numMes, 1), 0)) * 24
+VAR divisor  =
+    IF(consumo > 0, consumo * horas,
+        IF(balanco <> 0, balanco * horas, BLANK()))
+RETURN DIVIDE(mcp, divisor)
 ```
 
-### 7.3 Label dinâmico Ganho/Custo MCP
+### Label dinâmico (Ganho / Custo)
 
 ```dax
-[Label Custo MCP] =
+[Label MCP] =
 VAR v = [Custo MCP R$/MWh]
-RETURN
-    IF(ISBLANK(v), "MCP R$/MWh",
-        IF(v >= 0, "Ganho MCP", "Custo MCP"))
+RETURN IF(ISBLANK(v), "MCP R$/MWh", IF(v >= 0, "Ganho MCP", "Custo MCP"))
 ```
 
-### 7.4 Custo de modulação consolidado
+### Modulação
 
 ```dax
 [Custo Modulação R$/MWh] =
-AVERAGEX(
-    ccee_modulacao,
-    ccee_modulacao[custo_modulacao_rs_mwh]
-)
+AVERAGE(ccee_modulacao[custo_modulacao_rs_mwh])
 
 [Ganho Modulação R$] =
 SUMX(ccee_modulacao,
-    ccee_modulacao[soma_curva_rs] - ccee_modulacao[soma_flat_rs]
-)
+    ccee_modulacao[soma_curva_rs] - ccee_modulacao[soma_flat_rs])
 ```
 
-### 7.5 Comparativo MWh (sazonalização)
-
-```dax
-[Consumo MWh] =
-SUMX(
-    ccee_dados,
-    VAR Ano      = VALUE(LEFT(ccee_dados[mes], 4))
-    VAR NumMes   = VALUE(RIGHT(ccee_dados[mes], 2))
-    VAR HorasMes = DAY(EOMONTH(DATE(Ano, NumMes, 1), 0)) * 24
-    RETURN ccee_dados[consumo] * HorasMes
-)
-
-[Contrato Flat MWh] =
-[Consumo MWh]  -- substitua pela medida de contrato quando disponível
-```
-
-### 7.6 Variação mês a mês
+### Variação mês a mês
 
 ```dax
 [MCP Mês Anterior R$] =
-CALCULATE(
-    [MCP Total R$],
-    PREVIOUSMONTH(Calendario[Date])
-)
+CALCULATE([MCP Total R$], PREVIOUSMONTH(Calendario[Date]))
 
 [Variação MCP %] =
 DIVIDE([MCP Total R$] - [MCP Mês Anterior R$], ABS([MCP Mês Anterior R$]))
@@ -410,151 +364,103 @@ DIVIDE([MCP Total R$] - [MCP Mês Anterior R$], ABS([MCP Mês Anterior R$]))
 
 ---
 
-## 8. Visuais — reproduzindo o dashboard
+## 9. Visuais — reproduzindo o dashboard
 
-### 8.1 Layout geral da página
+### Página 1 — Resumo do agente
 
-Criar **3 páginas** no relatório:
+**Segmentações (topo):**
+- `ccee_dados[agente]` — lista suspensa
+- `Calendario[MesAno]` — lista suspensa (ordenar por `Ordem`)
+- `ccee_dados[classe]` — lista
 
-| Página | Equivalente |
-|---|---|
-| **Resumo** | Dashboard principal (`/inteligencia/[agente]`) |
-| **Cargas** | Tabela de parcelas de carga |
-| **Modulação** | Resultado de modulação horária |
-
-### 8.2 Segmentações (Slicers)
-
-Adicionar no topo de cada página:
-
-- **Slicer de agente**: campo `ccee_agentes[agente]` — estilo "Lista suspensa"
-- **Slicer de mês**: campo `Calendario[MesAno]` — estilo "Lista suspensa" ou "Entre" para intervalo
-- **Slicer de classe**: campo `ccee_agentes[classe]` — estilo "Lista"
-
-### 8.3 Cards de métricas (equivalente ao metrics-grid)
-
-Adicionar **Cartão** para cada medida (organizar em grade 3×3):
+**Cards (grade 3×3):**
 
 | Card | Medida | Formato |
 |---|---|---|
 | Consumo | `[Consumo MWm]` | `#,##0.0 "MWm"` |
 | Compra | `[Compra MWm]` | `#,##0.0 "MWm"` |
-| MCP | `[MCP Total R$]` | `R$ #,##0` |
-| Resultado | `[Resultado R$]` | `R$ #,##0` |
-| Resultado Final | `[Resultado Final R$]` | `R$ #,##0` |
-| Balanço | `[Balanço Energético MWm]` | `#,##0.0 "MWm"` |
+| MCP | `[MCP Total R$]` | `"R$" #,##0` |
+| Resultado | `[Resultado R$]` | `"R$" #,##0` |
+| Resultado Final | `[Resultado Final R$]` | `"R$" #,##0` |
+| Balanço | `[Balanço MWm]` | `#,##0.0 "MWm"` |
 | Custo MCP | `[Custo MCP R$/MWh]` | `#,##0.0000 "R$/MWh"` |
 | MRE+ | `[MRE+ MWm]` | `#,##0.0 "MWm"` |
 | MRE- | `[MRE- MWm]` | `#,##0.0 "MWm"` |
 
-> **Formatação condicional nos cards**: em Formatar visual → Cor da fonte → Formatação condicional → usar regra: se valor < 0 → vermelho; se valor > 0 e campo = custo → laranja.
+> Formatação condicional: `[Custo MCP R$/MWh]` negativo → fonte laranja; positivo → fonte verde
 
-### 8.4 Gráfico histórico — linha do tempo (equivalente ao LineChart)
+**Gráficos de linha (histórico):**
 
-**Visual**: Gráfico de linhas
+Criar um gráfico para cada grupo:
 
-| Campo | Configuração |
+| Título | Medidas no eixo Y |
 |---|---|
-| Eixo X | `Calendario[MesAno]` (ordenar por `Calendario[Ordem]`) |
-| Valores | `[Consumo MWm]`, `[Compra MWm]` |
-| Legenda | automática |
+| Consumo e Compra | `[Consumo MWm]` + `[Compra MWm]` |
+| MCP | `[MCP Total R$]` |
+| Custo MCP por MWh | `[Custo MCP R$/MWh]` |
+| Balanço Energético | `[Balanço MWm]` |
+| Resultado | `[Resultado R$]` + `[Resultado Final R$]` |
+| MRE | `[MRE+ MWm]` + `[MRE- MWm]` |
 
-Criar páginas separadas ou abas de visual para cada grupo do original:
+Eixo X: `Calendario[MesNome]` (ordenar por `Calendario[Ordem]`)
 
-- **Consumo e Compra**: `[Consumo MWm]` + `[Compra MWm]`
-- **MCP**: `[MCP Total R$]`
-- **Custo MCP por MWh**: `[Custo MCP R$/MWh]`
-- **Balanço Energético**: `[Balanço Energético MWm]`
-- **Resultado**: `[Resultado R$]` + `[Resultado Final R$]`
+### Página 2 — Cargas
 
-> Dica: use o visual **"Gráfico de linhas e colunas empilhadas"** para combinar R$ e MWm no mesmo gráfico com dois eixos Y.
-
-### 8.5 Curva de carga horária (equivalente ao AreaChart)
-
-**Visual**: Gráfico de área
-
-| Campo | Configuração |
-|---|---|
-| Eixo X | `ccee_consumo_horario[periodo]` (1–744) |
-| Valores | `SUM(ccee_consumo_horario[consumo_mwh])` |
-| Legenda | `ccee_consumo_horario[submercado]` |
-
-Adicionar slicer de `mes_referencia` específico para esse visual.
-
-### 8.6 Tabela de parcelas de carga
-
-**Visual**: Tabela
-
-Colunas:
+**Tabela** com colunas:
 `sigla_parcela_carga`, `nome_empresarial`, `cidade`, `estado_uf`, `submercado`, `ramo_atividade`, `consumo_acl`, `consumo_total`
 
-Adicionar **Total** na linha de rodapé (configuração nativa do visual Tabela).
+Segmentações: `mes_referencia`, `estado_uf`, `submercado`
 
-### 8.7 Tabela de modulação
+### Página 3 — Modulação
 
-**Visual**: Tabela ou Matriz
-
-| Linha | `mes_referencia` |
-| Coluna | `submercado` |
-| Valores | `[custo_modulacao_rs_mwh]` |
+**Matriz:**
+- Linhas: `mes_referencia`
+- Colunas: `submercado`
+- Valores: `[Custo Modulação R$/MWh]`, `[Ganho Modulação R$]`
 
 ---
 
-## 9. Atualização de dados
+## 10. Atualização agendada
 
-### Opção A — Atualização manual (mais simples)
+### Opção A — Script em loop (mais simples)
 
-1. Executar `python exportar_csv.py` para gerar CSVs atualizados
-2. No Power BI Desktop: **Início → Atualizar**
+```bash
+# Deixa rodando em segundo plano, atualiza a cada 24h
+python agendar.py --intervalo 24
+```
 
-### Opção B — Atualização automática com Power BI Service
+### Opção B — Windows Task Scheduler
 
-1. Publicar o relatório no **Power BI Service** (conta Pro ou Premium)
-2. Configurar **Gateway de dados local** apontando para a pasta dos CSVs
-3. Agendar atualização diária no Service
-
-### Opção C — Script Python agendado (Windows Task Scheduler)
-
-Criar `atualizar.bat`:
-
+1. Criar `atualizar.bat` na pasta `scripts-powerbi\`:
 ```bat
 @echo off
-set DATABASE_URL=sua_string_aqui
-python exportar_csv.py
-echo Dados atualizados em %date% %time% >> log_atualizacao.txt
+cd /d %~dp0
+python buscar_dados.py --modo w
+python reprocessar_nao_encontrados.py
+echo Atualizado em %date% %time% >> ..\log_atualizacao.txt
 ```
 
-Agendar no **Agendador de Tarefas do Windows** para rodar diariamente.
+2. Abrir **Agendador de Tarefas** → Criar Tarefa Básica
+3. Gatilho: diário no horário desejado
+4. Ação: executar `atualizar.bat`
+
+### Opção C — Power BI Service (atualização automática do relatório)
+
+1. Publicar o `.pbix` no Power BI Service
+2. Configurar **Gateway de dados local** apontando para a pasta `csv_export\`
+3. Agendar atualização no Service (mínimo 1×/dia no plano gratuito, 8×/dia no Pro)
 
 ---
 
-## 10. Limitações conhecidas
+## Scripts disponíveis
 
-| Recurso original | Limitação no Power BI |
+| Script | Função |
 |---|---|
-| Dashboard em tempo real (polling 5s) | Power BI atualiza no mínimo a cada hora (Service) ou manualmente |
-| Múltiplos agentes simultâneos | Usar slicer — um agente por vez na seleção |
-| Download automático CCEE (Node.js) | Requer script Python externo ou Power Query com credenciais |
-| Modulação calculada automaticamente | Precisa exportar `ccee_modulacao` já calculada do sistema original |
-| Curva horária interativa (hover por hora) | Tooltip básico no Power BI; não tem o detalhamento do React |
-| Links clicáveis entre páginas | Usar botões com ação "Navegação de página" |
+| `buscar_dados.py` | Busca principal — lê `agentes.txt`, salva CSVs |
+| `reprocessar_nao_encontrados.py` | Tenta novamente os não encontrados |
+| `agendar.py` | Loop de atualização automática |
+| `agentes.txt` | Lista de agentes (editar com seus agentes) |
 
 ---
 
-## Arquivos necessários (resumo)
-
-```
-csv_export/
-├── ccee_agentes.csv          (~57 linhas)
-├── ccee_dados.csv            (~1.267 linhas)
-├── ccee_cargas.csv           (~13.933 linhas)
-├── ccee_usinas.csv
-├── ccee_modulacao.csv        (~900 linhas)
-├── ccee_modulacao_geracao.csv
-├── ccee_contabilizacao.csv
-├── ccee_consumo_horario.csv  (opcional — 136 MB)
-└── ccee_geracao_horaria.csv  (opcional — 112 MB)
-```
-
----
-
-*Gerado a partir do projeto [CCEE Monitor](https://github.com/matheusgnreis/CCEE) — maio/2026*
+*Projeto [CCEE Monitor](https://github.com/matheusgnreis/CCEE) — maio/2026*
