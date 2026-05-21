@@ -201,14 +201,14 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
     const sigla = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
     if (siglasAmostra.size < 20) siglasAmostra.add(sigla);
 
-    // Se temos razão social, filtra exclusivamente por NOME_EMPRESARIAL (cobre todos os perfis da empresa)
-    // Caso contrário cai na sigla exata
-    if (nomeEmpresarial) {
-      const nome = stripAccents((row.NOME_EMPRESARIAL || "").trim().toUpperCase());
-      if (nome !== nomeEmpresarial) return;
-    } else {
-      if (sigla !== siglaPerfilAgente) return;
-    }
+    // Tenta NOME_EMPRESARIAL primeiro (cobre todos os perfis da empresa),
+    // com fallback para SIGLA_PERFIL_AGENTE exato — garante match mesmo quando
+    // o nome no CSV diverge levemente do razao_social do banco.
+    const nomeMatch  = nomeEmpresarial
+      ? stripAccents((row.NOME_EMPRESARIAL || "").trim().toUpperCase()) === nomeEmpresarial
+      : false;
+    const siglaMatch = sigla === siglaPerfilAgente;
+    if (!nomeMatch && !siglaMatch) return;
 
     encontrou = true;
 

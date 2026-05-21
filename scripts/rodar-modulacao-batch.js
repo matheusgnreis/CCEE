@@ -16,7 +16,8 @@ require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
 const fetch  = require("node-fetch");
 const zlib   = require("zlib");
 const { Pool } = require("pg");
-const { buscarContabilizacao } = require("../api/ccee-abertos/contabilizacao");
+const { buscarContabilizacao }           = require("../api/ccee-abertos/contabilizacao");
+const { buscarPldHorarioMapa }           = require("../api/ccee-abertos/pld-horario");
 const { listarRecursos: listarConsumo }  = require("../api/ccee-abertos/consumo-horario");
 const { listarRecursos: listarGeracao }  = require("../api/ccee-abertos/geracao-horaria");
 
@@ -355,42 +356,96 @@ async function baixarGeracaoMes(mes, agentes, siglasToAgente, usinasMap, urlCsv)
   return resultado;
 }
 
-// ─── Modulação via API ────────────────────────────────────────────────────────
+// ─── Modulação — cálculo direto (sem passar pela API) ────────────────────────
 
-async function fetchJson(url, opts = {}) {
-  const res  = await fetch(url, opts);
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${JSON.stringify(json)}`);
-  return json;
+// Cache de PLD por mês para não rebaixar o mesmo arquivo várias vezes
+const _pldCache = {};
+async function getPldMapa(mes) {
+  if (!_pldCache[mes]) _pldCache[mes] = await buscarPldHorarioMapa(mes);
+  return _pldCache[mes];
 }
 
-async function dispararEAguardar(agente) {
-  const enc = encodeURIComponent(agente);
-  try {
-    const j = await fetchJson(`${API}/admin/modulacao/${enc}?carga=true&geracao=true`, { method: "POST" });
-    console.log(`  Trigger modulação: ${JSON.stringify(j.status)}`);
-  } catch (e) { console.warn(`  Trigger falhou: ${e.message}`); return; }
+function calcularModulacaoPorSub(consumo, pldMapa, sub) {
+  const registros = consumo.filter(r => r.submercado === sub);
+  if (!registros.length) return null;
 
-  await new Promise(r => setTimeout(r, 3000));
+  let totalConsumo = 0, somaCurva = 0;
+  for (const r of registros) {
+    const mwh = Number(r.consumo_mwh) || 0;
+    const pld = pldMapa[`${r.periodo}|${sub}`];
+    if (pld == null) continue;
+    totalConsumo += mwh;
+    somaCurva    += mwh * pld;
+  }
 
-  let tentativas = 0, jobVisto = false;
-  while (true) {
-    tentativas++;
-    await new Promise(r => setTimeout(r, POLL_MS));
-    let status;
-    try { status = await fetchJson(`${API}/modulacao/status`); }
-    catch { continue; }
+  let somaPld = 0, nHoras = 0;
+  for (const [key, pld] of Object.entries(pldMapa)) {
+    if (key.endsWith(`|${sub}`)) { somaPld += pld; nHoras++; }
+  }
 
-    const info      = status.agentes?.find(a => a.agente === agente);
-    const calculando = info?.carga?.calculando || info?.geracao?.calculando || status.em_andamento?.includes(agente);
-    if (calculando) jobVisto = true;
+  if (!nHoras || !totalConsumo) return null;
 
-    if (info) {
-      const { carga, geracao } = info;
-      console.log(`  [poll #${tentativas}] carga: ${carga.calculados}/${info.total_meses} | geração: ${geracao.calculados}/${info.total_meses}`);
+  const flat  = totalConsumo / nHoras;
+  const custo = (somaCurva - flat * somaPld) / totalConsumo;
+  return {
+    submercado:             sub,
+    consumo_total_mwh:      Number(totalConsumo.toFixed(4)),
+    n_horas:                nHoras,
+    soma_curva_rs:          Number(somaCurva.toFixed(4)),
+    soma_flat_rs:           Number((flat * somaPld).toFixed(4)),
+    custo_modulacao_rs_mwh: Number(custo.toFixed(4)),
+  };
+}
+
+async function salvarModulacaoDB(agente, mes, resultados) {
+  if (!resultados.length) return;
+  await pool.query(`
+    INSERT INTO ccee_modulacao
+      (agente, mes_referencia, submercado, consumo_total_mwh, n_horas,
+       soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh)
+    SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::integer[],
+                         $6::numeric[], $7::numeric[], $8::numeric[])
+    ON CONFLICT (agente, mes_referencia, submercado) DO UPDATE SET
+      consumo_total_mwh      = EXCLUDED.consumo_total_mwh,
+      n_horas                = EXCLUDED.n_horas,
+      soma_curva_rs          = EXCLUDED.soma_curva_rs,
+      soma_flat_rs           = EXCLUDED.soma_flat_rs,
+      custo_modulacao_rs_mwh = EXCLUDED.custo_modulacao_rs_mwh
+  `, [
+    resultados.map(() => agente),
+    resultados.map(() => mes),
+    resultados.map(r => r.submercado),
+    resultados.map(r => r.consumo_total_mwh),
+    resultados.map(r => r.n_horas),
+    resultados.map(r => r.soma_curva_rs),
+    resultados.map(r => r.soma_flat_rs),
+    resultados.map(r => r.custo_modulacao_rs_mwh),
+  ]);
+}
+
+async function calcularModulacaoAgente(agente, meses) {
+  for (const mes of meses) {
+    const rCons = await pool.query(
+      "SELECT periodo, submercado, consumo_mwh FROM ccee_consumo_horario WHERE agente=$1 AND mes_referencia=$2",
+      [agente, mes]
+    );
+    if (!rCons.rows.length) { console.log(`    ${mes}: sem consumo no banco`); continue; }
+
+    let pldMapa;
+    try { pldMapa = await getPldMapa(mes); }
+    catch (e) { console.warn(`    ${mes}: PLD indisponível — ${e.message}`); continue; }
+
+    const subs      = [...new Set(rCons.rows.map(r => r.submercado))];
+    const resultados = subs.map(s => calcularModulacaoPorSub(rCons.rows, pldMapa, s)).filter(Boolean);
+
+    if (resultados.length) {
+      await salvarModulacaoDB(agente, mes, resultados);
+      resultados.forEach(r =>
+        console.log(`    ${mes} ${r.submercado}: ${r.consumo_total_mwh} MWh | custo ${r.custo_modulacao_rs_mwh} R$/MWh`)
+      );
+    } else {
+      console.warn(`    ${mes}: sem resultado (subs sem PLD match?)`);
     }
-    if (jobVisto && !calculando) break;
-    if (!jobVisto && tentativas * POLL_MS / 1000 >= MAX_ESPERA_S) { console.log(`  Assumindo concluído.`); break; }
   }
 }
 
@@ -501,7 +556,29 @@ async function main() {
 
   for (const agente of AGENTES) {
     console.log(`\n▶ ${agente}`);
-    await dispararEAguardar(agente);
+
+    // Meses que têm consumo mas ainda não têm modulação calculada
+    const rPend = await pool.query(`
+      SELECT DISTINCT mes_referencia
+      FROM ccee_consumo_horario ch
+      WHERE ch.agente = $1
+        AND ch.mes_referencia >= $2
+        AND NOT EXISTS (
+          SELECT 1 FROM ccee_modulacao m
+          WHERE m.agente = ch.agente AND m.mes_referencia = ch.mes_referencia
+        )
+      ORDER BY mes_referencia
+    `, [agente, PRIMEIRO_MES]);
+
+    if (rPend.rows.length) {
+      const meses = rPend.rows.map(r => r.mes_referencia);
+      console.log(`  Modulação pendente: ${meses.join(", ")}`);
+      try { await calcularModulacaoAgente(agente, meses); }
+      catch (e) { console.warn(`  Modulação: ${e.message}`); }
+    } else {
+      console.log(`  Modulação: já calculada para todos os meses`);
+    }
+
     try { await processarContabilizacao(agente); }
     catch (e) { console.warn(`  Contabilização: ${e.message}`); }
     console.log(`  ✅ ${agente} concluído`);
