@@ -448,3 +448,104 @@ def buscar_geracao_horaria(
         print(f"    {agente}: {len(rows)} períodos")
 
     return resultados
+
+# ─── PLD horário ──────────────────────────────────────────────────────────────
+
+SEED_PLD_V2 = "2a180a6b-f092-43eb-9f82-a48798b803dc"  # pld_horario 2025 v2
+SEED_PLD_V1 = "7267ead9-6039-4ce1-93f3-3471ae33bd98"  # pld_horario 2025 v1
+
+_PLD_SUB_MAP = {"SUDESTE": "SE", "SUL": "S", "NORDESTE": "NE", "NORTE": "N",
+                "SE": "SE", "S": "S", "NE": "NE", "N": "N"}
+
+@functools.lru_cache(maxsize=None)
+def buscar_pld_mapa(mes: str) -> dict[str, float]:
+    """
+    Retorna {\"periodo|submercado\": pld_rs_mwh} para o mês.
+    Tenta v2 (PLD_HORA), cai para v1 (PLD) se necessário.
+    Cache em memória por mês.
+    """
+    ano           = int(mes[:4])
+    mes_formatado = mes.replace("-", "")
+    filtros       = {"MES_REFERENCIA": mes_formatado}
+
+    def _normalizar(registros: list[dict], campo: str) -> dict[str, float]:
+        mapa: dict[str, float] = {}
+        for r in registros:
+            sub  = _PLD_SUB_MAP.get((r.get("SUBMERCADO") or "").strip().upper(), "")
+            per  = int(r.get("PERIODO_COMERCIALIZACAO") or 0)
+            pld  = float(str(r.get(campo) or "0").replace(",", ".") or 0)
+            if per and sub:
+                mapa[f"{per}|{sub}"] = pld
+        return mapa
+
+    try:
+        ds_v2 = _datasets_por_ano(SEED_PLD_V2)
+        if ano in ds_v2:
+            regs = fetch_todas_paginas(ds_v2[ano], filtros)
+            if regs:
+                print(f"    PLD {mes}: {len(regs)} registros (v2)")
+                return _normalizar(regs, "PLD_HORA")
+    except Exception as e:
+        print(f"    PLD v2 indisponível: {e}")
+
+    ds_v1 = _datasets_por_ano(SEED_PLD_V1)
+    if ano not in ds_v1:
+        raise RuntimeError(f"PLD horário não disponível para o ano {ano}")
+    regs = fetch_todas_paginas(ds_v1[ano], filtros)
+    print(f"    PLD {mes}: {len(regs)} registros (v1)")
+    return _normalizar(regs, "PLD")
+
+# ─── Cálculo de modulação ─────────────────────────────────────────────────────
+
+def calcular_modulacao(
+    consumo_horario: list[dict],
+    pld_mapa: dict[str, float],
+) -> list[dict]:
+    """
+    Calcula custo de modulação por (agente, mes_referencia, submercado).
+    soma_curva = Σ consumo_j × pld_j
+    soma_flat  = (total / n_horas_pld) × Σ pld_j
+    custo      = (soma_curva − soma_flat) / total
+    """
+    from collections import defaultdict
+
+    grupos: dict[tuple, list] = defaultdict(list)
+    for r in consumo_horario:
+        grupos[(r["agente"], r["mes_referencia"], r["submercado"])].append(r)
+
+    pld_por_sub: dict[str, tuple] = {}
+    for key, pld in pld_mapa.items():
+        _, sub = key.split("|", 1)
+        soma, n = pld_por_sub.get(sub, (0.0, 0))
+        pld_por_sub[sub] = (soma + pld, n + 1)
+
+    resultados = []
+    for (agente, mes, sub), registros in grupos.items():
+        soma_pld, n_horas = pld_por_sub.get(sub, (0.0, 0))
+        if not n_horas:
+            continue
+        total_consumo = 0.0
+        soma_curva    = 0.0
+        for r in registros:
+            mwh = float(r.get("consumo_mwh") or 0)
+            pld = pld_mapa.get(f"{r['periodo']}|{sub}")
+            if pld is None:
+                continue
+            total_consumo += mwh
+            soma_curva    += mwh * pld
+        if not total_consumo:
+            continue
+        flat  = total_consumo / n_horas
+        custo = (soma_curva - flat * soma_pld) / total_consumo
+        resultados.append({
+            "agente":                 agente,
+            "mes_referencia":         mes,
+            "submercado":             sub,
+            "consumo_total_mwh":      round(total_consumo, 4),
+            "n_horas":                n_horas,
+            "soma_curva_rs":          round(soma_curva, 4),
+            "soma_flat_rs":           round(flat * soma_pld, 4),
+            "custo_modulacao_rs_mwh": round(custo, 4),
+        })
+
+    return sorted(resultados, key=lambda r: (r["mes_referencia"], r["agente"], r["submercado"]))

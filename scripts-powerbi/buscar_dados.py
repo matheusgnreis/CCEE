@@ -439,6 +439,7 @@ def main():
     from ckan import (
         buscar_cargas, buscar_usinas, buscar_contabilizacao,
         buscar_consumo_horario, buscar_geracao_horaria,
+        buscar_pld_mapa, calcular_modulacao,
         remover_acentos,
     )
 
@@ -553,6 +554,29 @@ def main():
             p = OUTPUT_DIR / "ccee_consumo_horario.csv"
             salvar_csv(p, todos_consumo_h, CAMPOS_CONSUMO_H, args.modo)
             print(f"  ccee_consumo_horario.csv  → {len(todos_consumo_h):,} linhas")
+
+            # Calcula modulação por mês (PLD + consumo)
+            toda_modulacao_h = []
+            print(f"\n[{ts()}] Calculando modulação horária...")
+            for mes in meses_unicos:
+                try:
+                    pld = buscar_pld_mapa(mes)
+                    consumo_mes = [r for r in todos_consumo_h if r["mes_referencia"] == mes]
+                    if consumo_mes and pld:
+                        resultados_mod = calcular_modulacao(consumo_mes, pld)
+                        toda_modulacao_h.extend(resultados_mod)
+                        for r in resultados_mod:
+                            print(f"    {mes} {r['agente']} {r['submercado']}: "
+                                  f"{r['consumo_total_mwh']} MWh | {r['custo_modulacao_rs_mwh']} R$/MWh")
+                except Exception as e:
+                    print(f"    ⚠ Modulação {mes}: {e}")
+
+            if toda_modulacao_h:
+                campos_mod = ["agente", "mes_referencia", "submercado", "consumo_total_mwh",
+                              "n_horas", "soma_curva_rs", "soma_flat_rs", "custo_modulacao_rs_mwh"]
+                p = OUTPUT_DIR / "ccee_modulacao.csv"
+                salvar_csv(p, toda_modulacao_h, campos_mod, args.modo)
+                print(f"  ccee_modulacao.csv        → {len(toda_modulacao_h)} linhas")
 
         if toda_geracao_h:
             p = OUTPUT_DIR / "ccee_geracao_horaria.csv"
