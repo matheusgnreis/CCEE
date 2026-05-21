@@ -70,7 +70,30 @@ cd CCEE/scripts-powerbi
 # Ou apenas baixar a pasta scripts-powerbi/
 ```
 
-### 3.2 Montar a lista de agentes
+### 3.2 Descobrir agentes automaticamente (recomendado)
+
+Em vez de manter `agentes.txt` manualmente, use o script de descoberta:
+
+```bash
+# Descobre todos os agentes da CCEE, filtra Comercializadores e gera agentes.txt
+python descobrir_agentes.py
+
+# Também salva agentes_info.csv com classe, CNPJ, situação de cada um
+python descobrir_agentes.py --salvar-info
+
+# Saída em arquivo diferente
+python descobrir_agentes.py --saida minha_lista.txt
+```
+
+O script:
+1. Consulta a **contabilização CKAN** para listar todos os agentes do mercado
+2. Para cada agente, chama o **Power BI** (só a query de metadados) para obter a classe
+3. **Exclui automaticamente Comercializadores**
+4. Gera `agentes.txt` pronto para uso no `buscar_dados.py`
+
+> Tempo estimado: ~2,5s por agente (rate limit Power BI). Para ~200 agentes ≈ 8 minutos.
+
+### 3.3 Montar a lista de agentes manualmente (alternativa)
 
 Editar `agentes.txt` — um agente por linha, exatamente como aparece na CCEE:
 
@@ -460,12 +483,48 @@ echo Atualizado em %date% %time% >> log_atualizacao.txt
 
 ## Scripts disponíveis
 
+### Python (`scripts-powerbi/`)
+
 | Script | Função |
 |---|---|
+| `descobrir_agentes.py` | Descobre todos os agentes da CCEE via CKAN + Power BI, exclui Comercializadores, gera `agentes.txt` |
 | `buscar_dados.py` | Busca principal — lê `agentes.txt`, salva CSVs |
 | `reprocessar_nao_encontrados.py` | Tenta novamente os não encontrados |
 | `agendar.py` | Loop de atualização automática |
-| `agentes.txt` | Lista de agentes (editar com seus agentes) |
+| `ckan.py` | Módulo interno — cargas, usinas, contabilização, horário |
+| `agentes.txt` | Lista de agentes (gerada por `descobrir_agentes.py` ou manual) |
+
+### Node.js (`scripts/`)
+
+| Script | Função |
+|---|---|
+| `descobrir-agentes.js` | Mesmo que `descobrir_agentes.py` mas via banco + CKAN + Power BI |
+
+```bash
+# Node.js — usa o banco se disponível, complementa com CKAN + Power BI
+node scripts/descobrir-agentes.js
+
+# Só o banco (rápido, sem chamar CKAN nem Power BI)
+node scripts/descobrir-agentes.js --somente-banco
+
+# Salva em arquivo específico
+node scripts/descobrir-agentes.js --saida scripts-powerbi/agentes.txt
+```
+
+### Fluxo completo recomendado
+
+```bash
+# 1. Descobre todos os agentes (uma vez, ou quando entrar agente novo)
+python scripts-powerbi/descobrir_agentes.py --salvar-info
+
+# 2. Busca dados de todos (financeiro + cargas + usinas + contabilização)
+python scripts-powerbi/buscar_dados.py
+
+# 3. Reprocessa qualquer um que falhou
+python scripts-powerbi/reprocessar_nao_encontrados.py
+
+# 4. Abre csv_export/ no Power BI Desktop e atualiza
+```
 
 ---
 
