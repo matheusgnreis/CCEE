@@ -98,7 +98,6 @@ function mesReferencia() {
 // Remove sufixos jurídicos, espaços extras e converte para maiúsculo
 function normalizarAgente(nome) {
   return nome
-    .replace(/\s*(LTDA\.?|S\.?A\.?|ME|EPP|EIRELI)\s*$/i, "")
     .trim()
     .toUpperCase();
 }
