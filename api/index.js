@@ -2981,6 +2981,113 @@ app.post("/admin/cleanup-jobs", async (_req, res) => {
   }
 });
 
+// GET /localidade — agentes com cargas numa cidade ou estado
+// Query: ?cidade=SAO+PAULO  |  ?estado=SP  |  ?q=termo (busca livre em cidade+estado+ramo)
+app.get("/localidade", async (req, res) => {
+  const { cidade, estado, q } = req.query;
+  if (!cidade && !estado && !q)
+    return res.status(400).json({ error: "Informe cidade, estado ou q" });
+
+  try {
+    const conds  = [];
+    const params = [];
+
+    if (estado) {
+      params.push(estado.trim().toUpperCase());
+      conds.push(`c.estado_uf = $${params.length}`);
+    }
+    if (cidade) {
+      params.push(`%${cidade.trim().toUpperCase()}%`);
+      conds.push(`UPPER(c.cidade) LIKE $${params.length}`);
+    }
+    if (q && !cidade && !estado) {
+      const termo = `%${q.trim().toUpperCase()}%`;
+      params.push(termo);
+      conds.push(`(UPPER(c.cidade) LIKE $${params.length} OR UPPER(c.estado_uf) LIKE $${params.length} OR UPPER(c.ramo_atividade) LIKE $${params.length})`);
+    }
+
+    const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+    const { rows } = await pool.query(`
+      SELECT
+        c.agente,
+        a.razao_social,
+        a.sigla,
+        a.classe,
+        c.estado_uf,
+        c.cidade,
+        c.ramo_atividade,
+        c.submercado,
+        COUNT(DISTINCT c.sigla_parcela_carga)::int                                        AS n_parcelas,
+        MAX(c.mes_referencia)                                                              AS ultimo_mes,
+        SUM(c.consumo_total) / NULLIF(COUNT(DISTINCT c.mes_referencia), 0)                AS consumo_medio_mwm,
+        SUM(c.consumo_acl)   / NULLIF(COUNT(DISTINCT c.mes_referencia), 0)                AS consumo_acl_medio_mwm,
+        mod.media_custo_mod
+      FROM ccee_cargas c
+      JOIN ccee_agentes a ON a.agente = c.agente
+      LEFT JOIN (
+        SELECT agente, AVG(custo_modulacao_rs_mwh) AS media_custo_mod
+        FROM ccee_modulacao
+        GROUP BY agente
+      ) mod ON mod.agente = c.agente
+      ${where}
+      GROUP BY c.agente, a.razao_social, a.sigla, a.classe, c.estado_uf, c.cidade, c.ramo_atividade, c.submercado, mod.media_custo_mod
+      ORDER BY c.estado_uf, c.cidade, c.agente
+      LIMIT 500
+    `, params);
+
+    // Agrupa por agente
+    const porAgente = {};
+    for (const r of rows) {
+      if (!porAgente[r.agente]) {
+        porAgente[r.agente] = {
+          agente:            r.agente,
+          razao_social:      r.razao_social,
+          sigla:             r.sigla,
+          classe:            r.classe,
+          localidades:       [],
+          n_parcelas:        0,
+          consumo_medio_mwm: 0,
+          media_custo_mod:   r.media_custo_mod != null ? Number(r.media_custo_mod) : null,
+        };
+      }
+      const a = porAgente[r.agente];
+      a.localidades.push({
+        estado_uf:   r.estado_uf,
+        cidade:      r.cidade,
+        ramo:        r.ramo_atividade,
+        submercado:  r.submercado,
+        n_parcelas:  r.n_parcelas,
+        consumo_mwm: Number(r.consumo_medio_mwm) || 0,
+        ultimo_mes:  r.ultimo_mes,
+      });
+      a.n_parcelas        += r.n_parcelas;
+      a.consumo_medio_mwm += Number(r.consumo_medio_mwm) || 0;
+    }
+
+    res.json(Object.values(porAgente).sort((a, b) => b.consumo_medio_mwm - a.consumo_medio_mwm));
+  } catch (e) {
+    console.error("[localidade]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /localidade/opcoes — listas de estados e cidades disponíveis
+app.get("/localidade/opcoes", async (_req, res) => {
+  try {
+    const [rEstados, rCidades] = await Promise.all([
+      pool.query("SELECT DISTINCT estado_uf FROM ccee_cargas WHERE estado_uf IS NOT NULL ORDER BY estado_uf"),
+      pool.query("SELECT DISTINCT cidade, estado_uf FROM ccee_cargas WHERE cidade IS NOT NULL ORDER BY cidade LIMIT 2000"),
+    ]);
+    res.json({
+      estados: rEstados.rows.map(r => r.estado_uf),
+      cidades: rCidades.rows,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /modulacao/status — visão geral de todos os agentes: carga e geração
 app.get("/modulacao/status", async (_req, res) => {
   try {

@@ -97,6 +97,7 @@ export default function Home() {
           <span className="nav-logo" style={s.logo}>
             ⚡<span className="nav-logo-txt"> Monitoramento Mercado Livre</span>
           </span>
+          <Link href="/localidade" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}>Localidades →</Link>
           <Link href="/modulacao" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}>Modulação →</Link>
         </div>
       </nav>
