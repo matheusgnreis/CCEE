@@ -1,0 +1,617 @@
+// scripts/rodar-tudo.js
+// Pipeline completo:
+//   1. Streama CKAN consumo horário → descobre TODOS os agentes do arquivo
+//   2. Novos (não no banco) → Power BI Q2 (metadata) → insere ccee_agentes
+//   3. Novos → CKAN cargas + usinas + contabilização → salva no banco
+//   4. Todos → salva consumo horário + calcula modulação
+//
+// Uso:
+//   node scripts/rodar-tudo.js
+//   node scripts/rodar-tudo.js --mes 2025-03   (mês específico)
+//   node scripts/rodar-tudo.js --sem-powerbi    (pula onboarding de novos agentes)
+
+require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
+const fetch  = require("node-fetch");
+const zlib   = require("zlib");
+const { Pool } = require("pg");
+const { buscarContabilizacao }          = require("../api/ccee-abertos/contabilizacao");
+const { buscarUsinas }                  = require("../api/ccee-abertos/geracao");
+const { buscarCargas }                  = require("../api/ccee-abertos/cargas");
+const { buscarPldHorarioMapa }          = require("../api/ccee-abertos/pld-horario");
+const { listarRecursos: listarConsumo } = require("../api/ccee-abertos/consumo-horario");
+const { listarRecursos: listarGeracao } = require("../api/ccee-abertos/geracao-horaria");
+
+// ─── Configuração ─────────────────────────────────────────────────────────────
+
+const POWERBI_URL          = "https://wabi-brazil-south-b-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true";
+const POWERBI_RESOURCE_KEY = process.env.POWERBI_RESOURCE_KEY;
+const POWERBI_MODEL_ID     = Number(process.env.POWERBI_MODEL_ID);
+
+const PRIMEIRO_MES   = "2025-01";
+const USER_AGENT     = "Mozilla/5.0 (compatible; CCEEMonitor/1.0)";
+const TIMEOUT_DL     = 600000;
+const CLASSES_SKIP   = new Set(["Comercializador"]);
+const DELAY_MS       = 1500;
+
+const args          = process.argv.slice(2);
+const MES_FIXO      = args[args.indexOf("--mes") + 1] || null;
+const SEM_POWERBI   = args.includes("--sem-powerbi");
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+// ─── Utilitários ──────────────────────────────────────────────────────────────
+
+const SUB_MAP = {
+  SUDESTE: "SE", "SUDESTE/CENTRO-OESTE": "SE", SECO: "SE",
+  SUL: "S", NORDESTE: "NE", NORTE: "N",
+  SE: "SE", S: "S", NE: "NE", N: "N",
+};
+
+function stripAccents(s) {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+async function streamGzip(url, onLinha) {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_DL);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { "User-Agent": USER_AGENT } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    return await new Promise((resolve, reject) => {
+      let headers = null, sep = ";", leftover = "", total = 0;
+
+      const processar = (chunk) => {
+        const text   = leftover + chunk.toString("utf8");
+        const linhas = text.split("\n");
+        leftover = linhas.pop();
+        for (const linha of linhas) {
+          const l = linha.replace(/\r$/, "").trim();
+          if (!l) continue;
+          if (!headers) {
+            sep     = l.includes(";") ? ";" : ",";
+            headers = l.split(sep).map(h => h.replace(/^"|"$/g, "").trim());
+            continue;
+          }
+          total++;
+          const vals = l.split(sep).map(v => v.replace(/^"|"$/g, "").trim());
+          const row  = {};
+          headers.forEach((h, i) => { row[h] = vals[i] ?? null; });
+          onLinha(row);
+        }
+      };
+
+      const body = res.body;
+      body.once("data", first => {
+        const isGzip = first[0] === 0x1F && first[1] === 0x8B;
+        if (isGzip) {
+          const gz = zlib.createGunzip();
+          gz.on("error", reject);
+          gz.on("data", processar);
+          gz.on("end", () => { if (leftover.trim()) processar(leftover + "\n"); console.log(`    ${total.toLocaleString()} linhas lidas`); resolve(); });
+          gz.write(first);
+          body.pipe(gz);
+        } else {
+          processar(first);
+          body.on("data", processar);
+          body.on("end", () => { if (leftover.trim()) processar(leftover + "\n"); console.log(`    ${total.toLocaleString()} linhas lidas`); resolve(); });
+        }
+        body.on("error", reject);
+      });
+    });
+  } finally { clearTimeout(timer); }
+}
+
+// ─── Fase 1: Descobrir agentes no CKAN ───────────────────────────────────────
+
+async function descobrirAgentesNoCKAN(recursos) {
+  // Usa o mês mais recente disponível para descoberta
+  const recurso = MES_FIXO
+    ? recursos.find(r => r.mes === MES_FIXO)
+    : recursos[recursos.length - 1];
+
+  if (!recurso) throw new Error("Nenhum recurso CKAN encontrado para descoberta");
+  console.log(`\n  Descobrindo agentes em ${recurso.mes} → ${recurso.url}`);
+
+  const nomes = new Set();
+  await streamGzip(recurso.url, row => {
+    const nome = (row.NOME_EMPRESARIAL || "").trim();
+    if (nome) nomes.add(nome);
+  });
+
+  console.log(`  ${nomes.size} agentes distintos no arquivo`);
+  return [...nomes];
+}
+
+// ─── Power BI Q2: metadata de um agente ──────────────────────────────────────
+
+async function buscarMetaPowerBI(agente) {
+  const body = {
+    version: "1.0.0",
+    modelId: POWERBI_MODEL_ID,
+    queries: [{
+      Query: { Commands: [{ SemanticQueryDataShapeCommand: {
+        Query: {
+          Version: 2,
+          From: [
+            { Name: "s", Entity: "SEGURANCA_MERCADO",  Type: 0 },
+            { Name: "m", Entity: "MEDIDAS_CALCULADAS", Type: 0 },
+            { Name: "t", Entity: "TabelaBusca",        Type: 0 },
+            { Name: "c", Entity: "CALENDARIO",         Type: 0 },
+          ],
+          Select: [
+            { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "NM_CSSE"        } },
+            { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "NM_RZOA_SOCI"   } },
+            { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "SG_AGEN"        } },
+            { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "CNPJ_Formatado" } },
+            { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "DS_STAT_AGEN"   } },
+          ],
+          Where: [
+            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"  } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
+            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno" } }], Values: [[{ Literal: { Value: "'(mais recente)'" } }]] } } },
+            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor" } }], Values: [[{ Literal: { Value: `'${agente}'`      } }]] } } },
+          ],
+        },
+        Binding: {
+          Primary: { Groupings: [{ Projections: [0, 1, 2, 3, 4] }] },
+          DataReduction: { DataVolume: 3, Primary: { Window: { Count: 10 } } },
+          Version: 1,
+        },
+      }}] },
+    }],
+    cancelQueries: [],
+  };
+
+  const resp = await fetch(POWERBI_URL, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "X-PowerBI-ResourceKey": POWERBI_RESOURCE_KEY },
+    body:    JSON.stringify(body),
+  });
+  const json  = await resp.json();
+  const dsr   = json?.results?.[0]?.result?.data?.dsr?.DS?.[0];
+  const dm    = dsr?.PH?.[0]?.DM0;
+  const dicts = dsr?.ValueDicts || {};
+  if (!dm?.length) return null;
+
+  const C = dm[0].C || [];
+  const d = (key, idx) => {
+    if (typeof idx === "string") return idx;
+    return dicts[key] ? (dicts[key][idx] ?? null) : null;
+  };
+  return {
+    classe:       d("D0", C[0]) || null,
+    razao_social: d("D1", C[1]) || null,
+    sigla:        d("D2", C[2]) || null,
+    cnpj:         d("D3", C[3]) || null,
+    situacao:     d("D4", C[4]) || null,
+  };
+}
+
+// ─── Fase 2: Inserir agente novo no banco ─────────────────────────────────────
+
+async function inserirAgente(agente, meta) {
+  await pool.query(`
+    INSERT INTO ccee_agentes (agente, razao_social, sigla, cnpj, classe, situacao)
+    VALUES ($1,$2,$3,$4,$5,$6)
+    ON CONFLICT (agente) DO UPDATE SET
+      razao_social = COALESCE(EXCLUDED.razao_social, ccee_agentes.razao_social),
+      sigla        = COALESCE(EXCLUDED.sigla,        ccee_agentes.sigla),
+      cnpj         = COALESCE(EXCLUDED.cnpj,         ccee_agentes.cnpj),
+      classe       = COALESCE(EXCLUDED.classe,       ccee_agentes.classe),
+      situacao     = COALESCE(EXCLUDED.situacao,     ccee_agentes.situacao),
+      updated_at   = NOW()
+  `, [agente, meta.razao_social, meta.sigla, meta.cnpj, meta.classe, meta.situacao]);
+}
+
+// ─── Fase 3: CKAN — cargas, usinas, contabilização ───────────────────────────
+
+async function salvarCargas(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 200;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_cargas (
+        agente, sigla_perfil_agente, mes_referencia, cod_perf_agente, nome_empresarial,
+        cod_parcela_carga, sigla_parcela_carga, cnpj_carga, cidade, estado_uf,
+        ramo_atividade, submercado, capacidade_carga, consumo_acl,
+        consumo_cativo_parc_livre, consumo_total
+      )
+      SELECT * FROM UNNEST(
+        $1::text[],$2::text[],$3::char(7)[],$4::text[],$5::text[],
+        $6::text[],$7::text[],$8::text[],$9::text[],$10::char(2)[],
+        $11::text[],$12::text[],$13::numeric[],$14::numeric[],
+        $15::numeric[],$16::numeric[]
+      )
+      ON CONFLICT (agente, sigla_parcela_carga, mes_referencia) DO NOTHING
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.sigla_perfil_agente || null),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.cod_perf_agente || null),
+      lote.map(r => r.nome_empresarial || null),
+      lote.map(r => r.cod_parcela_carga || null),
+      lote.map(r => r.sigla_parcela_carga || null),
+      lote.map(r => r.cnpj_carga || null),
+      lote.map(r => r.cidade || null),
+      lote.map(r => r.estado_uf || null),
+      lote.map(r => r.ramo_atividade || null),
+      lote.map(r => r.submercado || null),
+      lote.map(r => r.capacidade_carga ?? null),
+      lote.map(r => r.consumo_acl ?? null),
+      lote.map(r => r.consumo_cativo_parc_livre ?? null),
+      lote.map(r => r.consumo_total ?? null),
+    ]);
+  }
+  console.log(`    cargas: ${registros.length} registros`);
+}
+
+async function salvarUsinas(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 200;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_usinas (
+        agente, sigla_perfil, mes_referencia, sigla_ativo, cod_parcela_usina,
+        sigla_parcela_usina, tipo_despacho, fonte_energia_primaria, submercado,
+        estado_uf, caracteristica_parcela, participante_mre, participante_regime_cotas,
+        percentual_desconto_usina, cap_t, geracao_centro_gravidade, gf_centro_gravidade
+      )
+      SELECT * FROM UNNEST(
+        $1::text[],$2::text[],$3::char(7)[],$4::text[],$5::text[],
+        $6::text[],$7::text[],$8::text[],$9::text[],
+        $10::char(2)[],$11::text[],$12::text[],$13::text[],
+        $14::numeric[],$15::numeric[],$16::numeric[],$17::numeric[]
+      )
+      ON CONFLICT (sigla_parcela_usina, mes_referencia) DO NOTHING
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.sigla_perfil_agente || null),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.sigla_ativo || null),
+      lote.map(r => r.cod_parcela_usina || null),
+      lote.map(r => r.sigla_parcela_usina || null),
+      lote.map(r => r.tipo_despacho || null),
+      lote.map(r => r.fonte_energia_primaria || null),
+      lote.map(r => r.submercado || null),
+      lote.map(r => r.estado_uf || null),
+      lote.map(r => r.caracteristica_parcela || null),
+      lote.map(r => r.participante_mre || null),
+      lote.map(r => r.participante_regime_cotas || null),
+      lote.map(r => r.percentual_desconto_usina ?? null),
+      lote.map(r => r.cap_t ?? null),
+      lote.map(r => r.geracao_centro_gravidade ?? null),
+      lote.map(r => r.gf_centro_gravidade ?? null),
+    ]);
+  }
+  console.log(`    usinas: ${registros.length} registros`);
+}
+
+async function salvarContabilizacao(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 200;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_contabilizacao (
+        agente, mes_referencia, sigla_perfil_agente, nome_empresarial, cod_perf_agente,
+        valor_tm_mcp, compensacao_mre, valor_encargo, valor_ajuste_exposicao,
+        valor_ajuste_alivio_ret, efeito_contrat_disp, efeito_contrat_cota_gf,
+        efeito_contrat_nuclear, ajuste_recontab, ajuste_mcsd_ex,
+        resultado_financeiro_er, efeito_ccearq, efeito_contrat_itaipu,
+        efeito_repasse_risco_hidro, efeito_desloc_pld_cmo, resultado_final
+      )
+      SELECT * FROM UNNEST(
+        $1::text[],$2::char(7)[],$3::text[],$4::text[],$5::integer[],
+        $6::numeric[],$7::numeric[],$8::numeric[],$9::numeric[],
+        $10::numeric[],$11::numeric[],$12::numeric[],
+        $13::numeric[],$14::numeric[],$15::numeric[],
+        $16::numeric[],$17::numeric[],$18::numeric[],
+        $19::numeric[],$20::numeric[],$21::numeric[]
+      )
+      ON CONFLICT (agente, mes_referencia, sigla_perfil_agente) DO UPDATE SET
+        resultado_final = EXCLUDED.resultado_final
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.sigla_perfil_agente || null),
+      lote.map(r => r.nome_empresarial || null),
+      lote.map(r => r.cod_perf_agente != null ? Number(r.cod_perf_agente) : null),
+      lote.map(r => r.valor_tm_mcp), lote.map(r => r.compensacao_mre),
+      lote.map(r => r.valor_encargo), lote.map(r => r.valor_ajuste_exposicao),
+      lote.map(r => r.valor_ajuste_alivio_ret), lote.map(r => r.efeito_contrat_disp),
+      lote.map(r => r.efeito_contrat_cota_gf), lote.map(r => r.efeito_contrat_nuclear),
+      lote.map(r => r.ajuste_recontab), lote.map(r => r.ajuste_mcsd_ex),
+      lote.map(r => r.resultado_financeiro_er), lote.map(r => r.efeito_ccearq),
+      lote.map(r => r.efeito_contrat_itaipu), lote.map(r => r.efeito_repasse_risco_hidro),
+      lote.map(r => r.efeito_desloc_pld_cmo), lote.map(r => r.resultado_final),
+    ]);
+  }
+  console.log(`    contabilização: ${registros.length} registros`);
+}
+
+async function onboardarAgente(agente, razaoSocial, sigla) {
+  console.log(`\n  ► Onboarding: ${agente}`);
+  try {
+    const [cargas, usinas, contab] = await Promise.allSettled([
+      buscarCargas(sigla, { razaoSocial }),
+      buscarUsinas(razaoSocial || agente),
+      buscarContabilizacao(razaoSocial || agente),
+    ]);
+    if (cargas.status  === "fulfilled") await salvarCargas(agente, cargas.value);
+    if (usinas.status  === "fulfilled") await salvarUsinas(agente, usinas.value);
+    if (contab.status  === "fulfilled") await salvarContabilizacao(agente, contab.value);
+  } catch (e) {
+    console.warn(`    Erro no onboarding CKAN: ${e.message}`);
+  }
+}
+
+// ─── Fase 4: consumo horário + modulação (igual rodar-modulacao-batch) ────────
+
+async function salvarConsumo(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_consumo_horario (agente, mes_referencia, periodo, submercado, consumo_mwh)
+      SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::integer[],$4::text[],$5::numeric[])
+      ON CONFLICT (agente, mes_referencia, periodo, submercado) DO NOTHING
+    `, [
+      lote.map(() => agente), lote.map(r => r.mes_referencia),
+      lote.map(r => r.periodo), lote.map(r => r.submercado), lote.map(r => r.consumo_mwh),
+    ]);
+  }
+}
+
+async function salvarConsumoPerfil(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_consumo_horario_perfil (agente, mes_referencia, sigla_perfil, periodo, submercado, consumo_mwh)
+      SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::text[],$4::integer[],$5::text[],$6::numeric[])
+      ON CONFLICT (agente, mes_referencia, sigla_perfil, periodo, submercado) DO NOTHING
+    `, [
+      lote.map(() => agente), lote.map(r => r.mes_referencia), lote.map(r => r.sigla_perfil),
+      lote.map(r => r.periodo), lote.map(r => r.submercado), lote.map(r => r.consumo_mwh),
+    ]);
+  }
+}
+
+const _pldCache = {};
+async function getPldMapa(mes) {
+  if (!_pldCache[mes]) _pldCache[mes] = await buscarPldHorarioMapa(mes);
+  return _pldCache[mes];
+}
+
+function calcularModulacaoPorSub(consumo, pldMapa, sub) {
+  const registros = consumo.filter(r => r.submercado === sub);
+  if (!registros.length) return null;
+  let totalConsumo = 0, somaCurva = 0;
+  for (const r of registros) {
+    const mwh = Number(r.consumo_mwh) || 0;
+    const pld = pldMapa[`${r.periodo}|${sub}`];
+    if (pld == null) continue;
+    totalConsumo += mwh;
+    somaCurva    += mwh * pld;
+  }
+  let somaPld = 0, nHoras = 0;
+  for (const [key, pld] of Object.entries(pldMapa)) {
+    if (key.endsWith(`|${sub}`)) { somaPld += pld; nHoras++; }
+  }
+  if (!nHoras || !totalConsumo) return null;
+  const flat  = totalConsumo / nHoras;
+  const custo = (somaCurva - flat * somaPld) / totalConsumo;
+  return {
+    submercado: sub, consumo_total_mwh: Number(totalConsumo.toFixed(4)),
+    n_horas: nHoras, soma_curva_rs: Number(somaCurva.toFixed(4)),
+    soma_flat_rs: Number((flat * somaPld).toFixed(4)),
+    custo_modulacao_rs_mwh: Number(custo.toFixed(4)),
+  };
+}
+
+async function calcularModulacao(agente, meses) {
+  for (const mes of meses) {
+    const { rows } = await pool.query(
+      "SELECT periodo, submercado, consumo_mwh FROM ccee_consumo_horario WHERE agente=$1 AND mes_referencia=$2",
+      [agente, mes]
+    );
+    if (!rows.length) continue;
+    let pldMapa;
+    try { pldMapa = await getPldMapa(mes); } catch (e) { console.warn(`    PLD ${mes}: ${e.message}`); continue; }
+    const subs      = [...new Set(rows.map(r => r.submercado))];
+    const resultados = subs.map(s => calcularModulacaoPorSub(rows, pldMapa, s)).filter(Boolean);
+    if (!resultados.length) continue;
+    await pool.query(`
+      INSERT INTO ccee_modulacao
+        (agente, mes_referencia, submercado, consumo_total_mwh, n_horas, soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh)
+      SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::text[],$4::numeric[],$5::integer[],$6::numeric[],$7::numeric[],$8::numeric[])
+      ON CONFLICT (agente, mes_referencia, submercado) DO UPDATE SET
+        consumo_total_mwh=$4[1], n_horas=$5[1], soma_curva_rs=$6[1], soma_flat_rs=$7[1], custo_modulacao_rs_mwh=$8[1]
+    `, [
+      resultados.map(() => agente), resultados.map(() => mes),
+      resultados.map(r => r.submercado), resultados.map(r => r.consumo_total_mwh),
+      resultados.map(r => r.n_horas), resultados.map(r => r.soma_curva_rs),
+      resultados.map(r => r.soma_flat_rs), resultados.map(r => r.custo_modulacao_rs_mwh),
+    ]);
+    resultados.forEach(r => console.log(`    ${mes} ${r.submercado}: ${r.consumo_total_mwh} MWh | ${r.custo_modulacao_rs_mwh} R$/MWh`));
+  }
+}
+
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
+
+async function main() {
+  console.log("\n" + "═".repeat(60));
+  console.log("🚀 PIPELINE COMPLETO — CCEE Monitor");
+  console.log("═".repeat(60));
+
+  // Carrega CKAN resources
+  const [recursosCon, recursosGer] = await Promise.all([listarConsumo(), listarGeracao()]);
+  const mesesDisponiveis = recursosCon.map(r => r.mes).filter(m => m >= PRIMEIRO_MES);
+  const urlConsumo = Object.fromEntries(recursosCon.map(r => [r.mes, r.url]));
+  const urlGeracao = Object.fromEntries(recursosGer.map(r => [r.mes, r.url]));
+
+  // ── Fase 1: Descobrir agentes no CKAN ──────────────────────────────────────
+  console.log("\n[1/4] Descobrindo agentes no CKAN...");
+  const nomesNoCKAN = await descobrirAgentesNoCKAN(recursosCon);
+
+  // Agentes já no banco (por razao_social e por agente)
+  const { rows: agentesBanco } = await pool.query(
+    "SELECT agente, razao_social, sigla, cnpj, classe FROM ccee_agentes"
+  );
+  const porNome  = new Map(agentesBanco.map(r => [
+    stripAccents((r.razao_social || r.agente).trim().toUpperCase()), r
+  ]));
+  const nomeToAgente = new Map(); // NOME_EMPRESARIAL (upper) → { agente, razao_social, sigla }
+
+  // Mapeia nomes do CKAN para agentes do banco
+  for (const nome of nomesNoCKAN) {
+    const key = stripAccents(nome.trim().toUpperCase());
+    if (porNome.has(key)) {
+      nomeToAgente.set(nome, porNome.get(key));
+    }
+  }
+
+  const novosNomes = nomesNoCKAN.filter(n => !nomeToAgente.has(n));
+  console.log(`  ${nomesNoCKAN.length} total | ${nomeToAgente.size} já no banco | ${novosNomes.length} novos`);
+
+  // ── Fase 2: Onboarding de novos agentes ───────────────────────────────────
+  if (novosNomes.length > 0 && !SEM_POWERBI) {
+    console.log(`\n[2/4] Onboarding de ${novosNomes.length} novos agentes via Power BI...`);
+    for (let i = 0; i < novosNomes.length; i++) {
+      const nome = novosNomes[i];
+      process.stdout.write(`  [${String(i + 1).padStart(3)}/${novosNomes.length}] ${nome.slice(0, 50).padEnd(52)} `);
+
+      let meta = null;
+      try { meta = await buscarMetaPowerBI(nome); } catch {}
+
+      if (!meta) { console.log("⚠  não encontrado no Power BI"); continue; }
+      if (CLASSES_SKIP.has(meta.classe)) { console.log(`⏭  ${meta.classe} — pulado`); continue; }
+
+      console.log(`✅  ${meta.classe || "?"}`);
+      await inserirAgente(nome, meta);
+      nomeToAgente.set(nome, { agente: nome, razao_social: meta.razao_social, sigla: meta.sigla, cnpj: meta.cnpj, classe: meta.classe });
+
+      await onboardarAgente(nome, meta.razao_social, meta.sigla);
+      if (i < novosNomes.length - 1) await delay(DELAY_MS);
+    }
+  } else if (novosNomes.length > 0) {
+    console.log(`\n[2/4] ${novosNomes.length} novos ignorados (--sem-powerbi)`);
+  } else {
+    console.log("\n[2/4] Nenhum agente novo — pulando onboarding");
+  }
+
+  // Lista final de agentes a processar (todos que têm match no CKAN)
+  const agentesAtivos = [...new Map(
+    [...nomeToAgente.values()].map(a => [a.agente, a])
+  ).values()].filter(a => !CLASSES_SKIP.has(a.classe));
+
+  const nomeToAgenteKey = new Map(); // NOME_upper → agente_key
+  for (const [nome, meta] of nomeToAgente) {
+    nomeToAgenteKey.set(stripAccents(nome.trim().toUpperCase()), meta.agente);
+  }
+
+  console.log(`\n  ${agentesAtivos.length} agentes para processar`);
+
+  // Meses pendentes (sem modulação calculada)
+  const { rows: modOk } = await pool.query(
+    "SELECT agente, mes_referencia FROM ccee_modulacao WHERE agente = ANY($1) AND mes_referencia >= $2",
+    [agentesAtivos.map(a => a.agente), PRIMEIRO_MES]
+  );
+  const modOkSet = new Set(modOk.map(r => `${r.agente}|${r.mes_referencia}`));
+
+  const mesesParaProcessar = MES_FIXO ? [MES_FIXO]
+    : mesesDisponiveis.filter(mes =>
+        agentesAtivos.some(a => !modOkSet.has(`${a.agente}|${mes}`))
+      );
+
+  if (!mesesParaProcessar.length) {
+    console.log("\n✅ Modulação já calculada para todos. Nada a fazer.");
+    await pool.end();
+    return;
+  }
+
+  // ── Fase 3: Download de consumo por mês ───────────────────────────────────
+  console.log(`\n[3/4] Baixando consumo horário — ${mesesParaProcessar.length} meses`);
+  const consumoPorAgente = {}; // agente → mes → { periodo|sub: registro }
+  agentesAtivos.forEach(a => { consumoPorAgente[a.agente] = {}; });
+
+  for (const mes of mesesParaProcessar) {
+    if (!urlConsumo[mes]) { console.log(`  ⚠ ${mes}: sem URL de consumo`); continue; }
+    console.log(`\n  📥 ${mes}`);
+
+    const agentesDoMes = agentesAtivos.filter(a => !modOkSet.has(`${a.agente}|${mes}`));
+    const agentesSet   = new Set(agentesDoMes.map(a => a.agente));
+
+    const agregado       = {};
+    const agregadoPerfil = {};
+    agentesDoMes.forEach(a => { agregado[a.agente] = {}; agregadoPerfil[a.agente] = {}; });
+
+    await streamGzip(urlConsumo[mes], row => {
+      const nome  = stripAccents((row.NOME_EMPRESARIAL || "").trim().toUpperCase());
+      const aKey  = nomeToAgenteKey.get(nome);
+      if (!aKey || !agentesSet.has(aKey)) return;
+
+      const horaDia = parseInt(row.PERIODO_COMERCIALIZACAO, 10);
+      const dataStr = (row.DATA || "").trim();
+      let diaMes = 1;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dataStr))  diaMes = parseInt(dataStr.slice(8, 10), 10);
+      else if (/^\d{2}\/\d{2}\/\d{4}$/.test(dataStr)) diaMes = parseInt(dataStr.slice(0, 2), 10);
+      const periodo    = (diaMes - 1) * 24 + horaDia + 1;
+      const subBruto   = (row.SUBMERCADO || "").trim().toUpperCase();
+      const submercado = SUB_MAP[subBruto] || subBruto;
+      const consumo    = parseFloat((row.CONSUMO_CARGA_ACL || "0").replace(",", ".")) || 0;
+      const sigla      = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
+      if (!periodo || !submercado) return;
+
+      const key       = `${periodo}|${submercado}`;
+      const keyPerfil = `${sigla}|${periodo}|${submercado}`;
+      if (!agregado[aKey][key]) agregado[aKey][key] = { mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
+      agregado[aKey][key].consumo_mwh += consumo;
+      if (!agregadoPerfil[aKey][keyPerfil]) agregadoPerfil[aKey][keyPerfil] = { mes_referencia: mes, sigla_perfil: sigla, periodo, submercado, consumo_mwh: 0 };
+      agregadoPerfil[aKey][keyPerfil].consumo_mwh += consumo;
+    });
+
+    for (const agente of agentesDoMes.map(a => a.agente)) {
+      const regs      = Object.values(agregado[agente]);
+      const regsPerfil = Object.values(agregadoPerfil[agente]);
+      console.log(`    ${agente}: ${regs.length} períodos`);
+      await salvarConsumo(agente, regs);
+      await salvarConsumoPerfil(agente, regsPerfil);
+    }
+  }
+
+  // ── Fase 4: Modulação ──────────────────────────────────────────────────────
+  console.log(`\n[4/4] Calculando modulação`);
+  for (const { agente } of agentesAtivos) {
+    const { rows: pend } = await pool.query(`
+      SELECT DISTINCT mes_referencia FROM ccee_consumo_horario
+      WHERE agente=$1 AND mes_referencia >= $2
+        AND NOT EXISTS (SELECT 1 FROM ccee_modulacao m WHERE m.agente=$1 AND m.mes_referencia=ccee_consumo_horario.mes_referencia)
+      ORDER BY mes_referencia
+    `, [agente, PRIMEIRO_MES]);
+
+    if (!pend.length) continue;
+    console.log(`\n  ${agente} — ${pend.length} meses pendentes`);
+    await calcularModulacao(agente, pend.map(r => r.mes_referencia));
+  }
+
+  await pool.end();
+  console.log("\n" + "═".repeat(60));
+  console.log("✅ Pipeline concluído.");
+  console.log("═".repeat(60) + "\n");
+}
+
+main().catch(async e => {
+  console.error("Erro fatal:", e.message);
+  await pool.end();
+  process.exit(1);
+});

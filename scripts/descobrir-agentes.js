@@ -61,30 +61,91 @@ async function agentesNoBanco() {
 
 // ─── CKAN: nomes distintos na contabilização ──────────────────────────────────
 
+const zlib = require("zlib");
+
 async function resourceMaisRecente(seed) {
   const resData = await fetch(`${CKAN_BASE}/resource_show?id=${seed}`,
     { headers: { "User-Agent": USER_AGENT } }).then(r => r.json());
+  if (!resData.success) throw new Error(`resource_show falhou: ${JSON.stringify(resData.error)}`);
   const pkgId   = resData.result.package_id;
   const pkgData = await fetch(`${CKAN_BASE}/package_show?id=${pkgId}`,
     { headers: { "User-Agent": USER_AGENT } }).then(r => r.json());
-  let melhorAno = -1, melhorId = seed;
-  for (const res of pkgData.result?.resources || []) {
-    const m = (res.name + " " + (res.description || "")).match(/\b(20\d{2})\b/);
-    if (m && Number(m[1]) > melhorAno) { melhorAno = Number(m[1]); melhorId = res.id; }
+  if (!pkgData.success) throw new Error(`package_show falhou: ${JSON.stringify(pkgData.error)}`);
+
+  const resources = pkgData.result?.resources || [];
+  console.log(`  CKAN: ${resources.length} resources — ${resources.map(r => r.name).join(" | ")}`);
+
+  // Extrai ano/mês do nome (sem \b — underscore é word char)
+  let melhorData = -1, melhorUrl = null;
+  for (const res of resources) {
+    const texto = res.name + " " + (res.description || "");
+    const mYYYYMM = texto.match(/(20\d{2})(\d{2})(?!\d)/);
+    const mYYYY   = texto.match(/(20\d{2})(?!\d)/);
+    const data    = mYYYYMM ? Number(mYYYYMM[1]) * 100 + Number(mYYYYMM[2])
+                  : mYYYY   ? Number(mYYYY[1]) * 100
+                  : -1;
+    if (data > melhorData) { melhorData = data; melhorUrl = res.url; }
   }
-  console.log(`  CKAN: usando resource do ano ${melhorAno}`);
-  return melhorId;
+  if (!melhorUrl) throw new Error("Nenhum resource com ano encontrado no package");
+  const ano = Math.floor(melhorData / 100);
+  console.log(`  CKAN: usando resource ano=${ano} → ${melhorUrl}`);
+  return melhorUrl;
 }
 
 async function nomesNoCkan() {
-  const resourceId = await resourceMaisRecente(SEED_CONTAB);
-  const sql = `SELECT DISTINCT "NOME_EMPRESARIAL" FROM "${resourceId}" WHERE "NOME_EMPRESARIAL" IS NOT NULL ORDER BY "NOME_EMPRESARIAL"`;
-  const url = `${CKAN_BASE}/datastore_search_sql?sql=${encodeURIComponent(sql)}`;
-  const data = await fetch(url, { headers: { "User-Agent": USER_AGENT } }).then(r => r.json());
-  if (!data.success) throw new Error(`CKAN SQL: ${JSON.stringify(data.error)}`);
-  const nomes = data.result.records.map(r => r.NOME_EMPRESARIAL?.trim()).filter(Boolean);
-  console.log(`  CKAN: ${nomes.length} nomes distintos na contabilização`);
-  return nomes;
+  const url  = await resourceMaisRecente(SEED_CONTAB);
+  const nomes = new Set();
+
+  console.log("  Streaming CSV para coletar nomes (pode levar alguns segundos)...");
+  await new Promise((resolve, reject) => {
+    fetch(url, { headers: { "User-Agent": USER_AGENT } })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        let headers = null, sep = ";", leftover = "";
+
+        const processar = (chunk) => {
+          const text   = leftover + chunk.toString("utf8");
+          const linhas = text.split("\n");
+          leftover = linhas.pop();
+          for (const linha of linhas) {
+            const l = linha.replace(/\r$/, "").trim();
+            if (!l) continue;
+            if (!headers) {
+              sep     = l.includes(";") ? ";" : ",";
+              headers = l.split(sep).map(h => h.replace(/^"|"$/g, "").trim());
+              continue;
+            }
+            const vals = l.split(sep);
+            const idx  = headers.indexOf("NOME_EMPRESARIAL");
+            if (idx < 0) continue;
+            const nome = (vals[idx] || "").replace(/^"|"$/g, "").trim();
+            if (nome) nomes.add(nome);
+          }
+        };
+
+        const body = res.body;
+        body.once("data", first => {
+          const isGzip = first[0] === 0x1F && first[1] === 0x8B;
+          if (isGzip) {
+            const gz = zlib.createGunzip();
+            gz.on("error", reject);
+            gz.on("data", processar);
+            gz.on("end", resolve);
+            gz.write(first);
+            body.pipe(gz);
+          } else {
+            processar(first);
+            body.on("data", processar);
+            body.on("end", resolve);
+          }
+          body.on("error", reject);
+        });
+      })
+      .catch(reject);
+  });
+
+  console.log(`  CKAN: ${nomes.size} nomes distintos na contabilização`);
+  return [...nomes];
 }
 
 // ─── Power BI: metadados de um agente ─────────────────────────────────────────

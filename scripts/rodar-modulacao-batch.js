@@ -105,7 +105,7 @@ async function streamGzip(url, onLinha) {
 // ─── Carga de metadados do banco ──────────────────────────────────────────────
 
 async function carregarMeta() {
-  // Carrega todos os agentes do banco (sem lista hardcoded)
+  // Carrega todos os agentes do banco (inclui recém-descobertos sem dados ainda)
   const rTodos = await pool.query("SELECT agente, razao_social FROM ccee_agentes ORDER BY agente");
   AGENTES = rTodos.rows.map(r => r.agente);
   console.log(`[meta] ${AGENTES.length} agentes carregados do banco`);
