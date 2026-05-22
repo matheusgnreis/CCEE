@@ -11,6 +11,7 @@ const { buscarGeracaoHoraria }    = require("./ccee-abertos/geracao-horaria");
 const { buscarUsinas }            = require("./ccee-abertos/geracao");
 const { buscarContabilizacao }    = require("./ccee-abertos/contabilizacao");
 const { buscarMesRecente }        = require("./ccee-abertos/mcp");
+const { buscarDesligamento }      = require("./ccee-abertos/desligamento");
 const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require("./ccee-abertos/consumo-horario");
 const { buscarPldHorario, buscarPldHorarioMapa } = require("./ccee-abertos/pld-horario");
 const { limparJobsTravados }      = require("./cleanup-jobs");
@@ -1439,6 +1440,73 @@ async function salvarContabilizacao(agente, registros) {
   }
   console.log(`Contabilização: ${registros.length} registros salvos para ${agente}`);
 }
+
+// GET /inteligencia/:agente/desligamento — situação de desligamento por descumprimento
+app.get("/inteligencia/:agente/desligamento", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+
+  try {
+    // 1. Tenta retornar do banco (cache local)
+    const rDB = await pool.query(
+      "SELECT * FROM ccee_desligamento WHERE agente = $1", [agente]
+    );
+    if (rDB.rows.length > 0 && !req.query.refresh) {
+      return res.json(rDB.rows[0]);
+    }
+
+    // 2. Busca CNPJ e sigla do agente para filtrar na CCEE
+    const rMeta = await pool.query(
+      "SELECT cnpj, sigla FROM ccee_agentes WHERE agente = $1", [agente]
+    );
+    const { cnpj, sigla } = rMeta.rows[0] || {};
+
+    const dado = await buscarDesligamento(cnpj, sigla || agente);
+
+    if (!dado) {
+      // Agente sem desligamento — remove do banco se havia registro antigo
+      await pool.query("DELETE FROM ccee_desligamento WHERE agente = $1", [agente]);
+      return res.json(null);
+    }
+
+    // 3. Salva/atualiza no banco
+    await pool.query(`
+      INSERT INTO ccee_desligamento
+        (agente, sigla, cnpj, classe, status, data_desligamento, inicio_monitoramento,
+         fim_monitoramento, reuniao_cad, suspensao_fornecimento, tipos_descumprimentos,
+         caucionamento, tipo_desligamento, data_publicacao, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+      ON CONFLICT (agente) DO UPDATE SET
+        sigla                  = EXCLUDED.sigla,
+        cnpj                   = EXCLUDED.cnpj,
+        classe                 = EXCLUDED.classe,
+        status                 = EXCLUDED.status,
+        data_desligamento      = EXCLUDED.data_desligamento,
+        inicio_monitoramento   = EXCLUDED.inicio_monitoramento,
+        fim_monitoramento      = EXCLUDED.fim_monitoramento,
+        reuniao_cad            = EXCLUDED.reuniao_cad,
+        suspensao_fornecimento = EXCLUDED.suspensao_fornecimento,
+        tipos_descumprimentos  = EXCLUDED.tipos_descumprimentos,
+        caucionamento          = EXCLUDED.caucionamento,
+        tipo_desligamento      = EXCLUDED.tipo_desligamento,
+        data_publicacao        = EXCLUDED.data_publicacao,
+        updated_at             = NOW()
+    `, [
+      agente, dado.sigla, dado.cnpj, dado.classe, dado.status,
+      dado.data_desligamento, dado.inicio_monitoramento, dado.fim_monitoramento,
+      dado.reuniao_cad, dado.suspensao_fornecimento, dado.tipos_descumprimentos,
+      dado.caucionamento, dado.tipo_desligamento, dado.data_publicacao,
+    ]);
+
+    return res.json({ agente, ...dado });
+  } catch (e) {
+    console.error("[desligamento] Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 // GET /inteligencia/:agente/contabilizacao?mes=YYYY-MM
 app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {

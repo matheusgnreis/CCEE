@@ -256,6 +256,29 @@ CREATE TABLE ccee_modulacao_perfil (
 CREATE INDEX idx_modp_agente ON ccee_modulacao_perfil (agente);
 CREATE INDEX idx_modp_mes    ON ccee_modulacao_perfil (mes_referencia);
 
+-- ─── Desligamento por descumprimento ─────────────────────────────────────────
+CREATE TABLE ccee_desligamento (
+  id                     SERIAL      PRIMARY KEY,
+  agente                 TEXT        NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  sigla                  TEXT,
+  cnpj                   TEXT,
+  classe                 TEXT,
+  status                 TEXT,
+  data_desligamento      DATE,
+  inicio_monitoramento   DATE,
+  fim_monitoramento      DATE,
+  reuniao_cad            TEXT,
+  suspensao_fornecimento DATE,
+  tipos_descumprimentos  TEXT,
+  caucionamento          TEXT,
+  tipo_desligamento      TEXT,
+  data_publicacao        DATE,
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uniq_deslig_agente UNIQUE (agente)
+);
+
+CREATE INDEX idx_deslig_status ON ccee_desligamento (status);
+
 -- ─── Jobs assíncronos ─────────────────────────────────────────────────────────
 CREATE TABLE ccee_jobs (
   id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

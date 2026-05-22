@@ -451,6 +451,73 @@ def buscar_geracao_horaria(
 
 # ─── PLD horário ──────────────────────────────────────────────────────────────
 
+# ─── Desligamento por descumprimento ─────────────────────────────────────────
+
+PKG_DESLIGAMENTO = "desligamento_descumprimento"
+
+@functools.lru_cache(maxsize=1)
+def _resource_desligamento_mais_recente() -> str:
+    """Retorna o resource_id mais recente do dataset de desligamento."""
+    data = _get(f"{CKAN_PKG}?id={PKG_DESLIGAMENTO}")
+    if not data.get("success"):
+        raise RuntimeError("CKAN: package desligamento_descumprimento não encontrado")
+    recursos = []
+    for r in data["result"].get("resources", []):
+        m = re.search(r"(\d{8})$", r.get("name", ""))
+        recursos.append({"id": r["id"], "data": m.group(1) if m else "0", "name": r["name"]})
+    recursos.sort(key=lambda x: x["data"], reverse=True)
+    if not recursos:
+        raise RuntimeError("Nenhum recurso encontrado no package de desligamento")
+    print(f"    [CKAN] Desligamento: {recursos[0]['name']}")
+    return recursos[0]["id"]
+
+def _parse_date_br(v: str | None) -> str | None:
+    if not v:
+        return None
+    s = v.strip()
+    if len(s) == 10 and s[2] == "/" and s[5] == "/":  # DD/MM/AAAA
+        return f"{s[6:]}-{s[3:5]}-{s[:2]}"
+    return s or None
+
+def buscar_desligamento(cnpj: str | None, sigla: str | None = None) -> dict | None:
+    """
+    Busca dados de desligamento por descumprimento.
+    Filtra por CNPJ (preferencial) ou SIGLA (fallback).
+    Retorna dict normalizado ou None se não encontrado.
+    """
+    resource_id = _resource_desligamento_mais_recente()
+
+    def _normalizar(row: dict) -> dict:
+        return {
+            "sigla":                  (row.get("SIGLA")                  or "").strip() or None,
+            "cnpj":                   (row.get("CNPJ")                   or "").strip() or None,
+            "classe":                 (row.get("CLASSE")                 or "").strip() or None,
+            "status":                 (row.get("STATUS")                 or "").strip() or None,
+            "data_desligamento":      _parse_date_br(row.get("DATA_DESLIGAMENTO")),
+            "inicio_monitoramento":   _parse_date_br(row.get("INICIO_MONITORAMENTO")),
+            "fim_monitoramento":      _parse_date_br(row.get("FIM_MONITORAMENTO")),
+            "reuniao_cad":            (row.get("REUNIAO_CAD")            or "").strip() or None,
+            "suspensao_fornecimento": _parse_date_br(row.get("SUSPENSAO_DE_FORNECIMENTO")),
+            "tipos_descumprimentos":  (row.get("TIPOS_DESCUMPRIMENTOS")  or "").strip() or None,
+            "caucionamento":          (row.get("CAUCIONAMENTO")          or "").strip() or None,
+            "tipo_desligamento":      (row.get("TIPO_DESLIGAMENTO")      or "").strip() or None,
+            "data_publicacao":        _parse_date_br(row.get("DATA_PUBLICACAO")),
+        }
+
+    if cnpj:
+        rows = fetch_todas_paginas(resource_id, {"CNPJ": cnpj.strip()})
+        if rows:
+            return _normalizar(rows[0])
+
+    if sigla:
+        rows = fetch_todas_paginas(resource_id, {"SIGLA": sigla.strip().upper()})
+        if rows:
+            return _normalizar(rows[0])
+
+    return None
+
+# ─── PLD horário ──────────────────────────────────────────────────────────────
+
 SEED_PLD_V2 = "2a180a6b-f092-43eb-9f82-a48798b803dc"  # pld_horario 2025 v2
 SEED_PLD_V1 = "7267ead9-6039-4ce1-93f3-3471ae33bd98"  # pld_horario 2025 v1
 

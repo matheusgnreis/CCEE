@@ -440,6 +440,7 @@ def main():
         buscar_cargas, buscar_usinas, buscar_contabilizacao,
         buscar_consumo_horario, buscar_geracao_horaria,
         buscar_pld_mapa, calcular_modulacao,
+        buscar_desligamento,
         remover_acentos,
     )
 
@@ -447,11 +448,12 @@ def main():
     print(f"[{ts()}] {len(agentes)} agente(s) | mês: {args.mes or 'mais recente'}")
     print(f"[{ts()}] CKAN: {'NÃO' if args.sem_ckan else 'SIM'} | Horário: {'SIM' if args.horario else 'NÃO (use --horario)'}\n")
 
-    todos_dados      = []
-    todas_cargas     = []
-    todas_usinas     = []
-    toda_contab      = []
-    nao_encontrados  = []
+    todos_dados        = []
+    todas_cargas       = []
+    todas_usinas       = []
+    toda_contab        = []
+    todo_desligamento  = []
+    nao_encontrados    = []
     erros            = []
 
     # Coleta metadados de cada agente (para usar nos downloads horários)
@@ -506,6 +508,17 @@ def main():
                     toda_contab.extend(contab)
                 except Exception as e:
                     print(f"  ⚠ Contabilização: {e}")
+
+            # Desligamento por descumprimento
+            cnpj_ag = r.get("cnpj") if r["status"] == "ok" else None
+            sigla_ag = r.get("meta", {}).get("sigla") if r["status"] == "ok" else None
+            try:
+                deslig = buscar_desligamento(cnpj_ag, sigla_ag or agente)
+                if deslig:
+                    todo_desligamento.append({"agente": agente, **deslig})
+                    print(f"  ⚠ Desligamento: {deslig['status']}")
+            except Exception as e:
+                print(f"  ⚠ Desligamento: {e}")
 
         if i < len(agentes):
             time.sleep(DELAY_S)
@@ -614,6 +627,15 @@ def main():
         p = OUTPUT_DIR / "ccee_contabilizacao.csv"
         salvar_csv(p, toda_contab, campos_k, args.modo)
         print(f"  ccee_contabilizacao.csv   → {len(toda_contab)} linhas")
+
+    if todo_desligamento:
+        campos_d = ["agente","sigla","cnpj","classe","status","data_desligamento",
+                    "inicio_monitoramento","fim_monitoramento","reuniao_cad",
+                    "suspensao_fornecimento","tipos_descumprimentos",
+                    "caucionamento","tipo_desligamento","data_publicacao"]
+        p = OUTPUT_DIR / "ccee_desligamento.csv"
+        salvar_csv(p, todo_desligamento, campos_d, args.modo)
+        print(f"  ccee_desligamento.csv     → {len(todo_desligamento)} linhas")
 
     if nao_encontrados:
         p = OUTPUT_DIR / "nao_encontrados.csv"

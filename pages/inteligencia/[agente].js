@@ -116,6 +116,8 @@ export default function AgenteDashboard() {
   const [contabilizacao,   setContabilizacao]   = useState([]);
   const [loadingContab,    setLoadingContab]    = useState(false);
 
+  const [desligamento,     setDesligamento]     = useState(null);
+
   const [curvaCarga,        setCurvaCarga]        = useState([]);
   const [loadingCurva,      setLoadingCurva]      = useState(false);
   const [curvaCargaPerfil,  setCurvaCargaPerfil]  = useState([]);
@@ -148,9 +150,16 @@ export default function AgenteDashboard() {
     setMesSelecionado(null);
     setFiltroEstados([]);
     setTodosEstados([]);
+    setDesligamento(null);
     fetchedMesRef.current = null;
 
     const encoded = encodeURIComponent(agente);
+
+    // Busca desligamento em paralelo (não bloqueia o carregamento principal)
+    fetch(`${API_URL}/inteligencia/${encoded}/desligamento`)
+      .then(r => r.json())
+      .then(d => { if (d && !d.error) setDesligamento(d); })
+      .catch(() => {});
 
     fetch(`${API_URL}/inteligencia/${encoded}/historico`)
       .then(r => r.json())
@@ -433,6 +442,46 @@ export default function AgenteDashboard() {
               </div>
             )}
           </div>
+
+          {/* ── Banner de desligamento por descumprimento ───────────────── */}
+          {desligamento && (
+            <div style={{
+              margin: "12px 0 0",
+              padding: "12px 16px",
+              borderRadius: 8,
+              background: desligamento.status === "Desligado" ? "#fef2f2"
+                        : desligamento.status === "Em andamento" ? "#fffbeb"
+                        : "#f0f9ff",
+              border: `1px solid ${
+                desligamento.status === "Desligado"   ? "#fca5a5"
+                : desligamento.status === "Em andamento" ? "#fcd34d"
+                : "#93c5fd"}`,
+            }}>
+              <p style={{ margin: 0, fontWeight: 700, fontSize: 13,
+                color: desligamento.status === "Desligado"     ? "#dc2626"
+                     : desligamento.status === "Em andamento"  ? "#d97706"
+                     : "#2563eb" }}>
+                ⚠ Desligamento por Descumprimento — {desligamento.status}
+              </p>
+              <div style={{ marginTop: 6, fontSize: 12, color: "#64748b", display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
+                {desligamento.tipos_descumprimentos && (
+                  <span><b>Tipo:</b> {desligamento.tipos_descumprimentos}</span>
+                )}
+                {desligamento.data_desligamento && (
+                  <span><b>Data desligamento:</b> {desligamento.data_desligamento}</span>
+                )}
+                {desligamento.inicio_monitoramento && (
+                  <span><b>Monitoramento:</b> {desligamento.inicio_monitoramento}{desligamento.fim_monitoramento ? ` → ${desligamento.fim_monitoramento}` : ""}</span>
+                )}
+                {desligamento.caucionamento && (
+                  <span><b>Caucionamento:</b> {desligamento.caucionamento}</span>
+                )}
+                {desligamento.data_publicacao && (
+                  <span style={{ marginLeft: "auto", color: "#94a3b8" }}>Publicado: {desligamento.data_publicacao}</span>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Seletor de mês */}
           {historico.length > 0 && (
