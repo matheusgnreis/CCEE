@@ -460,6 +460,46 @@ export default function AgenteDashboard() {
           )}
         </div>
 
+        {/* ── Desligamento por descumprimento ──────────────── */}
+        {desligamento && (
+          <div style={{
+            margin: "8px 0 0",
+            padding: "12px 16px",
+            borderRadius: 8,
+            background: desligamento.status === "Desligado"    ? "#fef2f2"
+                      : desligamento.status === "Em andamento" ? "#fffbeb"
+                      : "#f0f9ff",
+            border: `1px solid ${
+              desligamento.status === "Desligado"    ? "#fca5a5"
+              : desligamento.status === "Em andamento" ? "#fcd34d"
+              : "#93c5fd"}`,
+          }}>
+            <p style={{ margin: 0, fontWeight: 700, fontSize: 13,
+              color: desligamento.status === "Desligado"    ? "#dc2626"
+                   : desligamento.status === "Em andamento" ? "#d97706"
+                   : "#2563eb" }}>
+              ⚠ Desligamento por Descumprimento — {desligamento.status}
+            </p>
+            <div style={{ marginTop: 6, fontSize: 12, color: "#64748b", display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
+              {desligamento.tipos_descumprimentos && (
+                <span><b>Tipo:</b> {desligamento.tipos_descumprimentos}</span>
+              )}
+              {desligamento.data_desligamento && (
+                <span><b>Data desligamento:</b> {String(desligamento.data_desligamento).split("T")[0]}</span>
+              )}
+              {desligamento.inicio_monitoramento && (
+                <span><b>Monitoramento:</b> {String(desligamento.inicio_monitoramento).split("T")[0]}{desligamento.fim_monitoramento ? ` → ${String(desligamento.fim_monitoramento).split("T")[0]}` : ""}</span>
+              )}
+              {desligamento.caucionamento && (
+                <span><b>Caucionamento:</b> {desligamento.caucionamento}</span>
+              )}
+              {desligamento.data_publicacao && (
+                <span style={{ marginLeft: "auto", color: "#94a3b8" }}>Publicado: {String(desligamento.data_publicacao).split("T")[0]}</span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* ── Erro ────────────────────────────────────────────── */}
         {error && <div style={s.errorBox}>⚠ {error}</div>}
 
@@ -522,46 +562,6 @@ export default function AgenteDashboard() {
                 );
               })}
             </div>
-
-            {/* ── Desligamento por descumprimento ──────────────── */}
-            {desligamento && (
-              <div style={{
-                margin: "8px 0 16px",
-                padding: "12px 16px",
-                borderRadius: 8,
-                background: desligamento.status === "Desligado"    ? "#fef2f2"
-                          : desligamento.status === "Em andamento" ? "#fffbeb"
-                          : "#f0f9ff",
-                border: `1px solid ${
-                  desligamento.status === "Desligado"    ? "#fca5a5"
-                  : desligamento.status === "Em andamento" ? "#fcd34d"
-                  : "#93c5fd"}`,
-              }}>
-                <p style={{ margin: 0, fontWeight: 700, fontSize: 13,
-                  color: desligamento.status === "Desligado"    ? "#dc2626"
-                       : desligamento.status === "Em andamento" ? "#d97706"
-                       : "#2563eb" }}>
-                  ⚠ Desligamento por Descumprimento — {desligamento.status}
-                </p>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#64748b", display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
-                  {desligamento.tipos_descumprimentos && (
-                    <span><b>Tipo:</b> {desligamento.tipos_descumprimentos}</span>
-                  )}
-                  {desligamento.data_desligamento && (
-                    <span><b>Data desligamento:</b> {desligamento.data_desligamento}</span>
-                  )}
-                  {desligamento.inicio_monitoramento && (
-                    <span><b>Monitoramento:</b> {desligamento.inicio_monitoramento}{desligamento.fim_monitoramento ? ` → ${desligamento.fim_monitoramento}` : ""}</span>
-                  )}
-                  {desligamento.caucionamento && (
-                    <span><b>Caucionamento:</b> {desligamento.caucionamento}</span>
-                  )}
-                  {desligamento.data_publicacao && (
-                    <span style={{ marginLeft: "auto", color: "#94a3b8" }}>Publicado: {desligamento.data_publicacao}</span>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* ── Gráficos históricos ───────────────────────────── */}
             {historico.length > 0 && GRAFICOS.map(g => {

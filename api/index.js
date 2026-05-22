@@ -1452,7 +1452,14 @@ app.get("/inteligencia/:agente/desligamento", async (req, res) => {
   try {
     // 1. Tenta retornar do banco (cache local)
     const rDB = await pool.query(
-      "SELECT * FROM ccee_desligamento WHERE agente = $1", [agente]
+      `SELECT agente, sigla, cnpj, classe, status,
+              data_desligamento::TEXT,      inicio_monitoramento::TEXT,
+              fim_monitoramento::TEXT,      reuniao_cad,
+              suspensao_fornecimento::TEXT, tipos_descumprimentos,
+              caucionamento,                tipo_desligamento,
+              data_publicacao::TEXT,        updated_at
+         FROM ccee_desligamento WHERE agente = $1`,
+      [agente]
     );
     if (rDB.rows.length > 0 && !req.query.refresh) {
       return res.json(rDB.rows[0]);
