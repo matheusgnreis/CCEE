@@ -173,7 +173,7 @@ function queryMetadados(agente) {
             { Measure: { Expression: { SourceRef: { Source: "m" } }, Property: "Capital Social" } },
           ],
           Where: [
-            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
+            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"        } }], Values: [[{ Literal: { Value: "'Razão Social'"   } }]] } } },
             { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno"} }], Values: [[{ Literal: { Value: "'(mais recente)'" } }]] } } },
             { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor"       } }], Values: [[{ Literal: { Value: `'${agente}'`      } }]] } } },
           ],
@@ -248,8 +248,10 @@ async function main() {
         if (!meta) {
           console.log("⚠  não encontrado");
         } else {
-          todos.push({ agente: nome, ...meta });
-          console.log(`✅  ${meta.classe || "?"}`);
+          // Usa SG_AGEN (sigla) como chave do agente — igual à API
+          const agenteKey = meta.sigla || nome;
+          todos.push({ agente: agenteKey, ...meta, razao_social: meta.razao_social || nome });
+          console.log(`✅  ${meta.classe || "?"} | agente: ${agenteKey}`);
         }
         if (i < novos.length - 1) await delay(DELAY_MS);
       }

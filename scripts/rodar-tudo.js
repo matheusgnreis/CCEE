@@ -36,6 +36,12 @@ const DELAY_MS       = 1500;
 const args          = process.argv.slice(2);
 const MES_FIXO      = args[args.indexOf("--mes") + 1] || null;
 const SEM_POWERBI   = args.includes("--sem-powerbi");
+const TODOS_MESES   = args.includes("--todos-meses"); // streama todos os meses p/ descoberta
+
+// Limite de tamanho do banco (MB). Lê de DB_MAX_MB no .env, padrão 4500 MB (~4,4 GB)
+// Seta para o tamanho INCLUÍDO no plano (sem o espaço extra).
+const DB_MAX_MB     = Number(process.env.DB_MAX_MB || 4500);
+const DB_ALERTA_PCT = 0.92; // para de inserir ao atingir 92% do limite
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -43,6 +49,32 @@ const pool = new Pool({
 });
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
+
+// ─── Limitador de espaço ──────────────────────────────────────────────────────
+
+let _espacoOk = true; // flag global — false = banco cheio, para inserções pesadas
+
+async function checarEspaco(label = "") {
+  try {
+    const { rows } = await pool.query(
+      "SELECT pg_database_size(current_database()) AS bytes, pg_size_pretty(pg_database_size(current_database())) AS legivel"
+    );
+    const bytes   = Number(rows[0].bytes);
+    const legivel = rows[0].legivel;
+    const usadoMB = bytes / (1024 * 1024);
+    const limiteMB = DB_MAX_MB;
+    const pct      = usadoMB / limiteMB;
+
+    const status = pct >= DB_ALERTA_PCT ? "🔴 CHEIO" : pct >= 0.80 ? "🟡 atencao" : "🟢 ok";
+    console.log(`  💾 Banco: ${legivel} / ${limiteMB.toLocaleString("pt-BR")} MB (${(pct * 100).toFixed(1)}%) ${status}${label ? ` [${label}]` : ""}`);
+
+    _espacoOk = pct < DB_ALERTA_PCT;
+    return _espacoOk;
+  } catch (e) {
+    console.warn(`  checarEspaco: ${e.message}`);
+    return true; // em caso de erro na consulta, não bloqueia
+  }
+}
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 
@@ -110,21 +142,35 @@ async function streamGzip(url, onLinha) {
 // ─── Fase 1: Descobrir agentes no CKAN ───────────────────────────────────────
 
 async function descobrirAgentesNoCKAN(recursos) {
-  // Usa o mês mais recente disponível para descoberta
-  const recurso = MES_FIXO
-    ? recursos.find(r => r.mes === MES_FIXO)
-    : recursos[recursos.length - 1];
+  const disponíveis = recursos.filter(r => r.mes >= PRIMEIRO_MES);
+  if (!disponíveis.length) throw new Error("Nenhum recurso CKAN disponível");
 
-  if (!recurso) throw new Error("Nenhum recurso CKAN encontrado para descoberta");
-  console.log(`\n  Descobrindo agentes em ${recurso.mes} → ${recurso.url}`);
+  // Quais meses streama para descoberta:
+  //   --todos-meses  → todos disponíveis (mais completo, mais lento)
+  //   --mes YYYY-MM  → só esse mês
+  //   default        → mais recente apenas
+  let paraBuscar;
+  if (MES_FIXO) {
+    const r = disponíveis.find(r => r.mes === MES_FIXO);
+    paraBuscar = r ? [r] : [];
+  } else if (TODOS_MESES) {
+    paraBuscar = disponíveis;
+  } else {
+    paraBuscar = [disponíveis[disponíveis.length - 1]];
+  }
+
+  if (!paraBuscar.length) throw new Error("Nenhum recurso CKAN para descoberta");
 
   const nomes = new Set();
-  await streamGzip(recurso.url, row => {
-    const nome = (row.NOME_EMPRESARIAL || "").trim();
-    if (nome) nomes.add(nome);
-  });
+  for (const recurso of paraBuscar) {
+    console.log(`\n  Descobrindo agentes em ${recurso.mes}...`);
+    await streamGzip(recurso.url, row => {
+      const nome = (row.NOME_EMPRESARIAL || "").trim();
+      if (nome) nomes.add(nome);
+    });
+  }
 
-  console.log(`  ${nomes.size} agentes distintos no arquivo`);
+  console.log(`  ${nomes.size} agentes distintos nos ${paraBuscar.length} meses verificados`);
   return [...nomes];
 }
 
@@ -152,7 +198,7 @@ async function buscarMetaPowerBI(agente) {
             { Column: { Expression: { SourceRef: { Source: "s" } }, Property: "DS_STAT_AGEN"   } },
           ],
           Where: [
-            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"  } }], Values: [[{ Literal: { Value: "'Agente'"         } }]] } } },
+            { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Tipo"  } }], Values: [[{ Literal: { Value: "'Razão Social'"   } }]] } } },
             { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "c" } }, Property: "FiltroMesAno" } }], Values: [[{ Literal: { Value: "'(mais recente)'" } }]] } } },
             { Condition: { In: { Expressions: [{ Column: { Expression: { SourceRef: { Source: "t" } }, Property: "Valor" } }], Values: [[{ Literal: { Value: `'${agente}'`      } }]] } } },
           ],
@@ -496,11 +542,13 @@ async function main() {
       if (!meta) { console.log("⚠  não encontrado no Power BI"); continue; }
       if (CLASSES_SKIP.has(meta.classe)) { console.log(`⏭  ${meta.classe} — pulado`); continue; }
 
-      console.log(`✅  ${meta.classe || "?"}`);
-      await inserirAgente(nome, meta);
-      nomeToAgente.set(nome, { agente: nome, razao_social: meta.razao_social, sigla: meta.sigla, cnpj: meta.cnpj, classe: meta.classe });
+      // Usa SG_AGEN (sigla) como chave do agente — igual ao que a API usa
+      const agenteKey = meta.sigla || nome;
+      console.log(`✅  ${meta.classe || "?"} | agente: ${agenteKey}`);
+      await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || nome });
+      nomeToAgente.set(nome, { agente: agenteKey, razao_social: meta.razao_social || nome, sigla: meta.sigla, cnpj: meta.cnpj, classe: meta.classe });
 
-      await onboardarAgente(nome, meta.razao_social, meta.sigla);
+      await onboardarAgente(agenteKey, meta.razao_social || nome, meta.sigla);
       if (i < novosNomes.length - 1) await delay(DELAY_MS);
     }
   } else if (novosNomes.length > 0) {
@@ -546,6 +594,14 @@ async function main() {
 
   for (const mes of mesesParaProcessar) {
     if (!urlConsumo[mes]) { console.log(`  ⚠ ${mes}: sem URL de consumo`); continue; }
+
+    const espacoOk = await checarEspaco(mes);
+    if (!espacoOk) {
+      console.log(`\n  🔴 Banco atingiu ${(DB_ALERTA_PCT * 100).toFixed(0)}% de ${DB_MAX_MB} MB — inserções interrompidas.`);
+      console.log(`  Ajuste DB_MAX_MB no .env ou libere espaço antes de continuar.`);
+      break;
+    }
+
     console.log(`\n  📥 ${mes}`);
 
     const agentesDoMes = agentesAtivos.filter(a => !modOkSet.has(`${a.agente}|${mes}`));

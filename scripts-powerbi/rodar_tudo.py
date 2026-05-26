@@ -147,7 +147,7 @@ def descobrir_agentes_no_ckan(mes_fixo: str | None) -> tuple[list[str], str]:
         if not recurso:
             raise RuntimeError(f"Mês {mes_fixo} não disponível no CKAN")
     else:
-        recurso = recursos_validos[-1]  # mais recente
+        recurso = recursos_validos[-1]  # mais recente — suficiente pois o fix do Tipo corrige a busca
 
     print(f"  Descobrindo agentes em {recurso['mes']}...")
     nomes: set[str] = set()
@@ -163,12 +163,48 @@ def descobrir_agentes_no_ckan(mes_fixo: str | None) -> tuple[list[str], str]:
 
 # ─── Fase 2: Onboarding via Power BI ──────────────────────────────────────────
 
-def buscar_meta_powerbi(agente: str) -> dict | None:
-    """Chama Power BI Q2 (metadados) e retorna dict ou None."""
+def _q_metadados_razao_social(razao_social: str) -> dict:
+    """Q2 buscando por Razão Social (NOME_EMPRESARIAL do CKAN) em vez de NM_CSSE."""
+    return {
+        "Query": {"Commands": [{"SemanticQueryDataShapeCommand": {
+            "Query": {
+                "Version": 2,
+                "From": [
+                    {"Name": "s", "Entity": "SEGURANCA_MERCADO",  "Type": 0},
+                    {"Name": "m", "Entity": "MEDIDAS_CALCULADAS", "Type": 0},
+                    {"Name": "t", "Entity": "TabelaBusca",        "Type": 0},
+                    {"Name": "c", "Entity": "CALENDARIO",         "Type": 0},
+                ],
+                "Select": [
+                    {"Column": {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "NM_CSSE"}},
+                    {"Column": {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "NM_RZOA_SOCI"}},
+                    {"Column": {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "SG_AGEN"}},
+                    {"Column": {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "CNPJ_Formatado"}},
+                    {"Column": {"Expression": {"SourceRef": {"Source": "s"}}, "Property": "DS_STAT_AGEN"}},
+                ],
+                "Where": [
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                        "Property": "Tipo"}}], "Values": [[{"Literal": {"Value": "'Razão Social'"}}]]}}},
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "c"}},
+                        "Property": "FiltroMesAno"}}], "Values": [[{"Literal": {"Value": "'(mais recente)'"}}]]}}},
+                    {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                        "Property": "Valor"}}], "Values": [[{"Literal": {"Value": f"'{razao_social}'"}}]]}}},
+                ],
+            },
+            "Binding": {
+                "Primary": {"Groupings": [{"Projections": [0, 1, 2, 3, 4]}]},
+                "DataReduction": {"DataVolume": 3, "Primary": {"Window": {"Count": 10}}},
+                "Version": 1,
+            },
+        }}]},
+    }
+
+def buscar_meta_powerbi(razao_social: str) -> dict | None:
+    """Chama Power BI Q2 buscando por Razão Social (NOME_EMPRESARIAL do CKAN)."""
     body = {
         "version": "1.0.0",
         "modelId": POWERBI_MODEL_ID,
-        "queries": [_q_metadados(agente)],
+        "queries": [_q_metadados_razao_social(razao_social)],
         "cancelQueries": [],
     }
     try:
@@ -402,11 +438,14 @@ def main():
                 print(f"    ⏭  {meta['classe']} — pulado")
                 continue
 
-            print(f"    ✅  {meta.get('classe', '?')}")
-            agentes_conhecidos[nome] = meta
+            # Usa SG_AGEN (sigla) como chave — igual ao que a API usa (NM_CSSE)
+            agente_key = meta.get("sigla") or nome
+            print(f"    ✅  {meta.get('classe', '?')} | agente: {agente_key}")
+            meta["razao_social"] = meta.get("razao_social") or nome
+            agentes_conhecidos[agente_key] = meta
             salvar_agentes_csv(agentes_conhecidos)
 
-            onboardar_agente(nome, meta, args.sem_powerbi)
+            onboardar_agente(agente_key, meta, args.sem_powerbi)
 
             if i < len(nomes_novos) - 1:
                 time.sleep(DELAY_S)
