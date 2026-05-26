@@ -1,0 +1,157 @@
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "usermeta": {
+    "deneb": {
+      "build": "",
+      "metaVersion": 1,
+      "provider": "vegaLite",
+      "providerVersion": "5.17.0"
+    },
+    "interactivity": {
+      "tooltip": true,
+      "contextMenu": true,
+      "selection": true,
+      "highlight": true,
+      "dataPointLimit": 50
+    },
+    "information": {
+      "name": "Curva de Carga por Perfil",
+      "description": "Área suave com legenda pill — estilo CCEE Monitor",
+      "author": "CCEE Monitor"
+    }
+  },
+
+  "config": {
+    "font": "Segoe UI",
+    "background": "#ffffff",
+    "padding": { "top": 8, "right": 16, "bottom": 8, "left": 8 },
+    "view": { "stroke": null },
+    "axis": {
+      "domainColor": "#e2e8f0",
+      "gridColor":   "#f1f5f9",
+      "gridDash":    [2, 4],
+      "tickColor":   "#e2e8f0",
+      "labelColor":  "#94a3b8",
+      "labelFontSize": 11,
+      "labelFont":   "Segoe UI",
+      "titleColor":  "#64748b",
+      "titleFontSize": 11
+    },
+    "legend": {
+      "labelColor":      "#64748b",
+      "labelFontSize":   11,
+      "labelFont":       "Segoe UI",
+      "symbolType":      "stroke",
+      "symbolStrokeWidth": 3,
+      "symbolSize":      300,
+      "orient":          "top",
+      "direction":       "horizontal",
+      "title":           null,
+      "padding":         8,
+      "columnPadding":   16,
+      "rowPadding":      6,
+      "labelFontWeight": "bold"
+    },
+    "line": {
+      "strokeWidth": 2,
+      "interpolate": "monotone"
+    }
+  },
+
+  "data": { "name": "dataset" },
+
+  "layer": [
+
+    {
+      "description": "Área preenchida com gradiente suave",
+      "mark": {
+        "type": "area",
+        "interpolate": "monotone",
+        "fillOpacity": 0.08,
+        "line": { "strokeWidth": 2 }
+      },
+      "encoding": {
+        "x": {
+          "field": "__hora__",
+          "type": "ordinal",
+          "sort": null,
+          "axis": {
+            "labelExpr": "datum.value + 'h'",
+            "title": null,
+            "grid": false,
+            "ticks": false,
+            "domain": false,
+            "labelAngle": 0
+          }
+        },
+        "y": {
+          "field": "__valor__",
+          "type": "quantitative",
+          "stack": null,
+          "scale": { "domain": [0, 1] },
+          "axis": {
+            "format": ".0%",
+            "title": null,
+            "gridDash": [3, 5],
+            "gridColor": "#f1f5f9",
+            "domainColor": "transparent",
+            "tickCount": 5,
+            "ticks": false
+          }
+        },
+        "color": {
+          "field": "__perfil__",
+          "type": "nominal",
+          "scale": {
+            "range": [
+              "#2563eb",
+              "#16a34a",
+              "#d97706",
+              "#dc2626",
+              "#7c3aed",
+              "#0891b2",
+              "#059669",
+              "#e11d48"
+            ]
+          }
+        },
+        "tooltip": [
+          { "field": "__perfil__", "type": "nominal",      "title": "Perfil" },
+          { "field": "__hora__",   "type": "ordinal",      "title": "Hora" },
+          { "field": "__valor__",  "type": "quantitative", "title": "Valor", "format": ".1%" }
+        ]
+      }
+    },
+
+    {
+      "description": "Linha tracejada de referência 100%",
+      "mark": {
+        "type": "rule",
+        "strokeDash": [5, 5],
+        "strokeWidth": 1,
+        "color": "#94a3b8",
+        "opacity": 0.7
+      },
+      "encoding": {
+        "y": { "datum": 1 }
+      }
+    },
+
+    {
+      "description": "Rótulo '100%' na linha de referência",
+      "mark": {
+        "type": "text",
+        "align": "right",
+        "dx": -4,
+        "dy": -6,
+        "fontSize": 10,
+        "color": "#94a3b8"
+      },
+      "encoding": {
+        "y": { "datum": 1 },
+        "text": { "value": "100%" }
+      }
+    }
+
+  ]
+}
