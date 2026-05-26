@@ -3008,9 +3008,26 @@ app.get("/localidade", async (req, res) => {
 
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
+    // Filtro reutilizável para o JOIN de localidades (sem prefixo WHERE)
+    const joinCond = conds.length ? `AND ${conds.join(" AND ")}` : "";
+
     const { rows } = await pool.query(`
+      WITH agentes_match AS (
+        SELECT DISTINCT c.agente
+        FROM ccee_cargas c
+        ${where}
+      ),
+      totais AS (
+        SELECT
+          c.agente,
+          COUNT(DISTINCT c.sigla_parcela_carga)::int                         AS n_parcelas,
+          SUM(c.consumo_total) / NULLIF(COUNT(DISTINCT c.mes_referencia), 0) AS consumo_medio_mwh
+        FROM ccee_cargas c
+        JOIN agentes_match am ON am.agente = c.agente
+        GROUP BY c.agente
+      )
       SELECT
-        c.agente,
+        am.agente,
         a.razao_social,
         a.sigla,
         a.classe,
@@ -3018,25 +3035,26 @@ app.get("/localidade", async (req, res) => {
         c.cidade,
         c.ramo_atividade,
         c.submercado,
-        COUNT(DISTINCT c.sigla_parcela_carga)::int                                        AS n_parcelas,
-        MAX(c.mes_referencia)                                                              AS ultimo_mes,
-        SUM(c.consumo_total) / NULLIF(COUNT(DISTINCT c.mes_referencia), 0)                AS consumo_medio_mwm,
-        SUM(c.consumo_acl)   / NULLIF(COUNT(DISTINCT c.mes_referencia), 0)                AS consumo_acl_medio_mwm,
+        MAX(c.mes_referencia) AS ultimo_mes,
+        t.n_parcelas,
+        t.consumo_medio_mwh,
         mod.media_custo_mod
-      FROM ccee_cargas c
-      JOIN ccee_agentes a ON a.agente = c.agente
+      FROM agentes_match am
+      JOIN ccee_agentes a ON a.agente = am.agente
+      JOIN ccee_cargas  c ON c.agente = am.agente ${joinCond}
+      JOIN totais       t ON t.agente = am.agente
       LEFT JOIN (
         SELECT agente, AVG(custo_modulacao_rs_mwh) AS media_custo_mod
-        FROM ccee_modulacao
-        GROUP BY agente
-      ) mod ON mod.agente = c.agente
-      ${where}
-      GROUP BY c.agente, a.razao_social, a.sigla, a.classe, c.estado_uf, c.cidade, c.ramo_atividade, c.submercado, mod.media_custo_mod
-      ORDER BY c.estado_uf, c.cidade, c.agente
-      LIMIT 500
+        FROM ccee_modulacao GROUP BY agente
+      ) mod ON mod.agente = am.agente
+      GROUP BY am.agente, a.razao_social, a.sigla, a.classe,
+               c.estado_uf, c.cidade, c.ramo_atividade, c.submercado,
+               t.n_parcelas, t.consumo_medio_mwh, mod.media_custo_mod
+      ORDER BY t.consumo_medio_mwh DESC, am.agente, c.estado_uf, c.cidade
+      LIMIT 5000
     `, params);
 
-    // Agrupa por agente
+    // Agrupa por agente — consumo e parcelas vêm do CTE (nível agente), não somam por linha
     const porAgente = {};
     for (const r of rows) {
       if (!porAgente[r.agente]) {
@@ -3046,26 +3064,21 @@ app.get("/localidade", async (req, res) => {
           sigla:             r.sigla,
           classe:            r.classe,
           localidades:       [],
-          n_parcelas:        0,
-          consumo_medio_mwm: 0,
+          n_parcelas:        r.n_parcelas,
+          consumo_medio_mwh: Number(r.consumo_medio_mwh) || 0,
           media_custo_mod:   r.media_custo_mod != null ? Number(r.media_custo_mod) : null,
         };
       }
-      const a = porAgente[r.agente];
-      a.localidades.push({
-        estado_uf:   r.estado_uf,
-        cidade:      r.cidade,
-        ramo:        r.ramo_atividade,
-        submercado:  r.submercado,
-        n_parcelas:  r.n_parcelas,
-        consumo_mwm: Number(r.consumo_medio_mwm) || 0,
-        ultimo_mes:  r.ultimo_mes,
+      porAgente[r.agente].localidades.push({
+        estado_uf:  r.estado_uf,
+        cidade:     r.cidade,
+        ramo:       r.ramo_atividade,
+        submercado: r.submercado,
+        ultimo_mes: r.ultimo_mes,
       });
-      a.n_parcelas        += r.n_parcelas;
-      a.consumo_medio_mwm += Number(r.consumo_medio_mwm) || 0;
     }
 
-    res.json(Object.values(porAgente).sort((a, b) => b.consumo_medio_mwm - a.consumo_medio_mwm));
+    res.json(Object.values(porAgente).sort((a, b) => b.consumo_medio_mwh - a.consumo_medio_mwh));
   } catch (e) {
     console.error("[localidade]", e.message);
     res.status(500).json({ error: e.message });

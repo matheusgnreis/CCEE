@@ -99,7 +99,7 @@ export default function Localidade() {
     : opcoes.cidades;
 
   const totalParcelas = resultado?.reduce((s, a) => s + a.n_parcelas, 0) ?? 0;
-  const totalConsumo  = resultado?.reduce((s, a) => s + a.consumo_medio_mwm, 0) ?? 0;
+  const totalConsumo  = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
 
   return (
     <div style={s.page}>
@@ -203,7 +203,7 @@ export default function Localidade() {
               <span style={s.resumoSep}>·</span>
               <span><b>{totalParcelas.toLocaleString("pt-BR")}</b> parcelas</span>
               <span style={s.resumoSep}>·</span>
-              <span><b>{fmt(totalConsumo)}</b> MWm consumo médio/mês</span>
+              <span><b>{fmt(totalConsumo)}</b> MWh consumo médio/mês</span>
             </div>
 
             {resultado.length === 0 ? (
@@ -218,7 +218,7 @@ export default function Localidade() {
                       <th style={s.th}>Agente</th>
                       <th style={s.th}>Razão Social</th>
                       <th style={{ ...s.th, textAlign: "center" }}>Parcelas</th>
-                      <th style={{ ...s.th, textAlign: "right" }}>Consumo médio/mês</th>
+                      <th style={{ ...s.th, textAlign: "right" }}>Consumo médio/mês (MWh)</th>
                       <th style={{ ...s.th, textAlign: "right" }}>Modulação média</th>
                       <th style={s.th}>Localidades</th>
                       <th style={s.th}>Último mês</th>
@@ -243,8 +243,8 @@ export default function Localidade() {
                           {a.n_parcelas}
                         </td>
                         <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: "#2563eb" }}>
-                          {fmt(a.consumo_medio_mwm)}
-                          <span style={{ fontSize: 10, fontWeight: 400, color: "#94a3b8", marginLeft: 2 }}>MWm</span>
+                          {fmt(a.consumo_medio_mwh)}
+                          <span style={{ fontSize: 10, fontWeight: 400, color: "#94a3b8", marginLeft: 2 }}>MWh</span>
                         </td>
                         <td style={{ ...s.td, textAlign: "right" }}>
                           {a.media_custo_mod != null ? (
