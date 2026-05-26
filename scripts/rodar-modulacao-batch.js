@@ -7,10 +7,12 @@
 //   2. Para cada mês com dados pendentes → 1 download de consumo + 1 de geração
 //   3. No streaming, filtra todos os agentes de uma vez
 //   4. Salva no banco por agente
-//   5. Dispara modulação via API para cada agente e aguarda
+//   5. Calcula modulação direto no script
 //   6. Salva contabilização por perfil
 //
-// Uso: node scripts/rodar-modulacao-batch.js
+// Uso:
+//   node scripts/rodar-modulacao-batch.js                          # todos os agentes do banco
+//   node scripts/rodar-modulacao-batch.js --agentes "AG1,AG2,AG3" # agentes específicos
 
 require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
 const fetch  = require("node-fetch");
@@ -33,9 +35,14 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Lista completa de agentes — carregada do banco em carregarMeta()
-// Não precisa manter manualmente: qualquer agente em ccee_agentes é processado
+// Lista de agentes — carregada do banco em carregarMeta(), filtrada por --agentes se passado
 let AGENTES = [];
+
+const args = process.argv.slice(2);
+const flagAgentes = args.indexOf("--agentes");
+const FILTRO_AGENTES = flagAgentes !== -1
+  ? args[flagAgentes + 1].split(",").map(a => a.trim()).filter(Boolean)
+  : null;
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 
@@ -107,8 +114,17 @@ async function streamGzip(url, onLinha) {
 async function carregarMeta() {
   // Carrega todos os agentes do banco (inclui recém-descobertos sem dados ainda)
   const rTodos = await pool.query("SELECT agente, razao_social FROM ccee_agentes ORDER BY agente");
-  AGENTES = rTodos.rows.map(r => r.agente);
-  console.log(`[meta] ${AGENTES.length} agentes carregados do banco`);
+  const todosBanco = rTodos.rows.map(r => r.agente);
+
+  if (FILTRO_AGENTES) {
+    AGENTES = FILTRO_AGENTES.filter(a => todosBanco.includes(a));
+    const naoEncontrados = FILTRO_AGENTES.filter(a => !todosBanco.includes(a));
+    if (naoEncontrados.length) console.warn(`[meta] ⚠ Não encontrados no banco: ${naoEncontrados.join(", ")}`);
+    console.log(`[meta] ${AGENTES.length} agentes filtrados (--agentes)`);
+  } else {
+    AGENTES = todosBanco;
+    console.log(`[meta] ${AGENTES.length} agentes carregados do banco`);
+  }
 
   const razaoMap = {};
   rTodos.rows.forEach(r => { razaoMap[r.agente] = r.razao_social; });
@@ -504,8 +520,8 @@ async function processarContabilizacao(agente) {
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log(`\n🚀 BATCH — ${AGENTES.length} agentes | 1 download por mês\n`);
-  console.log(`API: ${API}\n`);
+  const modoLabel = FILTRO_AGENTES ? `${AGENTES.length} agentes (filtrado)` : `${AGENTES.length} agentes (todos do banco)`;
+  console.log(`\n🚀 BATCH — ${modoLabel} | 1 download por mês\n`);
 
   const meta = await carregarMeta();
   const { pendCarga, pendGer, mesesCarga, mesesGer } = await mesesPendentesPorAgente();
