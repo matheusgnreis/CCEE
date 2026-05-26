@@ -3101,6 +3101,171 @@ app.get("/localidade/opcoes", async (_req, res) => {
   }
 });
 
+// ─── Utilitários geoespaciais ─────────────────────────────────────────────────
+
+function toRad(d) { return d * Math.PI / 180; }
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R    = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a    = Math.sin(dLat / 2) ** 2
+             + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function distToSegmentKm(plat, plon, alat, alon, blat, blon) {
+  const dx = blat - alat, dy = blon - alon;
+  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return haversineKm(plat, plon, alat, alon);
+  const t = Math.max(0, Math.min(1, ((plat - alat) * dx + (plon - alon) * dy) / (dx * dx + dy * dy)));
+  return haversineKm(plat, plon, alat + t * dx, alon + t * dy);
+}
+
+function distToPolylineKm(lat, lon, pontos) {
+  // pontos: [[lon, lat], ...] (ordem GeoJSON)
+  let min = Infinity;
+  for (let i = 0; i < pontos.length - 1; i++) {
+    const d = distToSegmentKm(lat, lon, pontos[i][1], pontos[i][0], pontos[i + 1][1], pontos[i + 1][0]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
+// GET /geocode?q=Belo+Horizonte+MG — proxy para Nominatim
+app.get("/geocode", async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.json([]);
+  try {
+    const url  = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q + " Brasil")}&format=json&limit=5&countrycodes=br`;
+    const resp = await fetch(url, { headers: { "User-Agent": "CCEEMonitor/1.0 (github.com/matheusgnreis/CCEE)" } });
+    const data = await resp.json();
+    res.json(data.map(d => ({ lat: parseFloat(d.lat), lon: parseFloat(d.lon), nome: d.display_name })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /localidade/rota — agentes ao longo de uma rota rodoviária
+app.post("/localidade/rota", async (req, res) => {
+  const {
+    origemLat, origemLon, destinoLat, destinoLon,
+    raioKm = 30, minConsumoMwh = 0, ramo,
+  } = req.body;
+
+  if (!origemLat || !origemLon || !destinoLat || !destinoLon)
+    return res.status(400).json({ error: "Informe origemLat, origemLon, destinoLat, destinoLon" });
+
+  try {
+    // 1. Rota via OSRM (público, gratuito)
+    const osrmUrl  = `https://router.project-osrm.org/route/v1/driving/${origemLon},${origemLat};${destinoLon},${destinoLat}?overview=full&geometries=geojson`;
+    const osrmResp = await fetch(osrmUrl, { headers: { "User-Agent": "CCEEMonitor/1.0" } });
+    const osrmData = await osrmResp.json();
+
+    if (!osrmData.routes?.length)
+      return res.status(400).json({ error: "Rota não encontrada pelo OSRM" });
+
+    const rotaOSRM   = osrmData.routes[0];
+    const pontos     = rotaOSRM.geometry.coordinates; // [[lon, lat], ...]
+    const distanciaKm = Math.round(rotaOSRM.distance / 1000);
+    const duracaoMin  = Math.round(rotaOSRM.duration / 60);
+
+    // 2. Cidades geocodificadas no banco
+    const { rows: cidades } = await pool.query(
+      "SELECT cidade, estado_uf, lat, lon FROM ccee_cidades_geo WHERE lat IS NOT NULL"
+    );
+
+    if (!cidades.length)
+      return res.status(400).json({ error: "Nenhuma cidade geocodificada. Execute: node scripts/geocodificar-cidades.js" });
+
+    // 3. Filtra cidades dentro do raio da rota
+    const cidadesNaRota = cidades
+      .map(c => ({ ...c, distKm: distToPolylineKm(c.lat, c.lon, pontos) }))
+      .filter(c => c.distKm <= raioKm)
+      .sort((a, b) => a.distKm - b.distKm);
+
+    if (!cidadesNaRota.length)
+      return res.json({ agentes: [], distanciaKm, duracaoMin, raioKm });
+
+    // 4. Agentes nessas cidades
+    const cidadePairs = cidadesNaRota.map(c => `(${`'${c.cidade.replace(/'/g, "''")}'`}, '${c.estado_uf}')`).join(", ");
+    const distMap     = Object.fromEntries(cidadesNaRota.map(c => [`${c.cidade}|${c.estado_uf}`, c.distKm]));
+
+    const ramoFiltro = ramo ? `AND UPPER(c.ramo_atividade) LIKE '%${ramo.trim().toUpperCase().replace(/'/g, "''")}%'` : "";
+
+    const { rows } = await pool.query(`
+      WITH totais AS (
+        SELECT
+          c.agente,
+          COUNT(DISTINCT c.sigla_parcela_carga)::int                         AS n_parcelas,
+          SUM(c.consumo_total) / NULLIF(COUNT(DISTINCT c.mes_referencia), 0) AS consumo_medio_mwh
+        FROM ccee_cargas c
+        WHERE (c.cidade, c.estado_uf) IN (${cidadePairs})
+          ${ramoFiltro}
+        GROUP BY c.agente
+        HAVING SUM(c.consumo_total) / NULLIF(COUNT(DISTINCT c.mes_referencia), 0) >= $1
+      )
+      SELECT
+        t.agente,
+        a.razao_social, a.sigla, a.classe,
+        c.estado_uf, c.cidade, c.ramo_atividade, c.submercado,
+        MAX(c.mes_referencia) AS ultimo_mes,
+        t.n_parcelas,
+        t.consumo_medio_mwh,
+        mod.media_custo_mod
+      FROM totais t
+      JOIN ccee_agentes a ON a.agente = t.agente
+      JOIN ccee_cargas  c ON c.agente = t.agente
+        AND (c.cidade, c.estado_uf) IN (${cidadePairs})
+        ${ramoFiltro}
+      LEFT JOIN (
+        SELECT agente, AVG(custo_modulacao_rs_mwh) AS media_custo_mod
+        FROM ccee_modulacao GROUP BY agente
+      ) mod ON mod.agente = t.agente
+      GROUP BY t.agente, a.razao_social, a.sigla, a.classe,
+               c.estado_uf, c.cidade, c.ramo_atividade, c.submercado,
+               t.n_parcelas, t.consumo_medio_mwh, mod.media_custo_mod
+      ORDER BY t.consumo_medio_mwh DESC, t.agente, c.cidade
+    `, [minConsumoMwh]);
+
+    // Agrupa por agente
+    const porAgente = {};
+    for (const r of rows) {
+      const chave = `${r.cidade}|${r.estado_uf}`;
+      if (!porAgente[r.agente]) {
+        porAgente[r.agente] = {
+          agente:            r.agente,
+          razao_social:      r.razao_social,
+          sigla:             r.sigla,
+          classe:            r.classe,
+          n_parcelas:        r.n_parcelas,
+          consumo_medio_mwh: Number(r.consumo_medio_mwh) || 0,
+          media_custo_mod:   r.media_custo_mod != null ? Number(r.media_custo_mod) : null,
+          localidades:       [],
+          dist_km:           distMap[chave] ?? null,
+        };
+      }
+      porAgente[r.agente].localidades.push({
+        estado_uf:  r.estado_uf,
+        cidade:     r.cidade,
+        ramo:       r.ramo_atividade,
+        submercado: r.submercado,
+        ultimo_mes: r.ultimo_mes,
+        dist_km:    distMap[chave] ?? null,
+      });
+      // Mantém a menor distância do agente à rota
+      const d = distMap[chave] ?? Infinity;
+      if (d < (porAgente[r.agente].dist_km ?? Infinity)) porAgente[r.agente].dist_km = d;
+    }
+
+    const agentes = Object.values(porAgente).sort((a, b) => b.consumo_medio_mwh - a.consumo_medio_mwh);
+
+    res.json({ agentes, distanciaKm, duracaoMin, raioKm, cidadesNaRota: cidadesNaRota.length });
+  } catch (e) {
+    console.error("[localidade/rota]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /modulacao/status — visão geral de todos os agentes: carga e geração
 app.get("/modulacao/status", async (_req, res) => {
   try {

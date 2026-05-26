@@ -18,25 +18,16 @@ const UF_NOME = {
   PR:"Paraná",RS:"Rio G. Sul",SC:"Santa Catarina",
 };
 
-export default function Localidade() {
-  const router = useRouter();
+// ─── Aba: Por Localidade ──────────────────────────────────────────────────────
 
-  const [opcoes,    setOpcoes]    = useState({ estados: [], cidades: [] });
+function AbaLocalidade({ opcoes }) {
+  const router = useRouter();
   const [busca,     setBusca]     = useState("");
   const [estadoSel, setEstadoSel] = useState("");
   const [cidadeSel, setCidadeSel] = useState("");
   const [resultado, setResultado] = useState(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState(null);
-
-  const inputRef = useRef(null);
-
-  useEffect(() => {
-    fetch(`${API_URL}/localidade/opcoes`)
-      .then(r => r.json())
-      .then(d => { if (!d.error) setOpcoes(d); })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -49,22 +40,15 @@ export default function Localidade() {
   async function pesquisar(params) {
     const p = params || buildParams();
     if (!p.estado && !p.cidade && !p.q) return;
-
-    setLoading(true);
-    setErro(null);
-    setResultado(null);
-
+    setLoading(true); setErro(null); setResultado(null);
     const qs = new URLSearchParams(Object.entries(p).filter(([, v]) => v));
     try {
       const r = await fetch(`${API_URL}/localidade?${qs}`);
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       setResultado(d);
-    } catch (e) {
-      setErro(e.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { setErro(e.message); }
+    finally { setLoading(false); }
   }
 
   function buildParams() {
@@ -75,23 +59,8 @@ export default function Localidade() {
   }
 
   function onEstado(uf) {
-    setEstadoSel(uf);
-    setCidadeSel("");
-    setBusca("");
-    if (uf) pesquisar({ estado: uf });
-    else setResultado(null);
-  }
-
-  function onCidade(cidade) {
-    setCidadeSel(cidade);
-    pesquisar(cidade ? { cidade } : { estado: estadoSel });
-  }
-
-  function onSubmitBusca(e) {
-    e.preventDefault();
-    setEstadoSel("");
-    setCidadeSel("");
-    pesquisar({ q: busca.trim() });
+    setEstadoSel(uf); setCidadeSel(""); setBusca("");
+    if (uf) pesquisar({ estado: uf }); else setResultado(null);
   }
 
   const cidadesFiltradas = estadoSel
@@ -102,20 +71,361 @@ export default function Localidade() {
   const totalConsumo  = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
 
   return (
-    <div style={s.page}>
+    <>
       <style jsx>{`
-        @media (max-width: 768px) {
-          .nav-inner { padding: 0 16px !important; }
-          .inner { padding: 24px 16px !important; }
-          .filtros { flex-direction: column !important; }
-        }
         .agente-link:hover { text-decoration: underline; }
         .row-card:hover { background: #f8fafc; }
         select:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
-        input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+        input:focus  { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
       `}</style>
 
-      {/* Nav */}
+      {/* Filtros */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 24, alignItems: "center", flexWrap: "wrap" }}>
+        <form onSubmit={e => { e.preventDefault(); setEstadoSel(""); setCidadeSel(""); pesquisar({ q: busca.trim() }); }}
+              style={{ display: "flex", gap: 8, flex: 1, minWidth: 220 }}>
+          <input
+            value={busca}
+            onChange={e => { setBusca(e.target.value); setEstadoSel(""); setCidadeSel(""); }}
+            placeholder="Buscar por cidade, ramo de atividade..."
+            style={s.input}
+          />
+          <button type="submit" style={s.btnPrimary} disabled={!busca.trim() || loading}>
+            {loading ? "..." : "Buscar"}
+          </button>
+        </form>
+
+        <select value={estadoSel} onChange={e => onEstado(e.target.value)} style={s.select}>
+          <option value="">Estado...</option>
+          {opcoes.estados.map(uf => (
+            <option key={uf} value={uf}>{UF_NOME[uf] || uf} ({uf})</option>
+          ))}
+        </select>
+
+        {estadoSel && cidadesFiltradas.length > 0 && (
+          <select value={cidadeSel} onChange={e => { setCidadeSel(e.target.value); pesquisar(e.target.value ? { cidade: e.target.value } : { estado: estadoSel }); }} style={s.select}>
+            <option value="">Todas as cidades</option>
+            {cidadesFiltradas.map(c => <option key={c.cidade} value={c.cidade}>{c.cidade}</option>)}
+          </select>
+        )}
+
+        {(estadoSel || cidadeSel || busca) && (
+          <button onClick={() => { setEstadoSel(""); setCidadeSel(""); setBusca(""); setResultado(null); }} style={s.btnClear}>
+            Limpar
+          </button>
+        )}
+      </div>
+
+      {erro && <div style={s.errorBox}>⚠ {erro}</div>}
+      {loading && <div style={s.emptyState}>Buscando...</div>}
+
+      {resultado && !loading && (
+        <>
+          <div style={s.resumo}>
+            <span><b>{resultado.length}</b> agente{resultado.length !== 1 ? "s" : ""}</span>
+            <span style={s.sep}>·</span>
+            <span><b>{totalParcelas.toLocaleString("pt-BR")}</b> parcelas</span>
+            <span style={s.sep}>·</span>
+            <span><b>{fmt(totalConsumo)}</b> MWh consumo médio/mês</span>
+          </div>
+          <TabelaAgentes agentes={resultado} mostrarDist={false} />
+        </>
+      )}
+
+      {!resultado && !loading && !erro && (
+        <div style={s.emptyState}>
+          <p style={{ fontSize: 32, margin: "0 0 12px" }}>📍</p>
+          <p style={{ margin: 0, color: "#64748b" }}>
+            Selecione um estado ou busque por cidade para ver os agentes com cargas nessa localidade.
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Aba: Por Rota ────────────────────────────────────────────────────────────
+
+function AbaRota() {
+  const [origemQ,    setOrigemQ]    = useState("");
+  const [destinoQ,   setDestinoQ]   = useState("");
+  const [origemGeo,  setOrigemGeo]  = useState(null);
+  const [destinoGeo, setDestinoGeo] = useState(null);
+  const [raioKm,     setRaioKm]     = useState(30);
+  const [minConsumo, setMinConsumo] = useState(0);
+  const [ramoQ,      setRamoQ]      = useState("");
+
+  const [resultado,  setResultado]  = useState(null);
+  const [rotaInfo,   setRotaInfo]   = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [loadingGeo, setLoadingGeo] = useState({ origem: false, destino: false });
+  const [erro,       setErro]       = useState(null);
+
+  async function geocodar(q, tipo) {
+    if (!q.trim()) return;
+    setLoadingGeo(p => ({ ...p, [tipo]: true }));
+    try {
+      const r = await fetch(`${API_URL}/geocode?q=${encodeURIComponent(q)}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      if (!d.length) throw new Error("Localidade não encontrada. Tente incluir o estado, ex: 'Uberlândia MG'");
+      if (tipo === "origem")  setOrigemGeo(d[0]);
+      else                    setDestinoGeo(d[0]);
+    } catch (e) {
+      setErro(e.message);
+    } finally {
+      setLoadingGeo(p => ({ ...p, [tipo]: false }));
+    }
+  }
+
+  async function buscarRota() {
+    if (!origemGeo || !destinoGeo) {
+      setErro("Geocodifique a origem e o destino primeiro (pressione Enter nos campos).");
+      return;
+    }
+    setLoading(true); setErro(null); setResultado(null); setRotaInfo(null);
+    try {
+      const r = await fetch(`${API_URL}/localidade/rota`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          origemLat:    origemGeo.lat,  origemLon:  origemGeo.lon,
+          destinoLat:   destinoGeo.lat, destinoLon: destinoGeo.lon,
+          raioKm, minConsumoMwh: Number(minConsumo) || 0, ramo: ramoQ,
+        }),
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      setResultado(d.agentes);
+      setRotaInfo({ distanciaKm: d.distanciaKm, duracaoMin: d.duracaoMin, cidadesNaRota: d.cidadesNaRota });
+    } catch (e) { setErro(e.message); }
+    finally { setLoading(false); }
+  }
+
+  const totalConsumo = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
+
+  return (
+    <>
+      <style jsx>{`
+        input:focus  { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+        .geocoded { border-color: #16a34a !important; background: #f0fdf4 !important; }
+        .agente-link:hover { text-decoration: underline; }
+        .row-card:hover { background: #f8fafc; }
+      `}</style>
+
+      {/* Rota */}
+      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 20, marginBottom: 16 }}>
+        <p style={s.labelSecao}>Rota</p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {/* Origem */}
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <label style={s.label}>Origem</label>
+            <form onSubmit={e => { e.preventDefault(); geocodar(origemQ, "origem"); }} style={{ display: "flex", gap: 6 }}>
+              <input
+                value={origemQ}
+                onChange={e => { setOrigemQ(e.target.value); setOrigemGeo(null); }}
+                placeholder="ex: Belo Horizonte MG"
+                style={{ ...s.input, flex: 1, ...(origemGeo ? { borderColor: "#16a34a", background: "#f0fdf4" } : {}) }}
+              />
+              <button type="submit" style={s.btnSm} disabled={loadingGeo.origem || !origemQ.trim()}>
+                {loadingGeo.origem ? "..." : "↵"}
+              </button>
+            </form>
+            {origemGeo && <p style={s.geoLabel}>✅ {origemGeo.nome.split(",").slice(0, 2).join(",")}</p>}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", paddingTop: 20, color: "#94a3b8", fontSize: 20 }}>→</div>
+
+          {/* Destino */}
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <label style={s.label}>Destino</label>
+            <form onSubmit={e => { e.preventDefault(); geocodar(destinoQ, "destino"); }} style={{ display: "flex", gap: 6 }}>
+              <input
+                value={destinoQ}
+                onChange={e => { setDestinoQ(e.target.value); setDestinoGeo(null); }}
+                placeholder="ex: Uberlândia MG"
+                style={{ ...s.input, flex: 1, ...(destinoGeo ? { borderColor: "#16a34a", background: "#f0fdf4" } : {}) }}
+              />
+              <button type="submit" style={s.btnSm} disabled={loadingGeo.destino || !destinoQ.trim()}>
+                {loadingGeo.destino ? "..." : "↵"}
+              </button>
+            </form>
+            {destinoGeo && <p style={s.geoLabel}>✅ {destinoGeo.nome.split(",").slice(0, 2).join(",")}</p>}
+          </div>
+        </div>
+
+        {/* Filtros */}
+        <p style={{ ...s.labelSecao, marginTop: 16 }}>Filtros</p>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div>
+            <label style={s.label}>Raio da rota</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="range" min={5} max={150} step={5} value={raioKm}
+                onChange={e => setRaioKm(Number(e.target.value))}
+                style={{ width: 140, accentColor: "#2563eb" }}
+              />
+              <span style={{ fontSize: 14, fontWeight: 700, color: "#2563eb", minWidth: 52 }}>{raioKm} km</span>
+            </div>
+          </div>
+
+          <div>
+            <label style={s.label}>Consumo mínimo (MWh/mês)</label>
+            <input
+              type="number" min={0} step={100} value={minConsumo}
+              onChange={e => setMinConsumo(e.target.value)}
+              placeholder="0"
+              style={{ ...s.input, width: 160 }}
+            />
+          </div>
+
+          <div>
+            <label style={s.label}>Ramo de atividade</label>
+            <input
+              value={ramoQ}
+              onChange={e => setRamoQ(e.target.value)}
+              placeholder="ex: Metalurgia"
+              style={{ ...s.input, width: 180 }}
+            />
+          </div>
+
+          <button onClick={buscarRota} style={s.btnPrimary} disabled={loading || !origemGeo || !destinoGeo}>
+            {loading ? "Calculando..." : "Buscar clientes na rota"}
+          </button>
+        </div>
+      </div>
+
+      {erro && <div style={s.errorBox}>⚠ {erro}</div>}
+
+      {/* Info da rota */}
+      {rotaInfo && !loading && (
+        <div style={{ display: "flex", gap: 16, marginBottom: 12, fontSize: 13, color: "#374151", flexWrap: "wrap" }}>
+          <span>🛣 <b>{rotaInfo.distanciaKm} km</b> de rota</span>
+          <span style={s.sep}>·</span>
+          <span>⏱ <b>{Math.floor(rotaInfo.duracaoMin / 60)}h{String(rotaInfo.duracaoMin % 60).padStart(2, "0")}min</b> estimado</span>
+          <span style={s.sep}>·</span>
+          <span>📍 <b>{rotaInfo.cidadesNaRota}</b> cidades no raio de {raioKm} km</span>
+          <span style={s.sep}>·</span>
+          <span><b>{resultado?.length ?? 0}</b> agentes encontrados</span>
+          <span style={s.sep}>·</span>
+          <span><b>{fmt(totalConsumo)}</b> MWh consumo médio/mês</span>
+        </div>
+      )}
+
+      {resultado && !loading && resultado.length === 0 && (
+        <p style={{ color: "#94a3b8", padding: "32px 0", textAlign: "center" }}>
+          Nenhum agente encontrado no raio de {raioKm} km da rota. Tente aumentar o raio ou reduzir o consumo mínimo.
+        </p>
+      )}
+
+      {resultado && !loading && resultado.length > 0 && (
+        <TabelaAgentes agentes={resultado} mostrarDist />
+      )}
+
+      {!resultado && !loading && !erro && (
+        <div style={s.emptyState}>
+          <p style={{ fontSize: 32, margin: "0 0 12px" }}>🗺</p>
+          <p style={{ margin: 0, color: "#64748b" }}>
+            Digite a origem e o destino, ajuste o raio e clique em "Buscar clientes na rota".
+          </p>
+          <p style={{ margin: "8px 0 0", color: "#94a3b8", fontSize: 12 }}>
+            Antes da primeira busca, execute: <code>node scripts/geocodificar-cidades.js</code>
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Tabela compartilhada ─────────────────────────────────────────────────────
+
+function TabelaAgentes({ agentes, mostrarDist }) {
+  return (
+    <div style={s.tableWrap}>
+      <table style={s.table}>
+        <thead>
+          <tr>
+            <th style={s.th}>Agente</th>
+            <th style={s.th}>Razão Social</th>
+            {mostrarDist && <th style={{ ...s.th, textAlign: "center" }}>Dist. rota</th>}
+            <th style={{ ...s.th, textAlign: "center" }}>Parcelas</th>
+            <th style={{ ...s.th, textAlign: "right" }}>Consumo médio/mês (MWh)</th>
+            <th style={{ ...s.th, textAlign: "right" }}>Modulação média</th>
+            <th style={s.th}>Localidades</th>
+            <th style={s.th}>Último mês</th>
+          </tr>
+        </thead>
+        <tbody>
+          {agentes.map(a => (
+            <tr key={a.agente} className="row-card" style={s.tr}>
+              <td style={s.td}>
+                <Link href={`/inteligencia/${encodeURIComponent(a.agente)}`} style={s.agenteLink} className="agente-link">
+                  {a.sigla || a.agente}
+                </Link>
+              </td>
+              <td style={{ ...s.td, color: "#64748b", fontSize: 12 }}>{a.razao_social || "—"}</td>
+              {mostrarDist && (
+                <td style={{ ...s.td, textAlign: "center", fontSize: 12, color: "#64748b" }}>
+                  {a.dist_km != null ? `${a.dist_km.toFixed(0)} km` : "—"}
+                </td>
+              )}
+              <td style={{ ...s.td, textAlign: "center", fontWeight: 600 }}>{a.n_parcelas}</td>
+              <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: "#2563eb" }}>
+                {fmt(a.consumo_medio_mwh)}
+                <span style={{ fontSize: 10, fontWeight: 400, color: "#94a3b8", marginLeft: 2 }}>MWh</span>
+              </td>
+              <td style={{ ...s.td, textAlign: "right" }}>
+                {a.media_custo_mod != null ? (
+                  <span style={{ fontWeight: 700, color: a.media_custo_mod >= 0 ? "#16a34a" : "#ea580c" }}>
+                    {a.media_custo_mod >= 0 ? "+" : ""}{fmt(a.media_custo_mod)}
+                    <span style={{ fontSize: 10, fontWeight: 400, color: "#94a3b8", marginLeft: 2 }}>R$/MWh</span>
+                  </span>
+                ) : <span style={{ color: "#94a3b8" }}>—</span>}
+              </td>
+              <td style={s.td}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {[...new Map(a.localidades.map(l => [`${l.estado_uf}|${l.cidade}`, l])).values()].slice(0, 5).map(l => (
+                    <span key={`${l.estado_uf}|${l.cidade}`} style={s.tag} title={l.ramo}>
+                      {l.cidade ? `${l.cidade} (${l.estado_uf})` : l.estado_uf}
+                    </span>
+                  ))}
+                  {new Set(a.localidades.map(l => `${l.estado_uf}|${l.cidade}`)).size > 5 && (
+                    <span style={{ ...s.tag, background: "#e2e8f0", color: "#64748b" }}>
+                      +{new Set(a.localidades.map(l => `${l.estado_uf}|${l.cidade}`)).size - 5}
+                    </span>
+                  )}
+                </div>
+              </td>
+              <td style={{ ...s.td, color: "#64748b", fontSize: 12 }}>{a.localidades[0]?.ultimo_mes || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Página principal ─────────────────────────────────────────────────────────
+
+export default function Localidade() {
+  const [aba,    setAba]    = useState("local");
+  const [opcoes, setOpcoes] = useState({ estados: [], cidades: [] });
+
+  useEffect(() => {
+    fetch(`${API_URL}/localidade/opcoes`)
+      .then(r => r.json())
+      .then(d => { if (!d.error) setOpcoes(d); })
+      .catch(() => {});
+  }, []);
+
+  return (
+    <div style={s.page}>
+      <style jsx global>{`
+        @media (max-width: 768px) {
+          .nav-inner { padding: 0 16px !important; }
+          .inner     { padding: 24px 16px !important; }
+        }
+      `}</style>
+
       <nav style={s.nav}>
         <div className="nav-inner" style={s.navInner}>
           <Link href="/" style={s.navBack}>← Início</Link>
@@ -125,175 +435,28 @@ export default function Localidade() {
       </nav>
 
       <div className="inner" style={s.inner}>
-        {/* Header */}
         <div style={{ marginBottom: 24 }}>
           <h1 style={s.titulo}>Cargas por Localidade</h1>
-          <p style={s.subtitulo}>Busque agentes pelo estado ou cidade onde possuem parcelas de carga</p>
+          <p style={s.subtitulo}>Encontre agentes pelo estado, cidade ou ao longo de uma rota de prospecção</p>
         </div>
 
-        {/* Filtros */}
-        <div className="filtros" style={s.filtrosRow}>
-          {/* Busca livre */}
-          <form onSubmit={onSubmitBusca} style={{ display: "flex", gap: 8, flex: 1, minWidth: 220 }}>
-            <input
-              ref={inputRef}
-              value={busca}
-              onChange={e => { setBusca(e.target.value); setEstadoSel(""); setCidadeSel(""); }}
-              placeholder="Buscar por cidade, ramo de atividade..."
-              style={s.searchInput}
-            />
-            <button type="submit" style={s.searchBtn} disabled={!busca.trim() || loading}>
-              {loading ? "..." : "Buscar"}
-            </button>
-          </form>
-
-          {/* Select de estado */}
-          <select
-            value={estadoSel}
-            onChange={e => onEstado(e.target.value)}
-            style={s.select}
-          >
-            <option value="">Estado...</option>
-            {opcoes.estados.map(uf => (
-              <option key={uf} value={uf}>{UF_NOME[uf] || uf} ({uf})</option>
-            ))}
-          </select>
-
-          {/* Select de cidade — só aparece quando estado está selecionado */}
-          {estadoSel && cidadesFiltradas.length > 0 && (
-            <select
-              value={cidadeSel}
-              onChange={e => onCidade(e.target.value)}
-              style={s.select}
-            >
-              <option value="">Todas as cidades</option>
-              {cidadesFiltradas.map(c => (
-                <option key={c.cidade} value={c.cidade}>{c.cidade}</option>
-              ))}
-            </select>
-          )}
-
-          {/* Limpar filtros */}
-          {(estadoSel || cidadeSel || busca) && (
-            <button
-              onClick={() => { setEstadoSel(""); setCidadeSel(""); setBusca(""); setResultado(null); }}
-              style={s.clearBtn}
-            >
-              Limpar
-            </button>
-          )}
+        {/* Abas */}
+        <div style={s.tabs}>
+          <button onClick={() => setAba("local")} style={{ ...s.tab, ...(aba === "local" ? s.tabAtivo : {}) }}>
+            📍 Por localidade
+          </button>
+          <button onClick={() => setAba("rota")} style={{ ...s.tab, ...(aba === "rota" ? s.tabAtivo : {}) }}>
+            🗺 Por rota
+          </button>
         </div>
 
-        {/* Erro */}
-        {erro && <div style={s.errorBox}>⚠ {erro}</div>}
-
-        {/* Loading */}
-        {loading && (
-          <div style={{ textAlign: "center", padding: "48px 0", color: "#94a3b8", fontSize: 14 }}>
-            Buscando...
-          </div>
-        )}
-
-        {/* Resultados */}
-        {resultado && !loading && (
-          <>
-            {/* Resumo */}
-            <div style={s.resumo}>
-              <span><b>{resultado.length}</b> agente{resultado.length !== 1 ? "s" : ""}</span>
-              <span style={s.resumoSep}>·</span>
-              <span><b>{totalParcelas.toLocaleString("pt-BR")}</b> parcelas</span>
-              <span style={s.resumoSep}>·</span>
-              <span><b>{fmt(totalConsumo)}</b> MWh consumo médio/mês</span>
-            </div>
-
-            {resultado.length === 0 ? (
-              <p style={{ color: "#94a3b8", padding: "32px 0", textAlign: "center" }}>
-                Nenhuma carga encontrada para este filtro.
-              </p>
-            ) : (
-              <div style={s.tableWrap}>
-                <table style={s.table}>
-                  <thead>
-                    <tr>
-                      <th style={s.th}>Agente</th>
-                      <th style={s.th}>Razão Social</th>
-                      <th style={{ ...s.th, textAlign: "center" }}>Parcelas</th>
-                      <th style={{ ...s.th, textAlign: "right" }}>Consumo médio/mês (MWh)</th>
-                      <th style={{ ...s.th, textAlign: "right" }}>Modulação média</th>
-                      <th style={s.th}>Localidades</th>
-                      <th style={s.th}>Último mês</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {resultado.map(a => (
-                      <tr key={a.agente} className="row-card" style={s.tr}>
-                        <td style={s.td}>
-                          <Link
-                            href={`/inteligencia/${encodeURIComponent(a.agente)}`}
-                            style={s.agenteLink}
-                            className="agente-link"
-                          >
-                            {a.sigla || a.agente}
-                          </Link>
-                        </td>
-                        <td style={{ ...s.td, color: "#64748b", fontSize: 12 }}>
-                          {a.razao_social || "—"}
-                        </td>
-                        <td style={{ ...s.td, textAlign: "center", fontWeight: 600 }}>
-                          {a.n_parcelas}
-                        </td>
-                        <td style={{ ...s.td, textAlign: "right", fontWeight: 700, color: "#2563eb" }}>
-                          {fmt(a.consumo_medio_mwh)}
-                          <span style={{ fontSize: 10, fontWeight: 400, color: "#94a3b8", marginLeft: 2 }}>MWh</span>
-                        </td>
-                        <td style={{ ...s.td, textAlign: "right" }}>
-                          {a.media_custo_mod != null ? (
-                            <span style={{ fontWeight: 700, color: a.media_custo_mod >= 0 ? "#16a34a" : "#ea580c" }}>
-                              {a.media_custo_mod >= 0 ? "+" : ""}{fmt(a.media_custo_mod)}
-                              <span style={{ fontSize: 10, fontWeight: 400, color: "#94a3b8", marginLeft: 2 }}>R$/MWh</span>
-                            </span>
-                          ) : <span style={{ color: "#94a3b8" }}>—</span>}
-                        </td>
-                        <td style={s.td}>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                            {[...new Map(
-                              a.localidades.map(l => [`${l.estado_uf}|${l.cidade}`, l])
-                            ).values()].slice(0, 5).map(l => (
-                              <span key={`${l.estado_uf}|${l.cidade}`} style={s.tag} title={l.ramo}>
-                                {l.cidade ? `${l.cidade} (${l.estado_uf})` : l.estado_uf}
-                              </span>
-                            ))}
-                            {new Set(a.localidades.map(l => `${l.estado_uf}|${l.cidade}`)).size > 5 && (
-                              <span style={{ ...s.tag, background: "#e2e8f0", color: "#64748b" }}>
-                                +{new Set(a.localidades.map(l => `${l.estado_uf}|${l.cidade}`)).size - 5}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td style={{ ...s.td, color: "#64748b", fontSize: 12 }}>
-                          {a.localidades[0]?.ultimo_mes || "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </>
-        )}
-
-        {!resultado && !loading && !erro && (
-          <div style={s.emptyState}>
-            <p style={{ fontSize: 32, margin: "0 0 12px" }}>📍</p>
-            <p style={{ margin: 0, color: "#64748b" }}>
-              Selecione um estado ou busque por cidade para ver os agentes com cargas nessa localidade.
-            </p>
-          </div>
-        )}
+        {aba === "local" ? <AbaLocalidade opcoes={opcoes} /> : <AbaRota />}
       </div>
     </div>
   );
 }
+
+// ─── Estilos ──────────────────────────────────────────────────────────────────
 
 const s = {
   page:      { minHeight: "100vh", background: "#f8fafc", fontFamily: "system-ui, sans-serif" },
@@ -305,34 +468,42 @@ const s = {
   titulo:    { fontSize: 26, fontWeight: 800, color: "#1e293b", margin: "0 0 6px" },
   subtitulo: { fontSize: 14, color: "#64748b", margin: 0 },
 
-  filtrosRow: {
-    display: "flex", gap: 8, marginBottom: 24, alignItems: "center", flexWrap: "wrap",
+  tabs:    { display: "flex", gap: 4, marginBottom: 20, borderBottom: "2px solid #e2e8f0", paddingBottom: 0 },
+  tab:     { padding: "8px 18px", fontSize: 13, fontWeight: 600, border: "none", background: "transparent", cursor: "pointer", color: "#64748b", borderBottom: "2px solid transparent", marginBottom: -2, borderRadius: "6px 6px 0 0", transition: "all 0.15s" },
+  tabAtivo:{ color: "#2563eb", borderBottomColor: "#2563eb", background: "#eff6ff" },
+
+  input: {
+    padding: "10px 14px", fontSize: 14, border: "1px solid #e2e8f0",
+    borderRadius: 8, outline: "none", background: "#fff", color: "#1e293b",
+    transition: "border-color 0.15s, box-shadow 0.15s", width: "100%", boxSizing: "border-box",
   },
-  searchInput: {
-    flex: 1, padding: "10px 14px", fontSize: 14,
-    border: "1px solid #e2e8f0", borderRadius: 8, outline: "none",
-    background: "#fff", color: "#1e293b", transition: "border-color 0.15s, box-shadow 0.15s",
+  select: {
+    padding: "10px 14px", fontSize: 14, border: "1px solid #e2e8f0",
+    borderRadius: 8, outline: "none", background: "#fff", color: "#1e293b",
+    cursor: "pointer", minWidth: 180,
   },
-  searchBtn: {
+  btnPrimary: {
     padding: "10px 18px", background: "#2563eb", color: "#fff",
     border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600,
     cursor: "pointer", whiteSpace: "nowrap",
   },
-  select: {
-    padding: "10px 14px", fontSize: 14,
-    border: "1px solid #e2e8f0", borderRadius: 8, outline: "none",
-    background: "#fff", color: "#1e293b", cursor: "pointer",
-    transition: "border-color 0.15s, box-shadow 0.15s",
-    minWidth: 180,
-  },
-  clearBtn: {
+  btnClear: {
     padding: "10px 14px", background: "transparent", color: "#64748b",
     border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 13,
     cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500,
   },
+  btnSm: {
+    padding: "10px 14px", background: "#f1f5f9", color: "#374151",
+    border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 13,
+    cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap",
+  },
 
-  resumo:    { display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13, color: "#374151" },
-  resumoSep: { color: "#cbd5e1" },
+  labelSecao: { fontSize: 11, fontWeight: 700, color: "#64748b", marginBottom: 8, marginTop: 0, textTransform: "uppercase", letterSpacing: "0.06em" },
+  label:      { display: "block", fontSize: 11, fontWeight: 600, color: "#64748b", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.04em" },
+  geoLabel:   { fontSize: 11, color: "#16a34a", margin: "4px 0 0", fontWeight: 500 },
+
+  resumo: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13, color: "#374151", flexWrap: "wrap" },
+  sep:    { color: "#cbd5e1" },
 
   tableWrap: {
     background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0",
