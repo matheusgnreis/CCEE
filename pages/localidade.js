@@ -243,9 +243,11 @@ function GeoInput({ q, setQ, geo, setGeo, placeholder }) {
           boxShadow: "0 8px 24px rgba(0,0,0,0.12)", overflow: "hidden",
         }}>
           {sugestoes.map((item, i) => {
-            const partes = item.nome.split(",").map(p => p.trim());
-            const titulo = partes.slice(0, 2).join(", ");
-            const detalhe = partes.slice(2, 4).join(", ");
+            // Remove "Brasil" / "Brazil" do final antes de exibir
+            const partes = item.nome.split(",").map(p => p.trim())
+              .filter(p => !["Brasil", "Brazil"].includes(p));
+            const titulo  = partes.slice(0, 1).join(", ");
+            const detalhe = partes.slice(1, 3).join(", ");
             return (
               <button
                 key={i}
@@ -277,6 +279,7 @@ function AbaRota() {
   const [destinoGeo, setDestinoGeo] = useState(null);
   const [raioKm,     setRaioKm]     = useState(30);
   const [minConsumo, setMinConsumo] = useState(0);
+  const [maxConsumo, setMaxConsumo] = useState("");
   const [ramoQ,      setRamoQ]      = useState("");
 
   const [resultado,  setResultado]  = useState(null);
@@ -284,16 +287,17 @@ function AbaRota() {
   const [mapaDados,  setMapaDados]  = useState(null);
   const [loading,    setLoading]    = useState(false);
   const [erro,       setErro]       = useState(null);
+  const [removidos,  setRemovidos]  = useState(new Set());
 
   async function buscarRota() {
-    setLoading(true); setErro(null); setResultado(null); setRotaInfo(null); setMapaDados(null);
+    setLoading(true); setErro(null); setResultado(null); setRotaInfo(null); setMapaDados(null); setRemovidos(new Set());
     try {
       const r = await fetch(`${API_URL}/localidade/rota`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          origemLat:    origemGeo.lat,  origemLon:  origemGeo.lon,
-          destinoLat:   destinoGeo.lat, destinoLon: destinoGeo.lon,
+          origemLat:  origemGeo.lat, origemLon:  origemGeo.lon,
+          destinoLat: destinoGeo.lat, destinoLon: destinoGeo.lon,
           raioKm, minConsumoMwh: Number(minConsumo) || 0, ramo: ramoQ,
         }),
       });
@@ -306,19 +310,47 @@ function AbaRota() {
     finally { setLoading(false); }
   }
 
-  const totalConsumo  = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
+  function remover(agente) {
+    setRemovidos(prev => new Set([...prev, agente]));
+  }
+
+  function restaurar(agente) {
+    setRemovidos(prev => { const n = new Set(prev); n.delete(agente); return n; });
+  }
+
+  function exportarPDF() { window.print(); }
+
+  // Aplica filtros client-side (removidos + faixa de consumo)
+  const resultadoVis = resultado?.filter(a =>
+    !removidos.has(a.agente) &&
+    (!maxConsumo || a.consumo_medio_mwh <= Number(maxConsumo))
+  ) ?? [];
+
+  const totalConsumo  = resultadoVis.reduce((s, a) => s + a.consumo_medio_mwh, 0);
+  const totalParcelas = resultadoVis.reduce((s, a) => s + a.n_parcelas, 0);
   const podeCalcular  = !!origemGeo && !!destinoGeo && !loading;
+  const temResultado  = resultado && !loading && resultado.length > 0;
 
   return (
     <>
-      <style jsx>{`
+      <style jsx global>{`
         .agente-link:hover { text-decoration: underline; }
-        .row-card:hover     { background: #f8fafc; }
+        .row-card:hover { background: #f8fafc; }
         input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+        @media print {
+          body > * { display: none !important; }
+          #rota-print-area { display: block !important; position: fixed; top: 0; left: 0; width: 100%; padding: 24px; background: #fff; }
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+          #rota-print-area table { width: 100%; border-collapse: collapse; font-size: 11px; }
+          #rota-print-area th { background: #f1f5f9; padding: 6px 8px; text-align: left; border-bottom: 2px solid #e2e8f0; font-size: 10px; text-transform: uppercase; }
+          #rota-print-area td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+          #rota-print-area .print-header { margin-bottom: 16px; }
+        }
       `}</style>
 
       {/* Painel de configuração */}
-      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 20, marginBottom: 16 }}>
+      <div className="no-print" style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 20, marginBottom: 16 }}>
         <p style={s.labelSecao}>Rota</p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
           <div style={{ flex: 1, minWidth: 200 }}>
@@ -339,29 +371,35 @@ function AbaRota() {
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <input type="range" min={5} max={150} step={5} value={raioKm}
                 onChange={e => setRaioKm(Number(e.target.value))}
-                style={{ width: 140, accentColor: "#2563eb" }}
+                style={{ width: 120, accentColor: "#2563eb" }}
               />
               <span style={{ fontSize: 14, fontWeight: 700, color: "#2563eb", minWidth: 52 }}>{raioKm} km</span>
             </div>
           </div>
           <div>
-            <label style={s.label}>Consumo mínimo (MWh/mês)</label>
-            <input type="number" min={0} step={100} value={minConsumo}
-              onChange={e => setMinConsumo(e.target.value)}
-              placeholder="0"
-              style={{ ...s.input, width: 160 }}
-            />
+            <label style={s.label}>Consumo (MWh/mês)</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input type="number" min={0} step={100} value={minConsumo}
+                onChange={e => setMinConsumo(e.target.value)}
+                placeholder="Mín"
+                style={{ ...s.input, width: 90 }}
+              />
+              <span style={{ color: "#94a3b8", fontSize: 13 }}>—</span>
+              <input type="number" min={0} step={100} value={maxConsumo}
+                onChange={e => setMaxConsumo(e.target.value)}
+                placeholder="Máx"
+                style={{ ...s.input, width: 90 }}
+              />
+            </div>
           </div>
           <div>
             <label style={s.label}>Ramo de atividade</label>
             <input value={ramoQ} onChange={e => setRamoQ(e.target.value)}
               placeholder="ex: Metalurgia"
-              style={{ ...s.input, width: 180 }}
+              style={{ ...s.input, width: 160 }}
             />
           </div>
-          <button
-            onClick={buscarRota}
-            disabled={!podeCalcular}
+          <button onClick={buscarRota} disabled={!podeCalcular}
             style={{ ...s.btnPrimary, ...(!podeCalcular ? { opacity: 0.45, cursor: "not-allowed" } : {}) }}
           >
             {loading ? "Calculando…" : "Buscar clientes na rota"}
@@ -369,50 +407,86 @@ function AbaRota() {
         </div>
       </div>
 
-      {erro && <div style={s.errorBox}>⚠ {erro}</div>}
+      {erro && <div className="no-print" style={s.errorBox}>⚠ {erro}</div>}
 
       {/* Mapa */}
       {mapaDados && (
-        <div style={{ marginBottom: 16, borderRadius: 12, overflow: "hidden", border: "1px solid #e2e8f0" }}>
-          <MapaRota
-            rotaGeojson={mapaDados.rotaGeojson}
-            cidadesMapa={mapaDados.cidadesMapa}
-            origem={origemGeo}
-            destino={destinoGeo}
-          />
+        <div className="no-print" style={{ marginBottom: 16, borderRadius: 12, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+          <MapaRota rotaGeojson={mapaDados.rotaGeojson} cidadesMapa={mapaDados.cidadesMapa} origem={origemGeo} destino={destinoGeo} />
           <div style={{ padding: "8px 14px", background: "#f8fafc", fontSize: 11, color: "#94a3b8", display: "flex", gap: 16, flexWrap: "wrap" }}>
             <span><span style={{ color: "#2563eb" }}>━</span> Rota</span>
             <span><span style={{ color: "#16a34a", fontWeight: 700 }}>●</span> Origem</span>
             <span><span style={{ color: "#dc2626", fontWeight: 700 }}>●</span> Destino</span>
-            <span><span style={{ color: "#f59e0b", fontWeight: 700 }}>●</span> Cidade com agentes (tamanho = quantidade)</span>
-            <span><span style={{ color: "#94a3b8", fontWeight: 700 }}>●</span> Cidade sem agentes no filtro</span>
+            <span><span style={{ color: "#f59e0b", fontWeight: 700 }}>●</span> Cidades com agentes</span>
+            <span><span style={{ color: "#94a3b8", fontWeight: 700 }}>●</span> Sem agentes no filtro</span>
           </div>
         </div>
       )}
 
-      {/* Info resumo */}
-      {rotaInfo && !loading && (
-        <div style={{ display: "flex", gap: 16, marginBottom: 12, fontSize: 13, color: "#374151", flexWrap: "wrap" }}>
-          <span>🛣 <b>{rotaInfo.distanciaKm} km</b></span>
-          <span style={s.sep}>·</span>
-          <span>⏱ <b>{Math.floor(rotaInfo.duracaoMin / 60)}h{String(rotaInfo.duracaoMin % 60).padStart(2, "0")}min</b></span>
-          <span style={s.sep}>·</span>
-          <span>📍 <b>{rotaInfo.cidadesNaRota}</b> cidades no raio de {raioKm} km</span>
-          <span style={s.sep}>·</span>
-          <span><b>{resultado?.length ?? 0}</b> agentes</span>
-          <span style={s.sep}>·</span>
-          <span><b>{fmt(totalConsumo)}</b> MWh/mês</span>
+      {/* Área de resultados (também serve de print area) */}
+      <div id="rota-print-area" style={{ display: temResultado ? "block" : "none" }}>
+
+        {/* Cabeçalho visível só no PDF */}
+        <div className="print-only" style={{ display: "none" }}>
+          <div className="print-header">
+            <h2 style={{ margin: "0 0 4px", fontSize: 18, color: "#1e293b" }}>Roteiro de Visitas</h2>
+            <p style={{ margin: "0 0 2px", fontSize: 13, color: "#64748b" }}>
+              {origemQ} → {destinoQ} · Raio {raioKm} km
+            </p>
+            {rotaInfo && (
+              <p style={{ margin: "0 0 2px", fontSize: 12, color: "#94a3b8" }}>
+                Distância: {rotaInfo.distanciaKm} km · Tempo estimado: {Math.floor(rotaInfo.duracaoMin / 60)}h{String(rotaInfo.duracaoMin % 60).padStart(2, "0")}min
+              </p>
+            )}
+            <p style={{ margin: "0 0 12px", fontSize: 11, color: "#94a3b8" }}>
+              Gerado em {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })} · CCEE Monitor
+            </p>
+          </div>
         </div>
-      )}
+
+        {/* Barra de resumo + ações */}
+        {rotaInfo && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 12, fontSize: 13, color: "#374151", flexWrap: "wrap", alignItems: "center" }}>
+              <span>🛣 <b>{rotaInfo.distanciaKm} km</b></span>
+              <span style={s.sep}>·</span>
+              <span>⏱ <b>{Math.floor(rotaInfo.duracaoMin / 60)}h{String(rotaInfo.duracaoMin % 60).padStart(2, "0")}min</b></span>
+              <span style={s.sep}>·</span>
+              <span>📍 <b>{rotaInfo.cidadesNaRota}</b> cidades no raio</span>
+              <span style={s.sep}>·</span>
+              <span><b>{resultadoVis.length}</b> agentes</span>
+              {removidos.size > 0 && <span style={{ color: "#94a3b8" }}>({removidos.size} removido{removidos.size > 1 ? "s" : ""})</span>}
+              <span style={s.sep}>·</span>
+              <span><b>{fmt(totalConsumo)}</b> MWh/mês</span>
+              <span style={s.sep}>·</span>
+              <span><b>{totalParcelas.toLocaleString("pt-BR")}</b> parcelas</span>
+            </div>
+            <div className="no-print" style={{ display: "flex", gap: 8 }}>
+              {removidos.size > 0 && (
+                <button onClick={() => setRemovidos(new Set())} style={s.btnClear}>
+                  Restaurar {removidos.size} removido{removidos.size > 1 ? "s" : ""}
+                </button>
+              )}
+              <button onClick={exportarPDF} style={{ ...s.btnClear, color: "#2563eb", borderColor: "#bfdbfe", background: "#eff6ff" }}>
+                Exportar PDF
+              </button>
+            </div>
+          </div>
+        )}
+
+        {resultadoVis.length === 0 && resultado?.length > 0 ? (
+          <p style={{ color: "#94a3b8", padding: "24px 0", textAlign: "center" }}>
+            Todos os agentes foram removidos ou filtrados. Use "Restaurar" ou ajuste o filtro de consumo máximo.
+          </p>
+        ) : (
+          <TabelaAgentes agentes={resultadoVis} mostrarDist onRemover={remover} />
+        )}
+      </div>
 
       {resultado && !loading && resultado.length === 0 && (
         <p style={{ color: "#94a3b8", padding: "32px 0", textAlign: "center" }}>
           Nenhum agente no raio de {raioKm} km. Tente aumentar o raio ou reduzir o consumo mínimo.
         </p>
-      )}
-
-      {resultado && !loading && resultado.length > 0 && (
-        <TabelaAgentes agentes={resultado} mostrarDist />
       )}
 
       {!resultado && !loading && !erro && (
@@ -429,12 +503,13 @@ function AbaRota() {
 
 // ─── Tabela compartilhada ─────────────────────────────────────────────────────
 
-function TabelaAgentes({ agentes, mostrarDist }) {
+function TabelaAgentes({ agentes, mostrarDist, onRemover }) {
   return (
     <div style={s.tableWrap}>
       <table style={s.table}>
         <thead>
           <tr>
+            {onRemover && <th style={{ ...s.th, width: 32 }} className="no-print" />}
             <th style={s.th}>Agente</th>
             <th style={s.th}>Razão Social</th>
             {mostrarDist && <th style={{ ...s.th, textAlign: "center" }}>Dist. rota</th>}
@@ -448,6 +523,21 @@ function TabelaAgentes({ agentes, mostrarDist }) {
         <tbody>
           {agentes.map(a => (
             <tr key={a.agente} className="row-card" style={s.tr}>
+              {onRemover && (
+                <td style={{ ...s.td, padding: "0 4px 0 10px" }} className="no-print">
+                  <button
+                    onClick={() => onRemover(a.agente)}
+                    title="Remover da lista"
+                    style={{
+                      border: "none", background: "none", cursor: "pointer",
+                      color: "#cbd5e1", fontSize: 16, lineHeight: 1, padding: "2px 4px",
+                      borderRadius: 4, transition: "color 0.15s",
+                    }}
+                    onMouseEnter={e => e.target.style.color = "#ef4444"}
+                    onMouseLeave={e => e.target.style.color = "#cbd5e1"}
+                  >×</button>
+                </td>
+              )}
               <td style={s.td}>
                 <Link href={`/inteligencia/${encodeURIComponent(a.agente)}`} style={s.agenteLink} className="agente-link">
                   {a.sigla || a.agente}
