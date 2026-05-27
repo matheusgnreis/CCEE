@@ -337,28 +337,26 @@ function AbaRota() {
         .agente-link:hover { text-decoration: underline; }
         .row-card:hover { background: #f8fafc; }
         input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+        @page { size: A4 landscape; margin: 12mm 15mm; }
         @media print {
           body * { visibility: hidden; }
           #rota-print-area, #rota-print-area * { visibility: visible; }
           #rota-print-area {
-            position: absolute; top: 0; left: 0; width: 100%; padding: 24px; background: #fff;
+            position: absolute; top: 0; left: 0; width: 100%; padding: 16px; background: #fff;
           }
-          /* Remove scroll/clip para imprimir todas as linhas */
           #rota-print-area div {
-            max-height: none !important;
-            height: auto !important;
-            overflow: visible !important;
+            max-height: none !important; height: auto !important; overflow: visible !important;
           }
           .no-print { display: none !important; }
           .print-only { display: block !important; }
-          #rota-print-area table { width: 100%; border-collapse: collapse; font-size: 11px; }
+          #rota-print-area table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: auto; }
           #rota-print-area th {
             background: #f1f5f9 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact;
-            padding: 6px 8px; text-align: left; border-bottom: 2px solid #e2e8f0;
-            font-size: 10px; text-transform: uppercase; position: static !important;
+            padding: 5px 6px; text-align: left; border-bottom: 2px solid #e2e8f0;
+            font-size: 9px; text-transform: uppercase; position: static !important; white-space: nowrap;
           }
-          #rota-print-area td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
-          #rota-print-area .print-header { margin-bottom: 16px; }
+          #rota-print-area td { padding: 5px 6px; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
+          #rota-print-area .print-header { margin-bottom: 12px; }
           #rota-print-area tr { page-break-inside: avoid; }
         }
       `}</style>
