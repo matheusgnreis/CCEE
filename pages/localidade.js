@@ -2,6 +2,123 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 
+// ─── MultiSelect ──────────────────────────────────────────────────────────────
+
+function MultiSelect({ options, value, onChange, placeholder, width }) {
+  const [open,   setOpen]   = useState(false);
+  const [search, setSearch] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onOut(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", onOut);
+    return () => document.removeEventListener("mousedown", onOut);
+  }, []);
+
+  const filtered     = options.filter(o => o.label.toLowerCase().includes(search.toLowerCase()));
+  const allSelected  = value.length > 0 && value.length === options.length;
+  const someSelected = value.length > 0 && !allSelected;
+
+  function toggle(v) {
+    onChange(value.includes(v) ? value.filter(x => x !== v) : [...value, v]);
+  }
+  function toggleAll() {
+    onChange(allSelected ? [] : options.map(o => o.value));
+  }
+  function clear(e) { e.stopPropagation(); onChange([]); setSearch(""); }
+
+  const label = value.length === 0 ? placeholder
+    : value.length === 1 ? (options.find(o => o.value === value[0])?.label ?? value[0])
+    : `${value.length} selecionados`;
+
+  return (
+    <div ref={ref} style={{ position: "relative", minWidth: width ?? 180 }}>
+      <div
+        onClick={() => setOpen(v => !v)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "10px 14px", fontSize: 14, border: "1px solid #e2e8f0",
+          borderRadius: 8, background: "#fff", color: value.length ? "#1e293b" : "#94a3b8",
+          cursor: "pointer", userSelect: "none",
+          ...(open ? { borderColor: "#2563eb", boxShadow: "0 0 0 3px rgba(37,99,235,0.1)" } : {}),
+        }}
+      >
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {label}
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 6 }}>
+          {value.length > 0 && (
+            <span
+              onMouseDown={clear}
+              style={{ fontSize: 16, color: "#94a3b8", lineHeight: 1, cursor: "pointer", padding: "0 2px" }}
+            >×</span>
+          )}
+          <span style={{ fontSize: 10, color: "#94a3b8" }}>{open ? "▲" : "▼"}</span>
+        </span>
+      </div>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 100,
+          background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.1)", overflow: "hidden", minWidth: 220,
+        }}>
+          <div style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", display: "flex", gap: 6 }}>
+            <input
+              autoFocus
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              onClick={e => e.stopPropagation()}
+              placeholder="Buscar..."
+              style={{
+                flex: 1, padding: "6px 10px", fontSize: 13, border: "1px solid #e2e8f0",
+                borderRadius: 6, outline: "none", color: "#1e293b", background: "#f8fafc",
+              }}
+            />
+          </div>
+
+          <div style={{ maxHeight: 240, overflowY: "auto" }}>
+            <label style={ms.item}>
+              <input
+                type="checkbox" checked={allSelected}
+                ref={el => { if (el) el.indeterminate = someSelected; }}
+                onChange={toggleAll}
+                style={ms.check}
+              />
+              <span style={{ color: "#64748b", fontSize: 12, fontStyle: "italic" }}>
+                {allSelected ? "Desmarcar todos" : "Selecionar todos"}
+              </span>
+            </label>
+            <div style={{ borderBottom: "1px solid #f1f5f9" }} />
+            {filtered.length === 0 && (
+              <p style={{ margin: 0, padding: "10px 14px", fontSize: 12, color: "#94a3b8" }}>Nenhum resultado</p>
+            )}
+            {filtered.map(o => (
+              <label key={o.value} style={ms.item}>
+                <input
+                  type="checkbox" checked={value.includes(o.value)}
+                  onChange={() => toggle(o.value)}
+                  style={ms.check}
+                />
+                {o.label}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ms = {
+  item: {
+    display: "flex", alignItems: "center", gap: 8, padding: "8px 14px",
+    fontSize: 13, color: "#1e293b", cursor: "pointer",
+    transition: "background 0.1s",
+  },
+  check: { accentColor: "#2563eb", width: 15, height: 15, cursor: "pointer", flexShrink: 0 },
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 function fmt(v, dec = 2) {
@@ -22,19 +139,19 @@ const UF_NOME = {
 
 function AbaLocalidade({ opcoes }) {
   const router = useRouter();
-  const [busca,     setBusca]     = useState("");
-  const [estadoSel, setEstadoSel] = useState("");
-  const [cidadeSel, setCidadeSel] = useState("");
-  const [resultado, setResultado] = useState(null);
-  const [loading,   setLoading]   = useState(false);
-  const [erro,      setErro]      = useState(null);
+  const [busca,      setBusca]      = useState("");
+  const [estadosSel, setEstadosSel] = useState([]);
+  const [cidadesSel, setCidadesSel] = useState([]);
+  const [resultado,  setResultado]  = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [erro,       setErro]       = useState(null);
 
   useEffect(() => {
     if (!router.isReady) return;
     const { estado, cidade, q } = router.query;
-    if (estado) { setEstadoSel(estado); pesquisar({ estado }); }
-    else if (cidade) { setCidadeSel(cidade); pesquisar({ cidade }); }
-    else if (q)     { setBusca(q); pesquisar({ q }); }
+    if (estado) { const ufs = [estado]; setEstadosSel(ufs); pesquisar({ estado: ufs.join(",") }); }
+    else if (cidade) { const cs = [cidade]; setCidadesSel(cs); pesquisar({ cidade: cs.join(",") }); }
+    else if (q)      { setBusca(q); pesquisar({ q }); }
   }, [router.isReady]);
 
   async function pesquisar(params) {
@@ -52,40 +169,50 @@ function AbaLocalidade({ opcoes }) {
   }
 
   function buildParams() {
-    if (estadoSel) return { estado: estadoSel };
-    if (cidadeSel) return { cidade: cidadeSel };
-    if (busca.trim()) return { q: busca.trim() };
+    if (cidadesSel.length) return { cidade: cidadesSel.join(",") };
+    if (estadosSel.length) return { estado: estadosSel.join(",") };
+    if (busca.trim())      return { q: busca.trim() };
     return {};
   }
 
-  function onEstado(uf) {
-    setEstadoSel(uf); setCidadeSel(""); setBusca("");
-    if (uf) pesquisar({ estado: uf }); else setResultado(null);
+  function onEstados(ufs) {
+    setEstadosSel(ufs); setCidadesSel([]); setBusca("");
+    if (ufs.length) pesquisar({ estado: ufs.join(",") }); else setResultado(null);
   }
 
-  const cidadesFiltradas = estadoSel
-    ? opcoes.cidades.filter(c => c.estado_uf === estadoSel)
+  function onCidades(cs) {
+    setCidadesSel(cs);
+    if (cs.length)          pesquisar({ cidade: cs.join(",") });
+    else if (estadosSel.length) pesquisar({ estado: estadosSel.join(",") });
+    else setResultado(null);
+  }
+
+  const cidadesFiltradas = estadosSel.length
+    ? opcoes.cidades.filter(c => estadosSel.includes(c.estado_uf))
     : opcoes.cidades;
+
+  const opcoesEstados = opcoes.estados.map(uf => ({ value: uf, label: `${UF_NOME[uf] || uf} (${uf})` }));
+  const opcoesCidades = cidadesFiltradas.map(c => ({ value: c.cidade, label: c.cidade }));
 
   const totalParcelas = resultado?.reduce((s, a) => s + a.n_parcelas, 0) ?? 0;
   const totalConsumo  = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
+  const temFiltro     = estadosSel.length || cidadesSel.length || busca;
 
   return (
     <>
       <style jsx>{`
         .agente-link:hover { text-decoration: underline; }
         .row-card:hover { background: #f8fafc; }
-        select:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
-        input:focus  { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+        input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
       `}</style>
 
       {/* Filtros */}
       <div style={{ display: "flex", gap: 8, marginBottom: 24, alignItems: "center", flexWrap: "wrap" }}>
-        <form onSubmit={e => { e.preventDefault(); setEstadoSel(""); setCidadeSel(""); pesquisar({ q: busca.trim() }); }}
+        <form onSubmit={e => { e.preventDefault(); setEstadosSel([]); setCidadesSel([]); pesquisar({ q: busca.trim() }); }}
               style={{ display: "flex", gap: 8, flex: 1, minWidth: 220 }}>
           <input
             value={busca}
-            onChange={e => { setBusca(e.target.value); setEstadoSel(""); setCidadeSel(""); }}
+            onChange={e => { setBusca(e.target.value); setEstadosSel([]); setCidadesSel([]); }}
             placeholder="Buscar por cidade, ramo de atividade..."
             style={s.input}
           />
@@ -94,22 +221,26 @@ function AbaLocalidade({ opcoes }) {
           </button>
         </form>
 
-        <select value={estadoSel} onChange={e => onEstado(e.target.value)} style={s.select}>
-          <option value="">Estado...</option>
-          {opcoes.estados.map(uf => (
-            <option key={uf} value={uf}>{UF_NOME[uf] || uf} ({uf})</option>
-          ))}
-        </select>
+        <MultiSelect
+          options={opcoesEstados}
+          value={estadosSel}
+          onChange={onEstados}
+          placeholder="Estado..."
+          width={220}
+        />
 
-        {estadoSel && cidadesFiltradas.length > 0 && (
-          <select value={cidadeSel} onChange={e => { setCidadeSel(e.target.value); pesquisar(e.target.value ? { cidade: e.target.value } : { estado: estadoSel }); }} style={s.select}>
-            <option value="">Todas as cidades</option>
-            {cidadesFiltradas.map(c => <option key={c.cidade} value={c.cidade}>{c.cidade}</option>)}
-          </select>
+        {estadosSel.length > 0 && opcoesCidades.length > 0 && (
+          <MultiSelect
+            options={opcoesCidades}
+            value={cidadesSel}
+            onChange={onCidades}
+            placeholder="Todas as cidades"
+            width={220}
+          />
         )}
 
-        {(estadoSel || cidadeSel || busca) && (
-          <button onClick={() => { setEstadoSel(""); setCidadeSel(""); setBusca(""); setResultado(null); }} style={s.btnClear}>
+        {temFiltro && (
+          <button onClick={() => { setEstadosSel([]); setCidadesSel([]); setBusca(""); setResultado(null); }} style={s.btnClear}>
             Limpar
           </button>
         )}

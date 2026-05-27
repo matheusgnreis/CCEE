@@ -2982,25 +2982,29 @@ app.post("/admin/cleanup-jobs", async (_req, res) => {
 });
 
 // GET /localidade — agentes com cargas numa cidade ou estado
-// Query: ?cidade=SAO+PAULO  |  ?estado=SP  |  ?q=termo (busca livre em cidade+estado+ramo)
+// Query: ?cidade=SAO+PAULO,UBERLANDIA  |  ?estado=SP,MG  |  ?q=termo (busca livre em cidade+estado+ramo)
 app.get("/localidade", async (req, res) => {
   const { cidade, estado, q } = req.query;
   if (!cidade && !estado && !q)
     return res.status(400).json({ error: "Informe cidade, estado ou q" });
 
+  // Suporta múltiplos valores separados por vírgula
+  const estados = estado ? estado.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) : [];
+  const cidades = cidade ? cidade.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) : [];
+
   try {
     const conds  = [];
     const params = [];
 
-    if (estado) {
-      params.push(estado.trim().toUpperCase());
-      conds.push(`c.estado_uf = $${params.length}`);
+    if (estados.length) {
+      params.push(estados);
+      conds.push(`c.estado_uf = ANY($${params.length}::varchar[])`);
     }
-    if (cidade) {
-      params.push(`%${cidade.trim().toUpperCase()}%`);
-      conds.push(`UPPER(c.cidade) LIKE $${params.length}`);
+    if (cidades.length) {
+      params.push(cidades);
+      conds.push(`UPPER(c.cidade) = ANY($${params.length}::varchar[])`);
     }
-    if (q && !cidade && !estado) {
+    if (q && !cidades.length && !estados.length) {
       const termo = `%${q.trim().toUpperCase()}%`;
       params.push(termo);
       conds.push(`(UPPER(c.cidade) LIKE $${params.length} OR UPPER(c.estado_uf) LIKE $${params.length} OR UPPER(c.ramo_atividade) LIKE $${params.length})`);
