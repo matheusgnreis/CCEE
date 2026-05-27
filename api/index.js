@@ -3263,7 +3263,33 @@ app.post("/localidade/rota", async (req, res) => {
 
     const agentes = Object.values(porAgente).sort((a, b) => b.consumo_medio_mwh - a.consumo_medio_mwh);
 
-    res.json({ agentes, distanciaKm, duracaoMin, raioKm, cidadesNaRota: cidadesNaRota.length });
+    // Conta agentes por cidade para dimensionar os marcadores no mapa
+    const agentesPerCidade = {};
+    for (const ag of agentes) {
+      for (const loc of ag.localidades) {
+        const key = `${loc.cidade}|${loc.estado_uf}`;
+        agentesPerCidade[key] = (agentesPerCidade[key] || 0) + 1;
+      }
+    }
+
+    const cidadesMapa = cidadesNaRota.map(c => ({
+      cidade:    c.cidade,
+      estado_uf: c.estado_uf,
+      lat:       c.lat,
+      lon:       c.lon,
+      distKm:    Math.round(c.distKm * 10) / 10,
+      nAgentes:  agentesPerCidade[`${c.cidade}|${c.estado_uf}`] || 0,
+    }));
+
+    res.json({
+      agentes,
+      distanciaKm,
+      duracaoMin,
+      raioKm,
+      cidadesNaRota: cidadesNaRota.length,
+      rotaGeojson:   rotaOSRM.geometry,   // { type: "LineString", coordinates: [[lon,lat],...] }
+      cidadesMapa,
+    });
   } catch (e) {
     console.error("[localidade/rota]", e.message);
     res.status(500).json({ error: e.message });

@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
+import dynamic from "next/dynamic";
 import MultiSelect from "../components/MultiSelect";
+
+const MapaRota = dynamic(() => import("../components/MapaRota"), { ssr: false });
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
@@ -158,6 +161,113 @@ function AbaLocalidade({ opcoes }) {
   );
 }
 
+// ─── GeoInput com autocomplete ────────────────────────────────────────────────
+
+function GeoInput({ q, setQ, geo, setGeo, placeholder }) {
+  const [sugestoes,  setSugestoes]  = useState([]);
+  const [showDrop,   setShowDrop]   = useState(false);
+  const [loadingAC,  setLoadingAC]  = useState(false);
+  const debounceRef = useRef(null);
+  const wrapRef     = useRef(null);
+
+  useEffect(() => {
+    function onOut(e) { if (wrapRef.current && !wrapRef.current.contains(e.target)) setShowDrop(false); }
+    document.addEventListener("mousedown", onOut);
+    return () => document.removeEventListener("mousedown", onOut);
+  }, []);
+
+  function handleChange(v) {
+    setQ(v); setGeo(null);
+    clearTimeout(debounceRef.current);
+    if (v.trim().length < 2) { setSugestoes([]); setShowDrop(false); return; }
+    debounceRef.current = setTimeout(async () => {
+      setLoadingAC(true);
+      try {
+        const r = await fetch(`${API_URL}/geocode?q=${encodeURIComponent(v)}`);
+        const d = await r.json();
+        if (!d.error && d.length) { setSugestoes(d); setShowDrop(true); }
+        else { setSugestoes([]); }
+      } catch {}
+      finally { setLoadingAC(false); }
+    }, 400);
+  }
+
+  function selecionar(item) {
+    const label = item.nome.split(",").slice(0, 2).join(",").trim();
+    setQ(label); setGeo(item); setSugestoes([]); setShowDrop(false);
+  }
+
+  async function confirmar() {
+    if (!q.trim() || geo) return;
+    setLoadingAC(true);
+    try {
+      const r = await fetch(`${API_URL}/geocode?q=${encodeURIComponent(q)}`);
+      const d = await r.json();
+      if (!d.error && d.length) selecionar(d[0]);
+    } catch {}
+    finally { setLoadingAC(false); }
+  }
+
+  const borderColor = geo ? "#16a34a" : q.trim() ? "#f59e0b" : "#e2e8f0";
+  const bg          = geo ? "#f0fdf4" : "#fff";
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", flex: 1, minWidth: 200 }}>
+      <form onSubmit={e => { e.preventDefault(); confirmar(); }} style={{ display: "flex", gap: 6 }}>
+        <input
+          value={q}
+          onChange={e => handleChange(e.target.value)}
+          onBlur={confirmar}
+          placeholder={placeholder}
+          style={{ ...s.input, flex: 1, borderColor, background: bg }}
+          autoComplete="off"
+        />
+        <button type="submit" style={s.btnSm} disabled={loadingAC || !q.trim()}>
+          {loadingAC ? "…" : geo ? "✓" : "↵"}
+        </button>
+      </form>
+
+      {geo && (
+        <p style={s.geoLabel}>✅ {q}</p>
+      )}
+      {!geo && q.trim() && !loadingAC && (
+        <p style={{ ...s.geoLabel, color: "#f59e0b" }}>
+          {showDrop ? "Selecione uma sugestão ou pressione ↵" : "Pressione ↵ para confirmar"}
+        </p>
+      )}
+
+      {showDrop && sugestoes.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 300,
+          background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.12)", overflow: "hidden",
+        }}>
+          {sugestoes.map((item, i) => {
+            const partes = item.nome.split(",").map(p => p.trim());
+            const titulo = partes.slice(0, 2).join(", ");
+            const detalhe = partes.slice(2, 4).join(", ");
+            return (
+              <button
+                key={i}
+                onMouseDown={() => selecionar(item)}
+                style={{
+                  display: "block", width: "100%", textAlign: "left",
+                  padding: "9px 14px", fontSize: 13, border: "none",
+                  background: "transparent", cursor: "pointer",
+                  borderBottom: i < sugestoes.length - 1 ? "1px solid #f1f5f9" : "none",
+                }}
+              >
+                <span style={{ color: "#1e293b", fontWeight: 500 }}>{titulo}</span>
+                {detalhe && <span style={{ color: "#94a3b8", fontSize: 11, marginLeft: 6 }}>{detalhe}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Aba: Por Rota ────────────────────────────────────────────────────────────
 
 function AbaRota() {
@@ -171,33 +281,12 @@ function AbaRota() {
 
   const [resultado,  setResultado]  = useState(null);
   const [rotaInfo,   setRotaInfo]   = useState(null);
+  const [mapaDados,  setMapaDados]  = useState(null);
   const [loading,    setLoading]    = useState(false);
-  const [loadingGeo, setLoadingGeo] = useState({ origem: false, destino: false });
   const [erro,       setErro]       = useState(null);
 
-  async function geocodar(q, tipo) {
-    if (!q.trim()) return;
-    setLoadingGeo(p => ({ ...p, [tipo]: true }));
-    try {
-      const r = await fetch(`${API_URL}/geocode?q=${encodeURIComponent(q)}`);
-      const d = await r.json();
-      if (d.error) throw new Error(d.error);
-      if (!d.length) throw new Error("Localidade não encontrada. Tente incluir o estado, ex: 'Uberlândia MG'");
-      if (tipo === "origem")  setOrigemGeo(d[0]);
-      else                    setDestinoGeo(d[0]);
-    } catch (e) {
-      setErro(e.message);
-    } finally {
-      setLoadingGeo(p => ({ ...p, [tipo]: false }));
-    }
-  }
-
   async function buscarRota() {
-    if (!origemGeo || !destinoGeo) {
-      setErro("Geocodifique a origem e o destino primeiro (pressione Enter nos campos).");
-      return;
-    }
-    setLoading(true); setErro(null); setResultado(null); setRotaInfo(null);
+    setLoading(true); setErro(null); setResultado(null); setRotaInfo(null); setMapaDados(null);
     try {
       const r = await fetch(`${API_URL}/localidade/rota`, {
         method:  "POST",
@@ -212,126 +301,68 @@ function AbaRota() {
       if (d.error) throw new Error(d.error);
       setResultado(d.agentes);
       setRotaInfo({ distanciaKm: d.distanciaKm, duracaoMin: d.duracaoMin, cidadesNaRota: d.cidadesNaRota });
+      setMapaDados({ rotaGeojson: d.rotaGeojson, cidadesMapa: d.cidadesMapa });
     } catch (e) { setErro(e.message); }
     finally { setLoading(false); }
   }
 
-  const totalConsumo = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
+  const totalConsumo  = resultado?.reduce((s, a) => s + a.consumo_medio_mwh, 0) ?? 0;
+  const podeCalcular  = !!origemGeo && !!destinoGeo && !loading;
 
   return (
     <>
       <style jsx>{`
-        input:focus  { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
-        .geocoded { border-color: #16a34a !important; background: #f0fdf4 !important; }
         .agente-link:hover { text-decoration: underline; }
-        .row-card:hover { background: #f8fafc; }
+        .row-card:hover     { background: #f8fafc; }
+        input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
       `}</style>
 
-      {/* Rota */}
+      {/* Painel de configuração */}
       <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 20, marginBottom: 16 }}>
         <p style={s.labelSecao}>Rota</p>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-          {/* Origem */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
           <div style={{ flex: 1, minWidth: 200 }}>
             <label style={s.label}>Origem</label>
-            <form onSubmit={e => { e.preventDefault(); geocodar(origemQ, "origem"); }} style={{ display: "flex", gap: 6 }}>
-              <input
-                value={origemQ}
-                onChange={e => { setOrigemQ(e.target.value); setOrigemGeo(null); }}
-                onBlur={() => { if (origemQ.trim() && !origemGeo) geocodar(origemQ, "origem"); }}
-                placeholder="ex: Belo Horizonte MG"
-                style={{
-                  ...s.input, flex: 1,
-                  ...(origemGeo          ? { borderColor: "#16a34a", background: "#f0fdf4" }
-                    : origemQ.trim()     ? { borderColor: "#f59e0b" }
-                    : {}),
-                }}
-              />
-              <button type="submit" style={s.btnSm} disabled={loadingGeo.origem || !origemQ.trim()}>
-                {loadingGeo.origem ? "…" : "↵"}
-              </button>
-            </form>
-            {origemGeo
-              ? <p style={s.geoLabel}>✅ {origemGeo.nome.split(",").slice(0, 2).join(",")}</p>
-              : origemQ.trim() && !loadingGeo.origem
-                ? <p style={{ ...s.geoLabel, color: "#f59e0b" }}>Clique em ↵ ou saia do campo para confirmar</p>
-                : null
-            }
+            <GeoInput q={origemQ} setQ={setOrigemQ} geo={origemGeo} setGeo={setOrigemGeo} placeholder="ex: Belo Horizonte MG" />
           </div>
-
           <div style={{ display: "flex", alignItems: "center", paddingTop: 20, color: "#94a3b8", fontSize: 20 }}>→</div>
-
-          {/* Destino */}
           <div style={{ flex: 1, minWidth: 200 }}>
             <label style={s.label}>Destino</label>
-            <form onSubmit={e => { e.preventDefault(); geocodar(destinoQ, "destino"); }} style={{ display: "flex", gap: 6 }}>
-              <input
-                value={destinoQ}
-                onChange={e => { setDestinoQ(e.target.value); setDestinoGeo(null); }}
-                onBlur={() => { if (destinoQ.trim() && !destinoGeo) geocodar(destinoQ, "destino"); }}
-                placeholder="ex: Uberlândia MG"
-                style={{
-                  ...s.input, flex: 1,
-                  ...(destinoGeo         ? { borderColor: "#16a34a", background: "#f0fdf4" }
-                    : destinoQ.trim()    ? { borderColor: "#f59e0b" }
-                    : {}),
-                }}
-              />
-              <button type="submit" style={s.btnSm} disabled={loadingGeo.destino || !destinoQ.trim()}>
-                {loadingGeo.destino ? "…" : "↵"}
-              </button>
-            </form>
-            {destinoGeo
-              ? <p style={s.geoLabel}>✅ {destinoGeo.nome.split(",").slice(0, 2).join(",")}</p>
-              : destinoQ.trim() && !loadingGeo.destino
-                ? <p style={{ ...s.geoLabel, color: "#f59e0b" }}>Clique em ↵ ou saia do campo para confirmar</p>
-                : null
-            }
+            <GeoInput q={destinoQ} setQ={setDestinoQ} geo={destinoGeo} setGeo={setDestinoGeo} placeholder="ex: Uberlândia MG" />
           </div>
         </div>
 
-        {/* Filtros */}
-        <p style={{ ...s.labelSecao, marginTop: 16 }}>Filtros</p>
+        <p style={{ ...s.labelSecao, marginTop: 4 }}>Filtros</p>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div>
             <label style={s.label}>Raio da rota</label>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                type="range" min={5} max={150} step={5} value={raioKm}
+              <input type="range" min={5} max={150} step={5} value={raioKm}
                 onChange={e => setRaioKm(Number(e.target.value))}
                 style={{ width: 140, accentColor: "#2563eb" }}
               />
               <span style={{ fontSize: 14, fontWeight: 700, color: "#2563eb", minWidth: 52 }}>{raioKm} km</span>
             </div>
           </div>
-
           <div>
             <label style={s.label}>Consumo mínimo (MWh/mês)</label>
-            <input
-              type="number" min={0} step={100} value={minConsumo}
+            <input type="number" min={0} step={100} value={minConsumo}
               onChange={e => setMinConsumo(e.target.value)}
               placeholder="0"
               style={{ ...s.input, width: 160 }}
             />
           </div>
-
           <div>
             <label style={s.label}>Ramo de atividade</label>
-            <input
-              value={ramoQ}
-              onChange={e => setRamoQ(e.target.value)}
+            <input value={ramoQ} onChange={e => setRamoQ(e.target.value)}
               placeholder="ex: Metalurgia"
               style={{ ...s.input, width: 180 }}
             />
           </div>
-
           <button
             onClick={buscarRota}
-            disabled={loading || !origemGeo || !destinoGeo}
-            style={{
-              ...s.btnPrimary,
-              ...((loading || !origemGeo || !destinoGeo) ? { opacity: 0.45, cursor: "not-allowed" } : {}),
-            }}
+            disabled={!podeCalcular}
+            style={{ ...s.btnPrimary, ...(!podeCalcular ? { opacity: 0.45, cursor: "not-allowed" } : {}) }}
           >
             {loading ? "Calculando…" : "Buscar clientes na rota"}
           </button>
@@ -340,24 +371,43 @@ function AbaRota() {
 
       {erro && <div style={s.errorBox}>⚠ {erro}</div>}
 
-      {/* Info da rota */}
+      {/* Mapa */}
+      {mapaDados && (
+        <div style={{ marginBottom: 16, borderRadius: 12, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+          <MapaRota
+            rotaGeojson={mapaDados.rotaGeojson}
+            cidadesMapa={mapaDados.cidadesMapa}
+            origem={origemGeo}
+            destino={destinoGeo}
+          />
+          <div style={{ padding: "8px 14px", background: "#f8fafc", fontSize: 11, color: "#94a3b8", display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <span><span style={{ color: "#2563eb" }}>━</span> Rota</span>
+            <span><span style={{ color: "#16a34a", fontWeight: 700 }}>●</span> Origem</span>
+            <span><span style={{ color: "#dc2626", fontWeight: 700 }}>●</span> Destino</span>
+            <span><span style={{ color: "#f59e0b", fontWeight: 700 }}>●</span> Cidade com agentes (tamanho = quantidade)</span>
+            <span><span style={{ color: "#94a3b8", fontWeight: 700 }}>●</span> Cidade sem agentes no filtro</span>
+          </div>
+        </div>
+      )}
+
+      {/* Info resumo */}
       {rotaInfo && !loading && (
         <div style={{ display: "flex", gap: 16, marginBottom: 12, fontSize: 13, color: "#374151", flexWrap: "wrap" }}>
-          <span>🛣 <b>{rotaInfo.distanciaKm} km</b> de rota</span>
+          <span>🛣 <b>{rotaInfo.distanciaKm} km</b></span>
           <span style={s.sep}>·</span>
-          <span>⏱ <b>{Math.floor(rotaInfo.duracaoMin / 60)}h{String(rotaInfo.duracaoMin % 60).padStart(2, "0")}min</b> estimado</span>
+          <span>⏱ <b>{Math.floor(rotaInfo.duracaoMin / 60)}h{String(rotaInfo.duracaoMin % 60).padStart(2, "0")}min</b></span>
           <span style={s.sep}>·</span>
           <span>📍 <b>{rotaInfo.cidadesNaRota}</b> cidades no raio de {raioKm} km</span>
           <span style={s.sep}>·</span>
-          <span><b>{resultado?.length ?? 0}</b> agentes encontrados</span>
+          <span><b>{resultado?.length ?? 0}</b> agentes</span>
           <span style={s.sep}>·</span>
-          <span><b>{fmt(totalConsumo)}</b> MWh consumo médio/mês</span>
+          <span><b>{fmt(totalConsumo)}</b> MWh/mês</span>
         </div>
       )}
 
       {resultado && !loading && resultado.length === 0 && (
         <p style={{ color: "#94a3b8", padding: "32px 0", textAlign: "center" }}>
-          Nenhum agente encontrado no raio de {raioKm} km da rota. Tente aumentar o raio ou reduzir o consumo mínimo.
+          Nenhum agente no raio de {raioKm} km. Tente aumentar o raio ou reduzir o consumo mínimo.
         </p>
       )}
 
@@ -369,10 +419,7 @@ function AbaRota() {
         <div style={s.emptyState}>
           <p style={{ fontSize: 32, margin: "0 0 12px" }}>🗺</p>
           <p style={{ margin: 0, color: "#64748b" }}>
-            Digite a origem e o destino, ajuste o raio e clique em "Buscar clientes na rota".
-          </p>
-          <p style={{ margin: "8px 0 0", color: "#94a3b8", fontSize: 12 }}>
-            Antes da primeira busca, execute: <code>node scripts/geocodificar-cidades.js</code>
+            Digite origem e destino — use as sugestões ou pressione ↵ para confirmar.
           </p>
         </div>
       )}
