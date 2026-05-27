@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
+import MultiSelect from "../../components/MultiSelect";
 import {
   LineChart, AreaChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine
@@ -913,34 +914,19 @@ export default function AgenteDashboard() {
 
             {/* Filtros */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-              {/* Pills de estado — clique para selecionar/desselecionar múltiplos */}
-              {todosEstados.length > 1 && (() => {
-                const estados = todosEstados;
-                return (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                    <span style={{ fontSize: 12, color: "#94a3b8", marginRight: 4 }}>Estado:</span>
-                    {estados.map(e => {
-                      const ativo = filtroEstados.includes(e);
-                      return (
-                        <button key={e} onClick={() => setFiltroEstados(prev =>
-                          prev.includes(e) ? prev.filter(x => x !== e) : [...prev, e]
-                        )} style={{
-                          padding: "3px 10px", fontSize: 12, fontWeight: 600, borderRadius: 20, cursor: "pointer",
-                          border: `1px solid ${ativo ? "#2563eb" : "#e2e8f0"}`,
-                          background: ativo ? "#2563eb" : "#f8fafc",
-                          color: ativo ? "#fff" : "#64748b",
-                          transition: "all 0.15s",
-                        }}>{e}</button>
-                      );
-                    })}
-                    {filtroEstados.length > 0 && (
-                      <button onClick={() => setFiltroEstados([])} style={{
-                        fontSize: 11, color: "#94a3b8", background: "none", border: "none", cursor: "pointer", padding: "3px 6px",
-                      }}>limpar</button>
-                    )}
-                  </div>
-                );
-              })()}
+              {/* MultiSelect de estado */}
+              {todosEstados.length > 1 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12, color: "#94a3b8", whiteSpace: "nowrap" }}>Estado:</span>
+                  <MultiSelect
+                    options={todosEstados.map(e => ({ value: e, label: e }))}
+                    value={filtroEstados}
+                    onChange={setFiltroEstados}
+                    placeholder="Todos os estados"
+                    width={200}
+                  />
+                </div>
+              )}
 
               {/* Outros filtros em linha */}
               <div style={s.filtros}>
@@ -1563,7 +1549,7 @@ export default function AgenteDashboard() {
             </div>
 
             {contabilizacao.length > 0 && (
-              <div style={{ overflowX: "auto" }}>
+              <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 400 }}>
                 <table style={s.tabelaSimples}>
                   <thead>
                     <tr>
@@ -1670,6 +1656,6 @@ const s = {
   csvBtn:    { fontSize: 11, fontWeight: 600, color: "#2563eb", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, padding: "3px 8px", textDecoration: "none", whiteSpace: "nowrap" },
 
   tabelaSimples: { width: "100%", borderCollapse: "collapse", fontSize: 12 },
-  thSimples:     { padding: "8px 10px", textAlign: "right", background: "#f8fafc", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "2px solid #e2e8f0", fontSize: 11 },
+  thSimples:     { padding: "8px 10px", textAlign: "right", background: "#f8fafc", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "2px solid #e2e8f0", fontSize: 11, position: "sticky", top: 0, zIndex: 1 },
   tdSimples:     { padding: "8px 10px", color: "#374151", borderBottom: "1px solid #f1f5f9", whiteSpace: "nowrap", fontSize: 12 },
 };
