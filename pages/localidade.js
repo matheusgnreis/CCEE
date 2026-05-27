@@ -338,8 +338,9 @@ function AbaRota() {
         .row-card:hover { background: #f8fafc; }
         input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
         @media print {
-          body > * { display: none !important; }
-          #rota-print-area { display: block !important; position: fixed; top: 0; left: 0; width: 100%; padding: 24px; background: #fff; }
+          body * { visibility: hidden; }
+          #rota-print-area, #rota-print-area * { visibility: visible; }
+          #rota-print-area { position: fixed; top: 0; left: 0; width: 100%; padding: 24px; background: #fff; }
           .no-print { display: none !important; }
           .print-only { display: block !important; }
           #rota-print-area table { width: 100%; border-collapse: collapse; font-size: 11px; }
