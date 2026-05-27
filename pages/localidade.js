@@ -238,14 +238,25 @@ function AbaRota() {
               <input
                 value={origemQ}
                 onChange={e => { setOrigemQ(e.target.value); setOrigemGeo(null); }}
+                onBlur={() => { if (origemQ.trim() && !origemGeo) geocodar(origemQ, "origem"); }}
                 placeholder="ex: Belo Horizonte MG"
-                style={{ ...s.input, flex: 1, ...(origemGeo ? { borderColor: "#16a34a", background: "#f0fdf4" } : {}) }}
+                style={{
+                  ...s.input, flex: 1,
+                  ...(origemGeo          ? { borderColor: "#16a34a", background: "#f0fdf4" }
+                    : origemQ.trim()     ? { borderColor: "#f59e0b" }
+                    : {}),
+                }}
               />
               <button type="submit" style={s.btnSm} disabled={loadingGeo.origem || !origemQ.trim()}>
-                {loadingGeo.origem ? "..." : "↵"}
+                {loadingGeo.origem ? "…" : "↵"}
               </button>
             </form>
-            {origemGeo && <p style={s.geoLabel}>✅ {origemGeo.nome.split(",").slice(0, 2).join(",")}</p>}
+            {origemGeo
+              ? <p style={s.geoLabel}>✅ {origemGeo.nome.split(",").slice(0, 2).join(",")}</p>
+              : origemQ.trim() && !loadingGeo.origem
+                ? <p style={{ ...s.geoLabel, color: "#f59e0b" }}>Clique em ↵ ou saia do campo para confirmar</p>
+                : null
+            }
           </div>
 
           <div style={{ display: "flex", alignItems: "center", paddingTop: 20, color: "#94a3b8", fontSize: 20 }}>→</div>
@@ -257,14 +268,25 @@ function AbaRota() {
               <input
                 value={destinoQ}
                 onChange={e => { setDestinoQ(e.target.value); setDestinoGeo(null); }}
+                onBlur={() => { if (destinoQ.trim() && !destinoGeo) geocodar(destinoQ, "destino"); }}
                 placeholder="ex: Uberlândia MG"
-                style={{ ...s.input, flex: 1, ...(destinoGeo ? { borderColor: "#16a34a", background: "#f0fdf4" } : {}) }}
+                style={{
+                  ...s.input, flex: 1,
+                  ...(destinoGeo         ? { borderColor: "#16a34a", background: "#f0fdf4" }
+                    : destinoQ.trim()    ? { borderColor: "#f59e0b" }
+                    : {}),
+                }}
               />
               <button type="submit" style={s.btnSm} disabled={loadingGeo.destino || !destinoQ.trim()}>
-                {loadingGeo.destino ? "..." : "↵"}
+                {loadingGeo.destino ? "…" : "↵"}
               </button>
             </form>
-            {destinoGeo && <p style={s.geoLabel}>✅ {destinoGeo.nome.split(",").slice(0, 2).join(",")}</p>}
+            {destinoGeo
+              ? <p style={s.geoLabel}>✅ {destinoGeo.nome.split(",").slice(0, 2).join(",")}</p>
+              : destinoQ.trim() && !loadingGeo.destino
+                ? <p style={{ ...s.geoLabel, color: "#f59e0b" }}>Clique em ↵ ou saia do campo para confirmar</p>
+                : null
+            }
           </div>
         </div>
 
@@ -303,8 +325,15 @@ function AbaRota() {
             />
           </div>
 
-          <button onClick={buscarRota} style={s.btnPrimary} disabled={loading || !origemGeo || !destinoGeo}>
-            {loading ? "Calculando..." : "Buscar clientes na rota"}
+          <button
+            onClick={buscarRota}
+            disabled={loading || !origemGeo || !destinoGeo}
+            style={{
+              ...s.btnPrimary,
+              ...((loading || !origemGeo || !destinoGeo) ? { opacity: 0.45, cursor: "not-allowed" } : {}),
+            }}
+          >
+            {loading ? "Calculando…" : "Buscar clientes na rota"}
           </button>
         </div>
       </div>
