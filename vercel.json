@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/inteligencia/:agente", "destination": "/inteligencia/shell" }
+  ]
+}
