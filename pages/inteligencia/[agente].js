@@ -82,14 +82,9 @@ function fmt(v) {
 
 export default function AgenteDashboard() {
   const router = useRouter();
-  const [agente, setAgente] = useState(null);
-  useEffect(() => {
-    const match = window.location.pathname.match(/\/inteligencia\/(.+)/);
-    const fromPath = match ? decodeURIComponent(match[1]) : "";
-    const name = (fromPath && fromPath !== "shell") ? fromPath
-      : router.query.agente ? decodeURIComponent(router.query.agente) : null;
-    if (name) setAgente(name);
-  }, [router.isReady]);
+  const agente = router.query.agente
+    ? decodeURIComponent(router.query.agente)
+    : null;
 
   const [historico,      setHistorico]      = useState([]);
   const [dadosMes,       setDadosMes]       = useState(null);
@@ -1769,13 +1764,3 @@ const s = {
   thSimples:     { padding: "8px 10px", textAlign: "right", background: "#f8fafc", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "2px solid #e2e8f0", fontSize: 11, position: "sticky", top: 0, zIndex: 1 },
   tdSimples:     { padding: "8px 10px", color: "#374151", borderBottom: "1px solid #f1f5f9", whiteSpace: "nowrap", fontSize: 12 },
 };
-
-// Static export: gera um shell para a rota dinâmica.
-// O vercel.json redireciona /inteligencia/* para este shell;
-// o router client-side lê o agente real da URL após hidratação.
-export function getStaticPaths() {
-  return { paths: [{ params: { agente: "shell" } }], fallback: false };
-}
-export function getStaticProps() {
-  return { props: {} };
-}
