@@ -99,6 +99,7 @@ export default function Home() {
           </span>
           <Link href="/localidade" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}>Localidades →</Link>
           <Link href="/modulacao" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}>Modulação →</Link>
+          <Link href="/mercado" style={{ fontSize: 13, color: "#2563eb", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}>Mercado →</Link>
         </div>
       </nav>
 

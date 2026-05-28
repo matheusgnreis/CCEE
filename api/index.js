@@ -13,7 +13,10 @@ const { buscarContabilizacao }    = require("./ccee-abertos/contabilizacao");
 const { buscarMesRecente }        = require("./ccee-abertos/mcp");
 const { buscarDesligamento }      = require("./ccee-abertos/desligamento");
 const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require("./ccee-abertos/consumo-horario");
-const { buscarPldHorario, buscarPldHorarioMapa } = require("./ccee-abertos/pld-horario");
+const { buscarPldHorario, buscarPldHorarioMapa, anosDisponiveis: anosDisponiveisPld } = require("./ccee-abertos/pld-horario");
+const { buscarEssMensal }         = require("./ccee-abertos/encargos-ess");
+const { buscarEerMensal }         = require("./ccee-abertos/encargos-eer");
+const { normalizarMes, fetchTodasPaginasSql } = require("./ccee-abertos/utils");
 const { limparJobsTravados }      = require("./cleanup-jobs");
 const cron                        = require("node-cron");
 
@@ -3459,6 +3462,169 @@ app.get("/pld/resumo", async (_req, res) => {
     });
   } catch (e) {
     console.error("Erro em /pld/resumo:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Mercado: PLD histórico mensal ───────────────────────────────────────────
+
+// IDs do PLD horário — mesmos do pld-horario.js mas referenciados aqui para SQL direto
+const PLD_SQL_IDS = {
+  v2: { 2025: "2a180a6b-f092-43eb-9f82-a48798b803dc", 2026: "3f279d6b-1069-42f7-9b0a-217b084729c4" },
+  v1: { 2025: "7267ead9-6039-4ce1-93f3-3471ae33bd98", 2026: "554cc6f2-9f1e-4163-8a04-573b4aafcbc1" },
+};
+
+const SUB_ABBR = { SUDESTE: "SE", "SE/CO": "SE", SUL: "S", NORDESTE: "NE", NORTE: "N" };
+
+let _pldMensalCache = { data: null, ts: 0 };
+const PLD_MENSAL_TTL = 2 * 60 * 60 * 1000;
+
+async function buscarPldMensal() {
+  const agora = Date.now();
+  if (_pldMensalCache.data && agora - _pldMensalCache.ts < PLD_MENSAL_TTL) return _pldMensalCache.data;
+
+  const anoAtual = new Date().getFullYear();
+  const anos     = [anoAtual - 1, anoAtual].filter(a => PLD_SQL_IDS.v2[a] || PLD_SQL_IDS.v1[a]);
+  const porMes   = {};
+
+  for (const ano of anos) {
+    const id    = PLD_SQL_IDS.v2[ano] || PLD_SQL_IDS.v1[ano];
+    const campo = PLD_SQL_IDS.v2[ano] ? "PLD_HORA" : "PLD";
+    const sql   = `SELECT "MES_REFERENCIA", "SUBMERCADO", AVG("${campo}"::numeric) AS "pld_medio", COUNT(*) AS "n_periodos" FROM "${id}" GROUP BY "MES_REFERENCIA", "SUBMERCADO" ORDER BY "MES_REFERENCIA", "SUBMERCADO"`;
+    try {
+      console.log(`[pld-mensal] Buscando médias ${ano} (campo=${campo})...`);
+      const rows = await fetchTodasPaginasSql(sql);
+      for (const r of rows) {
+        const mes = normalizarMes(r.MES_REFERENCIA ?? r.mes_referencia);
+        if (!mes) continue;
+        const subRaw = (r.SUBMERCADO ?? r.submercado ?? "").trim().toUpperCase();
+        const sub    = SUB_ABBR[subRaw] || subRaw;
+        if (!sub) continue;
+        if (!porMes[mes]) porMes[mes] = {};
+        const v = parseFloat(r.pld_medio ?? r.PLDmedio ?? 0);
+        if (!isNaN(v)) porMes[mes][sub] = Math.round(v * 100) / 100;
+      }
+      console.log(`[pld-mensal] ${rows.length} combinações para ${ano}`);
+    } catch (err) {
+      console.warn(`[pld-mensal] Falha ${ano}: ${err.message}`);
+    }
+  }
+
+  const data = Object.entries(porMes)
+    .map(([mes, subs]) => ({ mes, ...subs }))
+    .sort((a, b) => a.mes.localeCompare(b.mes));
+
+  if (data.length > 0) _pldMensalCache = { data, ts: agora };
+  return data;
+}
+
+// GET /mercado/pld — médias mensais de PLD por submercado (últimos 2 anos)
+app.get("/mercado/pld", async (_req, res) => {
+  try {
+    const dados = await buscarPldMensal();
+    return res.json(dados);
+  } catch (e) {
+    console.error("[mercado/pld] Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Mercado: Encargos ESS e EER ──────────────────────────────────────────────
+
+let _encargosCache = { data: null, ts: 0 };
+const ENCARGOS_TTL = 2 * 60 * 60 * 1000;
+
+async function buscarEncargosCache() {
+  const agora = Date.now();
+  if (_encargosCache.data && agora - _encargosCache.ts < ENCARGOS_TTL) return _encargosCache.data;
+
+  const [ess, eer] = await Promise.all([buscarEssMensal(), buscarEerMensal()]);
+
+  const porMes = {};
+  ess.forEach(r => { porMes[r.mes] = { mes: r.mes, ess_rs: r.pagamento_ess_rs, eer_rs: 0 }; });
+  eer.forEach(r => {
+    if (!porMes[r.mes]) porMes[r.mes] = { mes: r.mes, ess_rs: 0 };
+    porMes[r.mes].eer_rs = r.eer_rs;
+  });
+
+  const data = Object.values(porMes).sort((a, b) => a.mes.localeCompare(b.mes));
+  if (data.length > 0) _encargosCache = { data, ts: agora };
+  return data;
+}
+
+// GET /mercado/encargos — ESS + EER do sistema por mês
+app.get("/mercado/encargos", async (_req, res) => {
+  try {
+    const dados = await buscarEncargosCache();
+    return res.json(dados);
+  } catch (e) {
+    console.error("[mercado/encargos] Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/encargos — estimativa ESS/EER do agente por mês
+// Usa valor_encargo da contabilização + razão ESS:EER do sistema para estimar o split
+app.get("/inteligencia/:agente/encargos", async (req, res) => {
+  const agenteRaw = decodeURIComponent(req.params.agente);
+  if (!agenteRaw || agenteRaw.trim().length < 2)
+    return res.status(400).json({ error: "Nome de agente inválido" });
+
+  const agente = normalizarAgente(agenteRaw);
+
+  try {
+    const rContab = await pool.query(`
+      SELECT mes_referencia,
+             SUM(valor_encargo) AS valor_encargo,
+             SUM(valor_tm_mcp)  AS valor_mcp,
+             SUM(resultado_final) AS resultado_final
+      FROM ccee_contabilizacao
+      WHERE agente = $1
+      GROUP BY mes_referencia
+      ORDER BY mes_referencia ASC
+    `, [agente]);
+
+    if (!rContab.rows.length) {
+      return res.json({
+        agente, meses: [],
+        aviso: "Sem dados de contabilização. Acesse a página do agente para carregar os dados primeiro.",
+      });
+    }
+
+    const sistemaEncargos = await buscarEncargosCache();
+    const sistemaMap = {};
+    sistemaEncargos.forEach(r => { sistemaMap[r.mes] = r; });
+
+    const meses = rContab.rows.map(row => {
+      const mes    = row.mes_referencia;
+      const enc    = Number(row.valor_encargo) || 0;
+      const sistema = sistemaMap[mes];
+
+      let ess_estimado = null, eer_estimado = null, ess_frac = null;
+
+      if (sistema && (sistema.ess_rs || sistema.eer_rs)) {
+        const total_sist = (sistema.ess_rs || 0) + (sistema.eer_rs || 0);
+        ess_frac      = total_sist > 0 ? (sistema.ess_rs || 0) / total_sist : 0.5;
+        ess_estimado  = Math.round(enc * ess_frac * 100) / 100;
+        eer_estimado  = Math.round((enc - ess_estimado) * 100) / 100;
+      }
+
+      return {
+        mes,
+        valor_encargo:  Math.round(enc * 100) / 100,
+        valor_mcp:      Math.round((Number(row.valor_mcp) || 0) * 100) / 100,
+        resultado_final: Math.round((Number(row.resultado_final) || 0) * 100) / 100,
+        ess_estimado,
+        eer_estimado,
+        ess_pct: ess_frac != null ? Math.round(ess_frac * 1000) / 10 : null,
+        ess_sistema: sistema?.ess_rs ?? null,
+        eer_sistema: sistema?.eer_rs ?? null,
+      };
+    });
+
+    return res.json({ agente, meses });
+  } catch (e) {
+    console.error("[inteligencia/encargos] Erro:", e.message);
     return res.status(500).json({ error: e.message });
   }
 });
