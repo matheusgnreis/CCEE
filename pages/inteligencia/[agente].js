@@ -81,10 +81,15 @@ function fmt(v) {
 }
 
 export default function AgenteDashboard() {
-  const router   = useRouter();
-  const agente   = router.query.agente
-    ? decodeURIComponent(router.query.agente)
-    : null;
+  const router = useRouter();
+  const [agente, setAgente] = useState(null);
+  useEffect(() => {
+    const match = window.location.pathname.match(/\/inteligencia\/(.+)/);
+    const fromPath = match ? decodeURIComponent(match[1]) : "";
+    const name = (fromPath && fromPath !== "shell") ? fromPath
+      : router.query.agente ? decodeURIComponent(router.query.agente) : null;
+    if (name) setAgente(name);
+  }, [router.isReady]);
 
   const [historico,      setHistorico]      = useState([]);
   const [dadosMes,       setDadosMes]       = useState(null);
