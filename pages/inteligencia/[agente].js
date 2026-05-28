@@ -131,9 +131,6 @@ export default function AgenteDashboard() {
   const [sazonalizacao,    setSazonalizacao]    = useState(null);
   const [contratoMWm,      setContratoMWm]      = useState("");
 
-  const [encargos,         setEncargos]         = useState(null);
-  const [loadingEncargos,  setLoadingEncargos]  = useState(false);
-
   const [modulacaoPerfil,   setModulacaoPerfil]   = useState(null);
   const [sazMode,           setSazMode]           = useState("total"); // "total" | "sub" | "perfil"
   const [sazoSub,           setSazoSub]           = useState(null);
@@ -367,17 +364,6 @@ export default function AgenteDashboard() {
       .then(json => { if (!json.error) setModulacaoPerfil(json); })
       .catch(() => {});
   }, [agente, mesSelecionado]);
-
-  // ── Busca encargos ESS/EER por agente (uma vez por agente) ───────────────────
-  useEffect(() => {
-    if (!agente) return;
-    setLoadingEncargos(true);
-    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/encargos`)
-      .then(r => r.json())
-      .then(json => { if (!json.error) setEncargos(json); })
-      .catch(() => {})
-      .finally(() => setLoadingEncargos(false));
-  }, [agente]);
 
   // ── 6. Polling modulação de geração ──────────────────────────────────────────
   useEffect(() => {
@@ -1555,96 +1541,6 @@ export default function AgenteDashboard() {
         })()}
 
         {/* ── Encargos CCEE: ESS e EER ──────────────────────────── */}
-        {(encargos?.meses?.length > 0 || loadingEncargos) && (
-          <div style={s.chartBox}>
-            <div style={s.cargasHeader}>
-              <h2 style={s.chartTitle}>Encargos CCEE — ESS e EER por Mês</h2>
-              {loadingEncargos && <span style={{ fontSize: 12, color: "#94a3b8" }}>Carregando...</span>}
-            </div>
-            {encargos?.aviso && (
-              <div style={{ fontSize: 13, color: "#64748b", background: "#f8fafc", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
-                {encargos.aviso}
-              </div>
-            )}
-            {encargos?.meses?.length > 0 && (() => {
-              const rows = [...encargos.meses].reverse().slice(0, 24);
-              const comDados = rows.filter(r => r.ess_estimado != null);
-              const ultimoComDados = comDados[0];
-              return (
-                <>
-                  {ultimoComDados && (
-                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 20 }}>
-                      <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 10, padding: "12px 18px", minWidth: 140 }}>
-                        <div style={{ fontSize: 11, color: "#0369a1", fontWeight: 600, marginBottom: 4 }}>ESS estimado</div>
-                        <div style={{ fontSize: 20, fontWeight: 800, color: "#0891b2" }}>
-                          {ultimoComDados.ess_estimado != null ? `R$ ${Number(ultimoComDados.ess_estimado).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}` : "—"}
-                        </div>
-                        <div style={{ fontSize: 11, color: "#64748b" }}>{ultimoComDados.mes}</div>
-                      </div>
-                      <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "12px 18px", minWidth: 140 }}>
-                        <div style={{ fontSize: 11, color: "#92400e", fontWeight: 600, marginBottom: 4 }}>EER estimado</div>
-                        <div style={{ fontSize: 20, fontWeight: 800, color: "#d97706" }}>
-                          {ultimoComDados.eer_estimado != null ? `R$ ${Number(ultimoComDados.eer_estimado).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}` : "—"}
-                        </div>
-                        <div style={{ fontSize: 11, color: "#64748b" }}>{ultimoComDados.mes}</div>
-                      </div>
-                      <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "12px 18px", minWidth: 140 }}>
-                        <div style={{ fontSize: 11, color: "#166534", fontWeight: 600, marginBottom: 4 }}>Total encargo</div>
-                        <div style={{ fontSize: 20, fontWeight: 800, color: "#16a34a" }}>
-                          {ultimoComDados.valor_encargo != null ? `R$ ${Number(ultimoComDados.valor_encargo).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}` : "—"}
-                        </div>
-                        <div style={{ fontSize: 11, color: "#64748b" }}>{ultimoComDados.mes}</div>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 380 }}>
-                    <table style={s.tabelaSimples}>
-                      <thead>
-                        <tr>
-                          {["Mês", "Encargo Total (R$)", "ESS estimado (R$)", "EER estimado (R$)", "% ESS sistema", "ESS sistema (R$)", "EER sistema (R$)"].map(h => (
-                            <th key={h} style={s.thSimples}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.map((r, i) => (
-                          <tr key={r.mes} style={i % 2 === 0 ? { background: "#fafbfc" } : {}}>
-                            <td style={{ ...s.tdSimples, fontWeight: 600 }}>{r.mes}</td>
-                            {[r.valor_encargo, r.ess_estimado, r.eer_estimado].map((v, j) => {
-                              const n = v != null ? Number(v) : null;
-                              const cor = j === 1 ? "#0891b2" : j === 2 ? "#d97706" : "#374151";
-                              return (
-                                <td key={j} style={{ ...s.tdSimples, textAlign: "right", color: n != null && n !== 0 ? cor : "#94a3b8", fontWeight: n != null && n !== 0 ? 600 : 400 }}>
-                                  {n == null ? "—" : `R$ ${n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                                </td>
-                              );
-                            })}
-                            <td style={{ ...s.tdSimples, textAlign: "right" }}>
-                              {r.ess_pct != null ? `${r.ess_pct}%` : "—"}
-                            </td>
-                            {[r.ess_sistema, r.eer_sistema].map((v, j) => {
-                              const n = v != null ? Number(v) : null;
-                              return (
-                                <td key={j} style={{ ...s.tdSimples, textAlign: "right", color: "#64748b", fontSize: 11 }}>
-                                  {n == null ? "—" : n >= 1e6 ? `R$ ${(n / 1e6).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mi` : `R$ ${n.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}`}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div style={{ marginTop: 12, fontSize: 11, color: "#94a3b8", lineHeight: 1.5 }}>
-                    Estimativa: ESS e EER são calculados proporcionalmente ao <em>valor_encargo</em> da contabilização CCEE,
-                    usando a razão ESS/EER publicada mensalmente nos dados abertos da CCEE.
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        )}
-
         {/* ── Contabilização por Perfil ─────────────────────────── */}
         {contabilizacao.length > 0 && (
           <div style={s.chartBox}>
