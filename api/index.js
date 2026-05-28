@@ -3485,33 +3485,40 @@ async function buscarPldMensal() {
 
   const anoAtual = new Date().getFullYear();
   const anos     = [anoAtual - 1, anoAtual].filter(a => PLD_SQL_IDS.v2[a] || PLD_SQL_IDS.v1[a]);
-  const porMes   = {};
+  const acum     = {}; // { "YYYY-MM": { SE: { soma, n }, ... } }
 
   for (const ano of anos) {
     const id    = PLD_SQL_IDS.v2[ano] || PLD_SQL_IDS.v1[ano];
     const campo = PLD_SQL_IDS.v2[ano] ? "PLD_HORA" : "PLD";
-    const sql   = `SELECT "MES_REFERENCIA", "SUBMERCADO", AVG("${campo}"::numeric) AS "pld_medio", COUNT(*) AS "n_periodos" FROM "${id}" GROUP BY "MES_REFERENCIA", "SUBMERCADO" ORDER BY "MES_REFERENCIA", "SUBMERCADO"`;
     try {
-      console.log(`[pld-mensal] Buscando médias ${ano} (campo=${campo})...`);
-      const rows = await fetchTodasPaginasSql(sql);
+      console.log(`[pld-mensal] Buscando ${ano} (datastore_search)...`);
+      const rows = await fetchTodasPaginas(id, {});
       for (const r of rows) {
         const mes = normalizarMes(r.MES_REFERENCIA ?? r.mes_referencia);
         if (!mes) continue;
         const subRaw = (r.SUBMERCADO ?? r.submercado ?? "").trim().toUpperCase();
         const sub    = SUB_ABBR[subRaw] || subRaw;
         if (!sub) continue;
-        if (!porMes[mes]) porMes[mes] = {};
-        const v = parseFloat(r.pld_medio ?? r.PLDmedio ?? 0);
-        if (!isNaN(v)) porMes[mes][sub] = Math.round(v * 100) / 100;
+        const v = parseFloat((r[campo] ?? r[campo.toLowerCase()] ?? "0").toString().replace(",", "."));
+        if (isNaN(v) || v === 0) continue;
+        if (!acum[mes])       acum[mes]       = {};
+        if (!acum[mes][sub])  acum[mes][sub]  = { soma: 0, n: 0 };
+        acum[mes][sub].soma += v;
+        acum[mes][sub].n    += 1;
       }
-      console.log(`[pld-mensal] ${rows.length} combinações para ${ano}`);
+      console.log(`[pld-mensal] ${rows.length} registros para ${ano}`);
     } catch (err) {
       console.warn(`[pld-mensal] Falha ${ano}: ${err.message}`);
     }
   }
 
-  const data = Object.entries(porMes)
-    .map(([mes, subs]) => ({ mes, ...subs }))
+  const data = Object.entries(acum)
+    .map(([mes, subs]) => ({
+      mes,
+      ...Object.fromEntries(
+        Object.entries(subs).map(([sub, { soma, n }]) => [sub, Math.round(soma / n * 100) / 100])
+      ),
+    }))
     .sort((a, b) => a.mes.localeCompare(b.mes));
 
   if (data.length > 0) _pldMensalCache = { data, ts: agora };
