@@ -2,19 +2,18 @@
 // Busca o total mensal de ESS (Encargo de Serviços do Sistema) da CCEE.
 // Fonte: encargo_pgto_mensal — campo PAGAMENTO_ENCARGO_ESS (R$ total do sistema/mês)
 
-const { fetchTodasPaginas, normalizarMes, delay, YEAR_DELAY_MS } = require("./utils");
+const { fetchTodasPaginas, normalizarMes, delay, YEAR_DELAY_MS, descobrirIdsPorAno } = require("./utils");
 
-// encargo_pgto_mensal — pagamento total de ESS por mês
-const PGTO_IDS = {
+const _PGTO_FALLBACK = {
   2024: "fd544bed-b47f-48b2-8975-4ee449d4e3ce",
   2025: "ca6de693-4a45-4f1b-ad58-42239d665bc9",
 };
-
-// encargo_ess_ancilar — breakdown por componente (CONST_ON, CONST_OFF, CS, SEG_ENER...)
-const ANCILAR_IDS = {
+const _ANCILAR_FALLBACK = {
   2024: "b06431bc-e509-4d65-94cc-6d81b0f1db5c",
   2025: "d93904d1-6a35-400b-927d-2dc52dfef4d8",
 };
+const getPgtoIds    = () => descobrirIdsPorAno(_PGTO_FALLBACK[2024],    _PGTO_FALLBACK);
+const getAncilIds   = () => descobrirIdsPorAno(_ANCILAR_FALLBACK[2024], _ANCILAR_FALLBACK);
 
 function parseNum(v) {
   if (v == null) return 0;
@@ -27,6 +26,7 @@ function parseNum(v) {
  * @param {number[]} [anos] - restringe a anos específicos (default: todos disponíveis)
  */
 async function buscarEssMensal(anos = null) {
+  const PGTO_IDS = await getPgtoIds();
   const entradas = Object.entries(PGTO_IDS)
     .map(([a, id]) => [Number(a), id])
     .filter(([a]) => !anos || anos.includes(a));
@@ -63,6 +63,7 @@ async function buscarEssMensal(anos = null) {
  * { mes, const_on, const_off, cs, seg_ener, rest_op, importacao }
  */
 async function buscarEssAncilar(anos = null) {
+  const ANCILAR_IDS = await getAncilIds();
   const entradas = Object.entries(ANCILAR_IDS)
     .map(([a, id]) => [Number(a), id])
     .filter(([a]) => !anos || anos.includes(a));

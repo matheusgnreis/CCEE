@@ -2,19 +2,22 @@
 // Busca PLD horário da CCEE (dados abertos) via CKAN datastore_search.
 // Campos relevantes: MES_REFERENCIA (AAAAMM), SUBMERCADO, PERIODO_COMERCIALIZACAO, PLD
 
-const { fetchTodasPaginas, normalizarMes } = require("./utils");
+const { fetchTodasPaginas, normalizarMes, descobrirIdsPorAno } = require("./utils");
 
 // Dataset novo (pld_horario_YYYY) — campo PLD_HORA, mais atualizado
-const DATASET_IDS_V2 = {
+const _V2_FALLBACK = {
   2025: "2a180a6b-f092-43eb-9f82-a48798b803dc",
   2026: "3f279d6b-1069-42f7-9b0a-217b084729c4",
 };
 
 // Dataset antigo — campo PLD, fallback para meses não cobertos pelo v2
-const DATASET_IDS_V1 = {
+const _V1_FALLBACK = {
   2025: "7267ead9-6039-4ce1-93f3-3471ae33bd98",
   2026: "554cc6f2-9f1e-4163-8a04-573b4aafcbc1",
 };
+
+const getIdsV2 = () => descobrirIdsPorAno(_V2_FALLBACK[2025], _V2_FALLBACK);
+const getIdsV1 = () => descobrirIdsPorAno(_V1_FALLBACK[2025], _V1_FALLBACK);
 
 /**
  * Retorna lista de { periodo, submercado, pld_rs_mwh } para o mês pedido.
@@ -37,6 +40,7 @@ function normalizarRegistrosPld(registros, campoPreco) {
 }
 
 async function buscarPldHorario(mes, submercado = null) {
+  const [DATASET_IDS_V2, DATASET_IDS_V1] = await Promise.all([getIdsV2(), getIdsV1()]);
   const ano          = parseInt(mes.slice(0, 4), 10);
   const mesFormatado = mes.replace("-", "");
   const filtros      = { MES_REFERENCIA: mesFormatado };
@@ -83,8 +87,8 @@ async function buscarPldHorarioMapa(mes, submercado = null) {
 
 function anosDisponiveis() {
   return [...new Set([
-    ...Object.keys(DATASET_IDS_V2),
-    ...Object.keys(DATASET_IDS_V1),
+    ...Object.keys(_V2_FALLBACK),
+    ...Object.keys(_V1_FALLBACK),
   ])].map(Number).sort();
 }
 

@@ -6,19 +6,22 @@ const {
   delay,
   normalizarRegistro,
   fetchTodasPaginas,
+  descobrirIdsPorAno,
 } = require("./utils");
 
-const DATASET_IDS = {
+const _IDS_FALLBACK = {
   2024: "5c64e360-0252-4849-9dbb-8a61cb2af8f0",
   2025: "45d04e27-ba84-44e9-8e53-e186b44d0a49",
   2026: "7c33c984-c4d5-486a-a68d-0b034ccc9580",
 };
+const getIds = () => descobrirIdsPorAno(_IDS_FALLBACK[2024], _IDS_FALLBACK);
 
 async function buscarUsinas(nomeEmpresarial, { anos = null } = {}) {
   if (!nomeEmpresarial)
     throw new Error("Nome empresarial é obrigatório para buscar usinas");
 
-  const nomeUpper = nomeEmpresarial.trim().toUpperCase();
+  const DATASET_IDS = await getIds();
+  const nomeUpper   = nomeEmpresarial.trim().toUpperCase();
 
   const entradas = anos?.length
     ? anos.filter(a => DATASET_IDS[a]).map(a => [Number(a), DATASET_IDS[a]])
@@ -60,7 +63,7 @@ async function buscarUsinas(nomeEmpresarial, { anos = null } = {}) {
 }
 
 function anosDisponiveis() {
-  return Object.keys(DATASET_IDS).map(Number);
+  return Object.keys(_IDS_FALLBACK).map(Number);
 }
 
 module.exports = { buscarUsinas, anosDisponiveis };

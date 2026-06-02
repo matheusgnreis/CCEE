@@ -16,7 +16,7 @@ const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require(
 const { buscarPldHorario, buscarPldHorarioMapa, anosDisponiveis: anosDisponiveisPld } = require("./ccee-abertos/pld-horario");
 const { buscarEssMensal }         = require("./ccee-abertos/encargos-ess");
 const { buscarEerMensal }         = require("./ccee-abertos/encargos-eer");
-const { normalizarMes, fetchTodasPaginasSql } = require("./ccee-abertos/utils");
+const { normalizarMes } = require("./ccee-abertos/utils");
 const { limparJobsTravados }      = require("./cleanup-jobs");
 const cron                        = require("node-cron");
 
@@ -3468,70 +3468,43 @@ app.get("/pld/resumo", async (_req, res) => {
 
 // ─── Mercado: PLD histórico mensal ───────────────────────────────────────────
 
-// Reutiliza os mesmos IDs do pld-horario.js
-const PLD_MENSAL_IDS = {
-  v2: { 2025: "2a180a6b-f092-43eb-9f82-a48798b803dc", 2026: "3f279d6b-1069-42f7-9b0a-217b084729c4" },
-  v1: { 2025: "7267ead9-6039-4ce1-93f3-3471ae33bd98", 2026: "554cc6f2-9f1e-4163-8a04-573b4aafcbc1" },
-};
-
-const SUB_ABBR = { SUDESTE: "SE", "SE/CO": "SE", SUL: "S", NORDESTE: "NE", NORTE: "N" };
-
 let _pldMensalCache = { data: null, ts: 0 };
 const PLD_MENSAL_TTL = 2 * 60 * 60 * 1000;
 
-// Busca médias mensais de PLD por submercado — mês a mês, 3 meses em paralelo.
-// Igual ao padrão do pld-horario.js: filtra por MES_REFERENCIA, calcula média em memória.
+// Delega para buscarPldHorario (já faz ID discovery) e calcula médias mensais.
 async function buscarPldMensal() {
   const agora = Date.now();
   if (_pldMensalCache.data && agora - _pldMensalCache.ts < PLD_MENSAL_TTL) return _pldMensalCache.data;
 
-  // Últimos 12 meses
   const hoje = new Date();
   const meses = [];
   for (let i = 11; i >= 0; i--) {
-    const d    = new Date(hoje.getFullYear(), hoje.getMonth() - i, 1);
-    const ano  = d.getFullYear();
-    const mm   = String(d.getMonth() + 1).padStart(2, "0");
-    meses.push({ ano, filtro: `${ano}${mm}`, chave: `${ano}-${mm}` });
+    const d  = new Date(hoje.getFullYear(), hoje.getMonth() - i, 1);
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    meses.push(`${d.getFullYear()}-${mm}`);
   }
 
   const acum = {}; // { "YYYY-MM": { SE: { soma, n }, ... } }
 
-  // Agrupa por ano para reutilizar o mesmo dataset ID
-  const porAno = {};
-  for (const m of meses) {
-    (porAno[m.ano] = porAno[m.ano] || []).push(m);
-  }
-
-  for (const [anoStr, lista] of Object.entries(porAno)) {
-    const ano   = Number(anoStr);
-    const id    = PLD_MENSAL_IDS.v2[ano] || PLD_MENSAL_IDS.v1[ano];
-    const campo = PLD_MENSAL_IDS.v2[ano] ? "PLD_HORA" : "PLD";
-    if (!id) continue;
-
-    // Busca 3 meses em paralelo para ser rápido sem sobrecarregar a API
-    const BATCH = 3;
-    for (let i = 0; i < lista.length; i += BATCH) {
-      await Promise.all(lista.slice(i, i + BATCH).map(async ({ filtro, chave }) => {
-        try {
-          const rows = await fetchTodasPaginas(id, { MES_REFERENCIA: filtro });
-          for (const r of rows) {
-            const subRaw = (r.SUBMERCADO ?? "").trim().toUpperCase();
-            const sub    = SUB_ABBR[subRaw] || subRaw;
-            if (!sub) continue;
-            const v = parseFloat((r[campo] ?? "0").toString().replace(",", "."));
-            if (isNaN(v) || v === 0) continue;
-            if (!acum[chave])       acum[chave]       = {};
-            if (!acum[chave][sub])  acum[chave][sub]  = { soma: 0, n: 0 };
-            acum[chave][sub].soma += v;
-            acum[chave][sub].n    += 1;
-          }
-          console.log(`[pld-mensal] ${chave}: ${rows.length} registros`);
-        } catch (err) {
-          console.warn(`[pld-mensal] Falha ${chave}: ${err.message}`);
+  const BATCH = 3;
+  for (let i = 0; i < meses.length; i += BATCH) {
+    await Promise.all(meses.slice(i, i + BATCH).map(async (mes) => {
+      try {
+        const registros = await buscarPldHorario(mes);
+        for (const r of registros) {
+          const sub = r.submercado;
+          const v   = r.pld_rs_mwh;
+          if (!sub || !v) continue;
+          if (!acum[mes])      acum[mes]      = {};
+          if (!acum[mes][sub]) acum[mes][sub] = { soma: 0, n: 0 };
+          acum[mes][sub].soma += v;
+          acum[mes][sub].n    += 1;
         }
-      }));
-    }
+        console.log(`[pld-mensal] ${mes}: ${registros.length} registros`);
+      } catch (err) {
+        console.warn(`[pld-mensal] Falha ${mes}: ${err.message}`);
+      }
+    }));
   }
 
   const data = Object.entries(acum)

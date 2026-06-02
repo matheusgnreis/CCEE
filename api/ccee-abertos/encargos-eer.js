@@ -2,13 +2,14 @@
 // Busca o total mensal de EER (Encargo de Energia de Reserva) da CCEE.
 // Fonte: energia_reserva_liquidacao — campo VALOR_TOTAL_LIQUID (R$ total do sistema/mês)
 
-const { fetchTodasPaginas, normalizarMes, delay, YEAR_DELAY_MS } = require("./utils");
+const { fetchTodasPaginas, normalizarMes, delay, YEAR_DELAY_MS, descobrirIdsPorAno } = require("./utils");
 
-const RESERVA_IDS = {
+const _IDS_FALLBACK = {
   2024: "b0dcf91b-7f59-4dd4-9c2b-ddc9a93153a6",
   2025: "172c1dc9-7507-4453-8b4c-ede4273f2b70",
   2026: "a8f020d6-0c4d-4298-9940-03268f50131c",
 };
+const getIds = () => descobrirIdsPorAno(_IDS_FALLBACK[2024], _IDS_FALLBACK);
 
 function parseNum(v) {
   if (v == null) return 0;
@@ -21,6 +22,7 @@ function parseNum(v) {
  * @param {number[]} [anos] - restringe a anos específicos (default: todos disponíveis)
  */
 async function buscarEerMensal(anos = null) {
+  const RESERVA_IDS = await getIds();
   const entradas = Object.entries(RESERVA_IDS)
     .map(([a, id]) => [Number(a), id])
     .filter(([a]) => !anos || anos.includes(a));

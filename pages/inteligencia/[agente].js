@@ -69,6 +69,7 @@ const GRAFICOS = [
     titulo: "Custo MCP por MWh",
     unidade: "R$/MWh",
     skipIfAllNull: "mcp_rs_mwh",
+    zeroLine: true,
     linhas: [
       { key: "mcp_rs_mwh", label: "Custo MCP", color: "#ea580c" },
     ],
@@ -613,6 +614,7 @@ export default function AgenteDashboard() {
                       formatter={(v, name) => [`${fmt(v)} ${g.unidade}`, name]}
                     />
                     <Legend wrapperStyle={{ fontSize: 13, paddingTop: 12 }} />
+                    {g.zeroLine && <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />}
                     {g.linhas.map(l => (
                       <Line
                         key={l.key}

@@ -7,14 +7,15 @@ const {
   normalizarRegistro,
   fetchPagina,
   fetchTodasPaginas,
+  descobrirIdsPorAno,
 } = require("./utils");
 
-// IDs dos datasets CKAN por ano — atualize quando a CCEE publicar novos anos
-const DATASET_IDS = {
+const _IDS_FALLBACK = {
   2024: "b854f7bc-94a3-423a-96b7-2d4756ec77d1",
   2025: "c88d04a6-fe42-413b-b7bf-86e390494fb0",
   2026: "cf753cb8-3a01-4ff0-abda-020be5908c41",
 };
+const getIds = () => descobrirIdsPorAno(_IDS_FALLBACK[2024], _IDS_FALLBACK);
 
 /**
  * Busca todas as parcelas de carga de um agente.
@@ -29,6 +30,7 @@ const DATASET_IDS = {
  * @param {string}   [opcoes.razaoSocial] - Razão social vinda do Power BI (preferida).
  */
 async function buscarCargas(siglaPerfilAgente, { anos = null, razaoSocial = null } = {}) {
+  const DATASET_IDS = await getIds();
   const campo = razaoSocial ? "NOME_EMPRESARIAL" : "SIGLA_PERFIL_AGENTE";
   const valor = razaoSocial
     ? razaoSocial.trim().toUpperCase()

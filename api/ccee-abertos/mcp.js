@@ -8,15 +8,16 @@ const {
   normalizarRegistro,
   fetchTodasPaginas,
   fetchMesRecente,
+  descobrirIdsPorAno,
 } = require("./utils");
 
-// IDs dos datasets CKAN por ano — atualize quando a CCEE publicar novos anos
-const DATASET_IDS = {
+const _IDS_FALLBACK = {
   2023: "f7177b27-74f2-49d6-b74d-817d82b846a0",
   2024: "36ae5272-3399-424c-9dbf-10857aa0b4cc",
   2025: "d9e1764c-f443-45d1-a5ea-a71812d878da",
   2026: "4e4eaf66-26c9-40b7-81e1-545b55f7e1d4",
 };
+const getIds = () => descobrirIdsPorAno(_IDS_FALLBACK[2023], _IDS_FALLBACK);
 
 /**
  * Busca dados do MCP de um agente pela sua sigla na CCEE.
@@ -29,6 +30,7 @@ const DATASET_IDS = {
  * @returns {Promise<object[]>} Registros normalizados, ordenados por mês ASC.
  */
 async function buscarMcp(sigla, { mes = null, anos = null } = {}) {
+  const DATASET_IDS = await getIds();
   sigla = sigla.trim().toUpperCase();
   mes   = normalizarMes(mes);
 
@@ -83,16 +85,11 @@ async function buscarMcp(sigla, { mes = null, anos = null } = {}) {
 }
 
 function anosDisponiveis() {
-  return Object.keys(DATASET_IDS).map(Number);
+  return Object.keys(_IDS_FALLBACK).map(Number);
 }
 
-/**
- * Retorna o mês mais recente disponível na API aberta para uma sigla de agente.
- * Percorre os anos do mais recente para o mais antigo, para na primeira resposta.
- * @param {string} sigla
- * @returns {Promise<string|null>} ex: "2026-03" ou null
- */
 async function buscarMesRecente(sigla) {
+  const DATASET_IDS = await getIds();
   sigla = sigla.trim().toUpperCase();
   const anos = Object.keys(DATASET_IDS).map(Number).sort((a, b) => b - a);
 

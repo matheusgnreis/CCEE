@@ -2,13 +2,14 @@
 // Busca contabilização de montante por perfil de agente (CCEE dados abertos).
 // Filtra por NOME_EMPRESARIAL e retorna todos os perfis/meses disponíveis.
 
-const { YEAR_DELAY_MS, delay, normalizarRegistro, fetchTodasPaginas } = require("./utils");
+const { YEAR_DELAY_MS, delay, normalizarRegistro, fetchTodasPaginas, descobrirIdsPorAno } = require("./utils");
 
-const DATASET_IDS = {
+const _IDS_FALLBACK = {
   2024: "d47f9660-28d6-4542-9dbc-9648e13b3c67",
   2025: "76d1cf4c-da8c-47a5-9f0d-8b50079be960",
   2026: "f8512d8c-9c0f-4f73-b2d2-911545084d9b",
 };
+const getIds = () => descobrirIdsPorAno(_IDS_FALLBACK[2024], _IDS_FALLBACK);
 
 const CAMPOS_NUMERICOS = [
   "valor_tm_mcp", "compensacao_mre", "valor_encargo", "valor_ajuste_exposicao",
@@ -27,7 +28,8 @@ function parseNum(v) {
 async function buscarContabilizacao(nomeEmpresarial, { anos = null } = {}) {
   if (!nomeEmpresarial) throw new Error("Nome empresarial é obrigatório");
 
-  const nomeUpper = nomeEmpresarial.trim().toUpperCase();
+  const DATASET_IDS = await getIds();
+  const nomeUpper   = nomeEmpresarial.trim().toUpperCase();
 
   const entradas = anos?.length
     ? anos.filter(a => DATASET_IDS[a]).map(a => [Number(a), DATASET_IDS[a]])

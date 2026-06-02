@@ -125,7 +125,81 @@ async function fetchMesRecente(datasetId, filtros) {
   }
 }
 
-const CKAN_SQL_URL = "https://dadosabertos.ccee.org.br/api/3/action/datastore_search_sql";
+const CKAN_SQL_URL  = "https://dadosabertos.ccee.org.br/api/3/action/datastore_search_sql";
+const CKAN_BASE_URL = "https://dadosabertos.ccee.org.br/api/3/action";
+
+// ─── Auto-discovery de resources por ano ─────────────────────────────────────
+
+const _pkgOfResource = {}; // anchorId  → { pkgId, ts }
+const _idsOfPkg      = {}; // pkgId     → { ids: {year: id}, ts }
+const DISCOVERY_TTL  = 12 * 60 * 60 * 1000; // 12 h
+
+async function ckanAction(action, params = {}) {
+  const url  = new URL(`${CKAN_BASE_URL}/${action}`);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res  = await fetch(url.toString(), {
+      signal:  ctrl.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; CCEEMonitor/1.0)" },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || "CKAN error");
+    return json.result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Dado um resource ID âncora já conhecido, descobre todos os resources do mesmo
+ * pacote CKAN e retorna { ano: resourceId }. Cacheado 12h.
+ * Se qualquer chamada falhar, devolve fallbackIds silenciosamente.
+ *
+ * Fluxo: resource_show(anchorId) → package_id → package_show → resources
+ */
+async function descobrirIdsPorAno(anchorId, fallbackIds) {
+  const agora = Date.now();
+
+  // 1 — package_id a partir do resource âncora
+  let pkgId = _pkgOfResource[anchorId]?.pkgId;
+  if (!pkgId || agora - (_pkgOfResource[anchorId]?.ts || 0) > DISCOVERY_TTL) {
+    try {
+      const r = await ckanAction("resource_show", { id: anchorId });
+      pkgId   = r.package_id;
+      if (!pkgId) throw new Error("sem package_id");
+      _pkgOfResource[anchorId] = { pkgId, ts: agora };
+    } catch (err) {
+      console.warn(`[ckan-discovery] resource_show falhou: ${err.message} — IDs fixos`);
+      return fallbackIds;
+    }
+  }
+
+  // 2 — todos os resources do pacote
+  if (_idsOfPkg[pkgId]?.ids && agora - _idsOfPkg[pkgId].ts < DISCOVERY_TTL) {
+    return { ...fallbackIds, ..._idsOfPkg[pkgId].ids };
+  }
+
+  try {
+    const pkg = await ckanAction("package_show", { id: pkgId });
+    const ids = {};
+    for (const r of (pkg.resources || [])) {
+      const texto = `${r.name || ""} ${r.description || ""} ${r.url || ""}`;
+      const m     = texto.match(/\b(20\d{2})\b/);
+      if (m && r.id) ids[Number(m[1])] = r.id;
+    }
+    if (Object.keys(ids).length) {
+      _idsOfPkg[pkgId] = { ids, ts: agora };
+      console.log(`[ckan-discovery] ${pkgId}: ${Object.keys(ids).sort().join(", ")}`);
+    }
+    return { ...fallbackIds, ...ids };
+  } catch (err) {
+    console.warn(`[ckan-discovery] package_show falhou: ${err.message} — IDs fixos`);
+    return fallbackIds;
+  }
+}
 
 async function fetchTodasPaginasSql(sql) {
   const PAGE   = 5000;
@@ -170,6 +244,8 @@ async function fetchTodasPaginasSql(sql) {
 module.exports = {
   CKAN_SEARCH_URL,
   CKAN_SQL_URL,
+  CKAN_BASE_URL,
+  descobrirIdsPorAno,
   PAGE_SIZE,
   YEAR_DELAY_MS,
   PAGE_DELAY_MS,
