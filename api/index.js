@@ -3565,6 +3565,35 @@ app.get("/mercado/encargos", async (_req, res) => {
   }
 });
 
+// GET /mercado/modulacao-ramo — custo de modulação médio por ramo de atividade
+app.get("/mercado/modulacao-ramo", async (_req, res) => {
+  try {
+    const r = await pool.query(`
+      WITH agent_ramo AS (
+        SELECT DISTINCT ON (agente) agente, ramo_atividade
+        FROM ccee_cargas
+        WHERE ramo_atividade IS NOT NULL
+        ORDER BY agente, mes_referencia DESC
+      )
+      SELECT
+        ar.ramo_atividade                                 AS ramo,
+        m.mes_referencia                                  AS mes,
+        ROUND(AVG(m.custo_modulacao_rs_mwh)::numeric, 4) AS custo_medio_rs_mwh,
+        ROUND(SUM(m.consumo_total_mwh)::numeric, 2)      AS consumo_mwh,
+        COUNT(DISTINCT m.agente)                          AS n_agentes
+      FROM ccee_modulacao m
+      JOIN agent_ramo ar ON m.agente = ar.agente
+      WHERE m.custo_modulacao_rs_mwh IS NOT NULL
+      GROUP BY ar.ramo_atividade, m.mes_referencia
+      ORDER BY m.mes_referencia, ar.ramo_atividade
+    `);
+    return res.json(r.rows);
+  } catch (e) {
+    console.error("[mercado/modulacao-ramo] Erro:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /inteligencia/:agente/encargos — estimativa ESS/EER do agente por mês
 // Usa valor_encargo da contabilização + razão ESS:EER do sistema para estimar o split
 app.get("/inteligencia/:agente/encargos", async (req, res) => {

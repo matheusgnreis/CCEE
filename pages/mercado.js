@@ -1,29 +1,20 @@
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import {
-  LineChart, Line, BarChart, Bar,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine,
 } from "recharts";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
-const SUB_CORES = { SE: "#2563eb", S: "#16a34a", NE: "#d97706", N: "#9333ea" };
-const ESS_COR   = "#0891b2";
-const EER_COR   = "#f59e0b";
+const SUB_CORES  = { SE: "#2563eb", S: "#16a34a", NE: "#d97706", N: "#9333ea" };
+const RAMO_CORES = ["#2563eb","#16a34a","#d97706","#9333ea","#dc2626","#0891b2","#ea580c","#65a30d","#db2777","#78716c"];
 
 function fmtMes(m) {
   if (!m) return "";
   const [ano, mes] = m.split("-");
   const n = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
   return `${n[Number(mes) - 1]}/${ano.slice(2)}`;
-}
-
-function fmtMM(v) {
-  if (v == null) return "—";
-  const n = Number(v);
-  if (Math.abs(n) >= 1e9) return `R$ ${(n/1e9).toLocaleString("pt-BR",{maximumFractionDigits:1})} bi`;
-  if (Math.abs(n) >= 1e6) return `R$ ${(n/1e6).toLocaleString("pt-BR",{maximumFractionDigits:1})} mi`;
-  return `R$ ${n.toLocaleString("pt-BR",{maximumFractionDigits:0})}`;
 }
 
 const TipPld = ({ active, payload, label }) => {
@@ -40,31 +31,27 @@ const TipPld = ({ active, payload, label }) => {
   );
 };
 
-const TipEnc = ({ active, payload, label }) => {
+const TipRamo = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
-  const total = payload.reduce((s,p) => s + (p.value||0), 0);
   return (
     <div style={{ background:"#fff", border:"1px solid #e2e8f0", borderRadius:8, padding:"10px 14px", fontSize:13 }}>
       <div style={{ fontWeight:700, marginBottom:6, color:"#374151" }}>{fmtMes(label)}</div>
       {payload.map(p => (
-        <div key={p.name} style={{ color:p.fill, marginBottom:2 }}>
-          {p.name}: <strong>{fmtMM(p.value)}</strong>
+        <div key={p.name} style={{ color:p.color, marginBottom:2 }}>
+          {p.name}: <strong>{Number(p.value).toLocaleString("pt-BR",{minimumFractionDigits:2})} R$/MWh</strong>
         </div>
       ))}
-      <div style={{ borderTop:"1px solid #e2e8f0", marginTop:6, paddingTop:6, fontWeight:700, color:"#374151" }}>
-        Total: {fmtMM(total)}
-      </div>
     </div>
   );
 };
 
 export default function MercadoDashboard() {
-  const [pld,     setPld]     = useState([]);
-  const [enc,     setEnc]     = useState([]);
-  const [loadPld, setLoadPld] = useState(true);
-  const [loadEnc, setLoadEnc] = useState(true);
-  const [errPld,  setErrPld]  = useState(null);
-  const [errEnc,  setErrEnc]  = useState(null);
+  const [pld,      setPld]      = useState([]);
+  const [modRamo,  setModRamo]  = useState([]);
+  const [loadPld,  setLoadPld]  = useState(true);
+  const [loadMod,  setLoadMod]  = useState(true);
+  const [errPld,   setErrPld]   = useState(null);
+  const [errMod,   setErrMod]   = useState(null);
 
   useEffect(() => {
     fetch(`${API_URL}/mercado/pld`)
@@ -73,19 +60,32 @@ export default function MercadoDashboard() {
       .catch(e => setErrPld(e.message))
       .finally(() => setLoadPld(false));
 
-    fetch(`${API_URL}/mercado/encargos`)
+    fetch(`${API_URL}/mercado/modulacao-ramo`)
       .then(r => r.json())
-      .then(d => { if (d.error) throw new Error(d.error); setEnc(d); })
-      .catch(e => setErrEnc(e.message))
-      .finally(() => setLoadEnc(false));
+      .then(d => { if (d.error) throw new Error(d.error); setModRamo(d); })
+      .catch(e => setErrMod(e.message))
+      .finally(() => setLoadMod(false));
   }, []);
 
   const pldAtual    = pld.at(-1) || null;
-  const encAtual    = enc.at(-1) || null;
   const submercados = pld.length
     ? [...new Set(pld.flatMap(r => Object.keys(r).filter(k => k !== "mes")))]
     : [];
-  const encChart = enc.map(r => ({ mes: r.mes, ESS: r.ess_rs, EER: r.eer_rs }));
+
+  // Pivota modRamo: [{ramo, mes, custo_medio_rs_mwh}] → [{mes, ramo1: v, ramo2: v}]
+  const ramos = [...new Set(modRamo.map(r => r.ramo))].sort();
+  const modChart = (() => {
+    const porMes = {};
+    for (const r of modRamo) {
+      if (!porMes[r.mes]) porMes[r.mes] = { mes: r.mes };
+      porMes[r.mes][r.ramo] = Number(r.custo_medio_rs_mwh);
+    }
+    return Object.values(porMes).sort((a,b) => a.mes.localeCompare(b.mes));
+  })();
+
+  // Último mês disponível na modulação
+  const modUltimoMes = modChart.at(-1)?.mes || null;
+  const modUltimo    = modChart.at(-1) || null;
 
   return (
     <div style={s.page}>
@@ -103,9 +103,9 @@ export default function MercadoDashboard() {
 
       <div style={s.inner}>
         <h1 style={s.titulo}>Dashboard de Mercado</h1>
-        <p style={s.sub}>PLD histórico por submercado e encargos CCEE — dados abertos CCEE</p>
+        <p style={s.sub}>PLD histórico por submercado e custo de modulação por ramo de atividade</p>
 
-        {/* ── Cards resumo ──────────────────────────────────────── */}
+        {/* ── Cards PLD ─────────────────────────────────────────── */}
         <div style={s.cards}>
           {submercados.map(sub => pldAtual?.[sub] != null && (
             <div key={sub} style={{ ...s.card, borderTop:`3px solid ${SUB_CORES[sub]||"#94a3b8"}` }}>
@@ -115,18 +115,6 @@ export default function MercadoDashboard() {
               </div>
             </div>
           ))}
-          {encAtual && (
-            <>
-              <div style={{ ...s.card, borderTop:`3px solid ${ESS_COR}` }}>
-                <div style={s.cLabel}>ESS sistema — {fmtMes(encAtual.mes)}</div>
-                <div style={{ ...s.cVal, color:ESS_COR }}>{loadEnc ? "…" : fmtMM(encAtual.ess_rs)}</div>
-              </div>
-              <div style={{ ...s.card, borderTop:`3px solid ${EER_COR}` }}>
-                <div style={s.cLabel}>EER sistema — {fmtMes(encAtual.mes)}</div>
-                <div style={{ ...s.cVal, color:EER_COR }}>{loadEnc ? "…" : fmtMM(encAtual.eer_rs)}</div>
-              </div>
-            </>
-          )}
         </div>
 
         {/* ── PLD histórico ───────────────────────────────────── */}
@@ -184,60 +172,87 @@ export default function MercadoDashboard() {
           )}
         </div>
 
-        {/* ── Encargos ESS + EER ──────────────────────────────── */}
+        {/* ── Modulação por Ramo de Atividade ─────────────────── */}
         <div style={s.box}>
-          <h2 style={s.boxTitle}>Encargos CCEE — ESS e EER Mensais (R$)</h2>
+          <h2 style={s.boxTitle}>Custo de Modulação por Ramo de Atividade (R$/MWh)</h2>
           <p style={s.boxDesc}>
-            ESS = Encargo de Serviços do Sistema &nbsp;|&nbsp; EER = Encargo de Energia de Reserva<br />
-            Fonte: CCEE Dados Abertos · encargo_pgto_mensal e energia_reserva_liquidacao
+            Custo médio de modulação dos agentes agrupados por ramo — positivo indica consumo concentrado em horas de PLD alto, negativo indica perfil favorável.<br />
+            Fonte: cálculo sobre PLD horário CCEE × perfil de carga dos agentes cadastrados.
           </p>
 
-          {errEnc && <div style={s.err}>{errEnc}</div>}
+          {errMod && <div style={s.err}>{errMod}</div>}
 
-          {loadEnc ? (
-            <div style={s.loading}>Carregando encargos…</div>
-          ) : enc.length === 0 ? (
-            <div style={s.vazio}>Dados de encargos não disponíveis.</div>
+          {loadMod ? (
+            <div style={s.loading}>Carregando modulação por ramo…</div>
+          ) : modChart.length === 0 ? (
+            <div style={s.vazio}>Sem dados de modulação por ramo. Acesse páginas de agentes para gerar os cálculos.</div>
           ) : (
             <>
-              <ResponsiveContainer width="100%" height={280}>
-                <BarChart data={encChart} margin={{ top:8, right:20, left:0, bottom:0 }}>
+              <ResponsiveContainer width="100%" height={320}>
+                <LineChart data={modChart} margin={{ top:8, right:20, left:0, bottom:0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="mes" tickFormatter={fmtMes} tick={{ fontSize:11 }} />
-                  <YAxis tick={{ fontSize:11 }} tickFormatter={v=>`R$${(v/1e6).toFixed(0)}M`} width={72} />
-                  <Tooltip content={<TipEnc />} />
-                  <Legend formatter={v=><span style={{ fontSize:12 }}>{v}</span>} />
-                  <Bar dataKey="ESS" name="ESS" stackId="a" fill={ESS_COR} />
-                  <Bar dataKey="EER" name="EER" stackId="a" fill={EER_COR} radius={[3,3,0,0]} />
-                </BarChart>
+                  <YAxis
+                    tick={{ fontSize:11 }}
+                    tickFormatter={v => `${Number(v).toFixed(2)}`}
+                    width={64}
+                    label={{ value:"R$/MWh", angle:-90, position:"insideLeft", offset:10, style:{ fontSize:11, fill:"#9ca3af" } }}
+                  />
+                  <Tooltip content={<TipRamo />} />
+                  <Legend formatter={v=><span style={{ fontSize:11 }}>{v}</span>} />
+                  <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+                  {ramos.map((ramo, i) => (
+                    <Line
+                      key={ramo}
+                      type="monotone"
+                      dataKey={ramo}
+                      name={ramo}
+                      stroke={RAMO_CORES[i % RAMO_CORES.length]}
+                      strokeWidth={2}
+                      dot={{ r:3 }}
+                      connectNulls
+                    />
+                  ))}
+                </LineChart>
               </ResponsiveContainer>
 
-              <div style={{ marginTop:20, overflowX:"auto" }}>
-                <table style={s.table}>
-                  <thead>
-                    <tr>
-                      {["Mês","ESS (R$)","EER (R$)","Total (R$)","% ESS"].map(h => (
-                        <th key={h} style={s.th}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...enc].reverse().slice(0,24).map((r,i) => {
-                      const total  = (r.ess_rs||0) + (r.eer_rs||0);
-                      const essPct = total > 0 ? `${(r.ess_rs/total*100).toFixed(1)}%` : "—";
-                      return (
-                        <tr key={r.mes} style={i%2===0 ? { background:"#fafbfc" } : {}}>
-                          <td style={{ ...s.td, fontWeight:600 }}>{fmtMes(r.mes)}</td>
-                          <td style={{ ...s.td, textAlign:"right", color:ESS_COR }}>{fmtMM(r.ess_rs)}</td>
-                          <td style={{ ...s.td, textAlign:"right", color:EER_COR }}>{fmtMM(r.eer_rs)}</td>
-                          <td style={{ ...s.td, textAlign:"right", fontWeight:700 }}>{fmtMM(total)}</td>
-                          <td style={{ ...s.td, textAlign:"right" }}>{essPct}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              {modUltimo && (
+                <div style={{ marginTop:20, overflowX:"auto" }}>
+                  <p style={{ fontSize:12, color:"#64748b", margin:"0 0 10px" }}>
+                    Último mês: <strong>{fmtMes(modUltimoMes)}</strong>
+                  </p>
+                  <table style={s.table}>
+                    <thead>
+                      <tr>
+                        <th style={s.th}>Ramo de Atividade</th>
+                        <th style={{ ...s.th, textAlign:"right" }}>Custo Modulação (R$/MWh)</th>
+                        <th style={{ ...s.th, textAlign:"right" }}>Consumo (MWh)</th>
+                        <th style={{ ...s.th, textAlign:"right" }}>Agentes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {modRamo
+                        .filter(r => r.mes === modUltimoMes)
+                        .sort((a,b) => Number(b.custo_medio_rs_mwh) - Number(a.custo_medio_rs_mwh))
+                        .map((r, i) => {
+                          const custo = Number(r.custo_medio_rs_mwh);
+                          return (
+                            <tr key={r.ramo} style={i%2===0 ? { background:"#fafbfc" } : {}}>
+                              <td style={s.td}>{r.ramo}</td>
+                              <td style={{ ...s.td, textAlign:"right", fontWeight:600, color: custo > 0 ? "#dc2626" : "#16a34a" }}>
+                                {custo.toLocaleString("pt-BR",{minimumFractionDigits:2, maximumFractionDigits:2})}
+                              </td>
+                              <td style={{ ...s.td, textAlign:"right" }}>
+                                {Number(r.consumo_mwh).toLocaleString("pt-BR",{maximumFractionDigits:0})}
+                              </td>
+                              <td style={{ ...s.td, textAlign:"right" }}>{r.n_agentes}</td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </>
           )}
         </div>
