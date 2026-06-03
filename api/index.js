@@ -14,10 +14,7 @@ const { buscarMesRecente }        = require("./ccee-abertos/mcp");
 const { buscarDesligamento }      = require("./ccee-abertos/desligamento");
 const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require("./ccee-abertos/consumo-horario");
 const { buscarPldHorario, buscarPldHorarioMapa, anosDisponiveis: anosDisponiveisPld } = require("./ccee-abertos/pld-horario");
-const { buscarEssMensal }         = require("./ccee-abertos/encargos-ess");
-const { buscarEerMensal }         = require("./ccee-abertos/encargos-eer");
 const { normalizarMes } = require("./ccee-abertos/utils");
-const { limparJobsTravados }      = require("./cleanup-jobs");
 const cron                        = require("node-cron");
 
 // Cache do mês mais recente disponível nas cargas da CCEE (TTL 1 hora)
@@ -2974,15 +2971,6 @@ app.delete("/admin/consumo-horario/:agente", async (req, res) => {
   }
 });
 
-// POST /admin/cleanup-jobs — permite acionar limpeza manualmente via curl/Postman
-app.post("/admin/cleanup-jobs", async (_req, res) => {
-  try {
-    const corrigidos = await limparJobsTravados(pool);
-    return res.json({ corrigidos: corrigidos.length, jobs: corrigidos });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
-});
 
 // GET /localidade — agentes com cargas numa cidade ou estado
 // Query: ?cidade=SAO+PAULO,UBERLANDIA  |  ?estado=SP,MG  |  ?q=termo (busca livre em cidade+estado+ramo)
@@ -3531,39 +3519,6 @@ app.get("/mercado/pld", async (_req, res) => {
   }
 });
 
-// ─── Mercado: Encargos ESS e EER ──────────────────────────────────────────────
-
-let _encargosCache = { data: null, ts: 0 };
-const ENCARGOS_TTL = 2 * 60 * 60 * 1000;
-
-async function buscarEncargosCache() {
-  const agora = Date.now();
-  if (_encargosCache.data && agora - _encargosCache.ts < ENCARGOS_TTL) return _encargosCache.data;
-
-  const [ess, eer] = await Promise.all([buscarEssMensal(), buscarEerMensal()]);
-
-  const porMes = {};
-  ess.forEach(r => { porMes[r.mes] = { mes: r.mes, ess_rs: r.pagamento_ess_rs, eer_rs: 0 }; });
-  eer.forEach(r => {
-    if (!porMes[r.mes]) porMes[r.mes] = { mes: r.mes, ess_rs: 0 };
-    porMes[r.mes].eer_rs = r.eer_rs;
-  });
-
-  const data = Object.values(porMes).sort((a, b) => a.mes.localeCompare(b.mes));
-  if (data.length > 0) _encargosCache = { data, ts: agora };
-  return data;
-}
-
-// GET /mercado/encargos — ESS + EER do sistema por mês
-app.get("/mercado/encargos", async (_req, res) => {
-  try {
-    const dados = await buscarEncargosCache();
-    return res.json(dados);
-  } catch (e) {
-    console.error("[mercado/encargos] Erro:", e.message);
-    return res.status(500).json({ error: e.message });
-  }
-});
 
 // GET /mercado/modulacao-ramo — custo de modulação médio por ramo de atividade
 app.get("/mercado/modulacao-ramo", async (_req, res) => {
@@ -3594,71 +3549,6 @@ app.get("/mercado/modulacao-ramo", async (_req, res) => {
   }
 });
 
-// GET /inteligencia/:agente/encargos — estimativa ESS/EER do agente por mês
-// Usa valor_encargo da contabilização + razão ESS:EER do sistema para estimar o split
-app.get("/inteligencia/:agente/encargos", async (req, res) => {
-  const agenteRaw = decodeURIComponent(req.params.agente);
-  if (!agenteRaw || agenteRaw.trim().length < 2)
-    return res.status(400).json({ error: "Nome de agente inválido" });
-
-  const agente = normalizarAgente(agenteRaw);
-
-  try {
-    const rContab = await pool.query(`
-      SELECT mes_referencia,
-             SUM(valor_encargo) AS valor_encargo,
-             SUM(valor_tm_mcp)  AS valor_mcp,
-             SUM(resultado_final) AS resultado_final
-      FROM ccee_contabilizacao
-      WHERE agente = $1
-      GROUP BY mes_referencia
-      ORDER BY mes_referencia ASC
-    `, [agente]);
-
-    if (!rContab.rows.length) {
-      return res.json({
-        agente, meses: [],
-        aviso: "Sem dados de contabilização. Acesse a página do agente para carregar os dados primeiro.",
-      });
-    }
-
-    const sistemaEncargos = await buscarEncargosCache();
-    const sistemaMap = {};
-    sistemaEncargos.forEach(r => { sistemaMap[r.mes] = r; });
-
-    const meses = rContab.rows.map(row => {
-      const mes    = row.mes_referencia;
-      const enc    = Number(row.valor_encargo) || 0;
-      const sistema = sistemaMap[mes];
-
-      let ess_estimado = null, eer_estimado = null, ess_frac = null;
-
-      if (sistema && (sistema.ess_rs || sistema.eer_rs)) {
-        const total_sist = (sistema.ess_rs || 0) + (sistema.eer_rs || 0);
-        ess_frac      = total_sist > 0 ? (sistema.ess_rs || 0) / total_sist : 0.5;
-        ess_estimado  = Math.round(enc * ess_frac * 100) / 100;
-        eer_estimado  = Math.round((enc - ess_estimado) * 100) / 100;
-      }
-
-      return {
-        mes,
-        valor_encargo:  Math.round(enc * 100) / 100,
-        valor_mcp:      Math.round((Number(row.valor_mcp) || 0) * 100) / 100,
-        resultado_final: Math.round((Number(row.resultado_final) || 0) * 100) / 100,
-        ess_estimado,
-        eer_estimado,
-        ess_pct: ess_frac != null ? Math.round(ess_frac * 1000) / 10 : null,
-        ess_sistema: sistema?.ess_rs ?? null,
-        eer_sistema: sistema?.eer_rs ?? null,
-      };
-    });
-
-    return res.json({ agente, meses });
-  } catch (e) {
-    console.error("[inteligencia/encargos] Erro:", e.message);
-    return res.status(500).json({ error: e.message });
-  }
-});
 
 // ─── Pendentes: agentes com modulação faltante ────────────────────────────────
 
@@ -3789,10 +3679,6 @@ if (require.main === module) {
         if (i < 5) await new Promise(r => setTimeout(r, 6000));
       }
     }
-    limparJobsTravados(pool).catch(err =>
-      console.error("[startup] Falha no cleanup de jobs:", err.message)
-    );
-
     // Cron: processa modulações pendentes 4× por dia (06h, 11h, 16h, 21h horário do servidor)
     cron.schedule("0 6,11,16,21 * * *", async () => {
       console.log(`\n[cron ${new Date().toISOString()}] Verificando modulações pendentes...`);

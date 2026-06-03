@@ -295,3 +295,13 @@ CREATE TABLE ccee_jobs (
 
 CREATE INDEX idx_jobs_agente_mes ON ccee_jobs (agente, mes);
 CREATE INDEX idx_jobs_status     ON ccee_jobs (status);
+
+-- ─── Geocodificação de cidades ────────────────────────────────────────────────
+CREATE TABLE ccee_cidades_geo (
+  cidade      TEXT    NOT NULL,
+  estado_uf   CHAR(2) NOT NULL,
+  lat         DOUBLE PRECISION,
+  lon         DOUBLE PRECISION,
+  geocoded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (cidade, estado_uf)
+);
