@@ -19,7 +19,7 @@ const { buscarUsinas }                  = require("../api/ccee-abertos/geracao")
 const { buscarCargas }                  = require("../api/ccee-abertos/cargas");
 const { buscarPldHorarioMapa }          = require("../api/ccee-abertos/pld-horario");
 const { listarRecursos: listarConsumo } = require("../api/ccee-abertos/consumo-horario");
-const { listarRecursos: listarGeracao } = require("../api/ccee-abertos/geracao-horaria");
+const { buscarGeracaoHoraria, listarRecursos: listarGeracao } = require("../api/ccee-abertos/geracao-horaria");
 
 // ─── Configuração ─────────────────────────────────────────────────────────────
 
@@ -432,6 +432,22 @@ async function salvarConsumoPerfil(agente, registros) {
   }
 }
 
+async function salvarGeracaoHoraria(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_geracao_horaria (agente, mes_referencia, sigla_usina, periodo, submercado, geracao_mwmed)
+      SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::text[],$4::integer[],$5::text[],$6::numeric[])
+      ON CONFLICT (agente, mes_referencia, periodo, submercado, sigla_usina) DO NOTHING
+    `, [
+      lote.map(() => agente), lote.map(r => r.mes_referencia), lote.map(r => r.sigla_usina),
+      lote.map(r => r.periodo), lote.map(r => r.submercado), lote.map(r => r.geracao_mwmed),
+    ]);
+  }
+}
+
 const _pldCache = {};
 async function getPldMapa(mes) {
   if (!_pldCache[mes]) _pldCache[mes] = await buscarPldHorarioMapa(mes);
@@ -492,6 +508,90 @@ async function calcularModulacao(agente, meses) {
   }
 }
 
+function calcularModulacaoGeracaoUsinaSub(geracao, pldMapa, siglaUsina, submercadoFiltro) {
+  const registros = geracao.filter(r => r.sigla_usina === siglaUsina && r.submercado === submercadoFiltro);
+  if (!registros.length) return null;
+  let totalGeracao = 0, somaCurva = 0;
+  for (const r of registros) {
+    const geracaoMwmed = Number(r.geracao_mwmed) || 0;
+    const pld = pldMapa[`${r.periodo}|${submercadoFiltro}`];
+    if (pld == null) continue;
+    totalGeracao += geracaoMwmed;
+    somaCurva    += geracaoMwmed * pld;
+  }
+  let somaPldTotal = 0, nHorasPld = 0;
+  for (const [key, pld] of Object.entries(pldMapa)) {
+    if (key.endsWith(`|${submercadoFiltro}`)) { somaPldTotal += pld; nHorasPld++; }
+  }
+  if (!nHorasPld || !totalGeracao) return null;
+  const flat  = totalGeracao / nHorasPld;
+  const custo = (somaCurva - flat * somaPldTotal) / totalGeracao;
+  return {
+    sigla_usina:            siglaUsina,
+    submercado:             submercadoFiltro,
+    geracao_total_mwh:      Number(totalGeracao.toFixed(4)),
+    n_horas:                nHorasPld,
+    soma_curva_rs:          Number(somaCurva.toFixed(4)),
+    soma_flat_rs:           Number((flat * somaPldTotal).toFixed(4)),
+    custo_modulacao_rs_mwh: Number(custo.toFixed(4)),
+  };
+}
+
+async function salvarModulacaoGeracao(agente, mes, resultados) {
+  if (!resultados.length) return;
+  await pool.query(`
+    INSERT INTO ccee_modulacao_geracao
+      (agente, mes_referencia, sigla_usina, submercado, geracao_total_mwh, n_horas, soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh)
+    SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::text[],$4::text[],$5::numeric[],$6::integer[],$7::numeric[],$8::numeric[],$9::numeric[])
+    ON CONFLICT (agente, mes_referencia, sigla_usina, submercado) DO UPDATE SET
+      geracao_total_mwh      = EXCLUDED.geracao_total_mwh,
+      n_horas                = EXCLUDED.n_horas,
+      soma_curva_rs          = EXCLUDED.soma_curva_rs,
+      soma_flat_rs           = EXCLUDED.soma_flat_rs,
+      custo_modulacao_rs_mwh = EXCLUDED.custo_modulacao_rs_mwh,
+      created_at             = NOW()
+  `, [
+    resultados.map(() => agente), resultados.map(() => mes),
+    resultados.map(r => r.sigla_usina), resultados.map(r => r.submercado),
+    resultados.map(r => r.geracao_total_mwh), resultados.map(r => r.n_horas),
+    resultados.map(r => r.soma_curva_rs), resultados.map(r => r.soma_flat_rs),
+    resultados.map(r => r.custo_modulacao_rs_mwh),
+  ]);
+}
+
+async function calcularModulacaoGeracao(agente, meses, siglasUsinas) {
+  for (const mes of meses) {
+    const nDB = await pool.query(
+      "SELECT COUNT(*) AS n FROM ccee_geracao_horaria WHERE agente=$1 AND mes_referencia=$2",
+      [agente, mes]
+    );
+    if (Number(nDB.rows[0].n) === 0) {
+      try {
+        const registros = await buscarGeracaoHoraria(mes, siglasUsinas);
+        if (registros.length > 0) await salvarGeracaoHoraria(agente, registros);
+        else { console.log(`    ${mes}: sem geração`); continue; }
+      } catch (e) { console.warn(`    Geração ${mes}: ${e.message}`); continue; }
+    }
+
+    const rGeracao = await pool.query(
+      "SELECT sigla_usina, periodo, submercado, geracao_mwmed FROM ccee_geracao_horaria WHERE agente=$1 AND mes_referencia=$2 ORDER BY sigla_usina, periodo",
+      [agente, mes]
+    );
+    if (!rGeracao.rows.length) continue;
+
+    let pldMapa;
+    try { pldMapa = await getPldMapa(mes); } catch (e) { console.warn(`    PLD ${mes}: ${e.message}`); continue; }
+
+    const combos = [...new Set(rGeracao.rows.map(r => `${r.sigla_usina}|${r.submercado}`))];
+    const resultados = combos
+      .map(c => { const [u, s] = c.split("|"); return calcularModulacaoGeracaoUsinaSub(rGeracao.rows, pldMapa, u, s); })
+      .filter(Boolean);
+    if (!resultados.length) continue;
+    await salvarModulacaoGeracao(agente, mes, resultados);
+    resultados.forEach(r => console.log(`    ${mes} ${r.sigla_usina} ${r.submercado}: ${r.geracao_total_mwh} MWh | ${r.custo_modulacao_rs_mwh} R$/MWh`));
+  }
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -506,7 +606,7 @@ async function main() {
   const urlGeracao = Object.fromEntries(recursosGer.map(r => [r.mes, r.url]));
 
   // ── Fase 1: Descobrir agentes no CKAN ──────────────────────────────────────
-  console.log("\n[1/4] Descobrindo agentes no CKAN...");
+  console.log("\n[1/5] Descobrindo agentes no CKAN...");
   const nomesNoCKAN = await descobrirAgentesNoCKAN(recursosCon);
 
   // Agentes já no banco (por razao_social e por agente)
@@ -531,7 +631,7 @@ async function main() {
 
   // ── Fase 2: Onboarding de novos agentes ───────────────────────────────────
   if (novosNomes.length > 0 && !SEM_POWERBI) {
-    console.log(`\n[2/4] Onboarding de ${novosNomes.length} novos agentes via Power BI...`);
+    console.log(`\n[2/5] Onboarding de ${novosNomes.length} novos agentes via Power BI...`);
     for (let i = 0; i < novosNomes.length; i++) {
       const nome = novosNomes[i];
       process.stdout.write(`  [${String(i + 1).padStart(3)}/${novosNomes.length}] ${nome.slice(0, 50).padEnd(52)} `);
@@ -552,9 +652,9 @@ async function main() {
       if (i < novosNomes.length - 1) await delay(DELAY_MS);
     }
   } else if (novosNomes.length > 0) {
-    console.log(`\n[2/4] ${novosNomes.length} novos ignorados (--sem-powerbi)`);
+    console.log(`\n[2/5] ${novosNomes.length} novos ignorados (--sem-powerbi)`);
   } else {
-    console.log("\n[2/4] Nenhum agente novo — pulando onboarding");
+    console.log("\n[2/5] Nenhum agente novo — pulando onboarding");
   }
 
   // Lista final de agentes a processar (todos que têm match no CKAN)
@@ -588,7 +688,7 @@ async function main() {
   }
 
   // ── Fase 3: Download de consumo por mês ───────────────────────────────────
-  console.log(`\n[3/4] Baixando consumo horário — ${mesesParaProcessar.length} meses`);
+  console.log(`\n[3/5] Baixando consumo horário — ${mesesParaProcessar.length} meses`);
   const consumoPorAgente = {}; // agente → mes → { periodo|sub: registro }
   agentesAtivos.forEach(a => { consumoPorAgente[a.agente] = {}; });
 
@@ -646,7 +746,7 @@ async function main() {
   }
 
   // ── Fase 4: Modulação ──────────────────────────────────────────────────────
-  console.log(`\n[4/4] Calculando modulação`);
+  console.log(`\n[4/5] Calculando modulação`);
   for (const { agente } of agentesAtivos) {
     const { rows: pend } = await pool.query(`
       SELECT DISTINCT mes_referencia FROM ccee_consumo_horario
@@ -658,6 +758,28 @@ async function main() {
     if (!pend.length) continue;
     console.log(`\n  ${agente} — ${pend.length} meses pendentes`);
     await calcularModulacao(agente, pend.map(r => r.mes_referencia));
+  }
+
+  // ── Fase 5: Modulação de geração ──────────────────────────────────────────
+  console.log(`\n[5/5] Calculando modulação de geração`);
+  for (const { agente } of agentesAtivos) {
+    const rUsinas = await pool.query(
+      "SELECT DISTINCT sigla_parcela_usina FROM ccee_usinas WHERE agente=$1 AND sigla_parcela_usina IS NOT NULL",
+      [agente]
+    );
+    if (!rUsinas.rows.length) continue;
+    const siglasUsinas = rUsinas.rows.map(r => r.sigla_parcela_usina);
+
+    const { rows: pend } = await pool.query(`
+      SELECT mes FROM ccee_dados
+      WHERE agente=$1 AND mes >= $2
+        AND NOT EXISTS (SELECT 1 FROM ccee_modulacao_geracao m WHERE m.agente=$1 AND m.mes_referencia=ccee_dados.mes)
+      ORDER BY mes
+    `, [agente, PRIMEIRO_MES]);
+
+    if (!pend.length) continue;
+    console.log(`\n  ${agente} — ${pend.length} meses pendentes (${siglasUsinas.length} usinas)`);
+    await calcularModulacaoGeracao(agente, pend.map(r => r.mes), siglasUsinas);
   }
 
   await pool.end();
