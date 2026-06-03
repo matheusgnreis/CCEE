@@ -34,7 +34,7 @@ const CLASSES_SKIP   = new Set(["Comercializador"]);
 const DELAY_MS       = 1500;
 
 const args          = process.argv.slice(2);
-const MES_FIXO      = args[args.indexOf("--mes") + 1] || null;
+const MES_FIXO      = (() => { const i = args.indexOf("--mes"); return i !== -1 ? (args[i + 1] || null) : null; })();
 const SEM_POWERBI   = args.includes("--sem-powerbi");
 const TODOS_MESES   = args.includes("--todos-meses"); // streama todos os meses p/ descoberta
 const APENAS_UF     = (() => {                        // --apenas-uf MG  (ou SP, RJ, etc.)
