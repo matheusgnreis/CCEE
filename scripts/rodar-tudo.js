@@ -37,6 +37,10 @@ const args          = process.argv.slice(2);
 const MES_FIXO      = args[args.indexOf("--mes") + 1] || null;
 const SEM_POWERBI   = args.includes("--sem-powerbi");
 const TODOS_MESES   = args.includes("--todos-meses"); // streama todos os meses p/ descoberta
+const APENAS_UF     = (() => {                        // --apenas-uf MG  (ou SP, RJ, etc.)
+  const idx = args.indexOf("--apenas-uf");
+  return idx !== -1 ? (args[idx + 1] || "").toUpperCase() : null;
+})();
 
 // Limite de tamanho do banco (MB). Lê de DB_MAX_MB no .env, padrão 4500 MB (~4,4 GB)
 // Seta para o tamanho INCLUÍDO no plano (sem o espaço extra).
@@ -663,13 +667,25 @@ async function main() {
   }
 
   // Lista final de agentes a processar (todos que têm match no CKAN)
-  const agentesAtivos = [...new Map(
+  let agentesAtivos = [...new Map(
     [...nomeToAgente.values()].map(a => [a.agente, a])
   ).values()].filter(a => !CLASSES_SKIP.has(a.classe));
 
   const nomeToAgenteKey = new Map(); // NOME_upper → agente_key
   for (const [nome, meta] of nomeToAgente) {
     nomeToAgenteKey.set(stripAccents(nome.trim().toUpperCase()), meta.agente);
+  }
+
+  // Filtro por UF (ex: --apenas-uf MG)
+  if (APENAS_UF) {
+    const { rows: comUF } = await pool.query(
+      "SELECT DISTINCT agente FROM ccee_cargas WHERE agente = ANY($1) AND estado_uf = $2",
+      [agentesAtivos.map(a => a.agente), APENAS_UF]
+    );
+    const comUFSet = new Set(comUF.map(r => r.agente));
+    const antes = agentesAtivos.length;
+    agentesAtivos = agentesAtivos.filter(a => comUFSet.has(a.agente));
+    console.log(`\n  Filtro UF=${APENAS_UF}: ${agentesAtivos.length} de ${antes} agentes têm carga no estado`);
   }
 
   console.log(`\n  ${agentesAtivos.length} agentes para processar`);
