@@ -3,7 +3,7 @@ import { useRouter } from "next/router";
 import Link from "next/link";
 import MultiSelect from "../../components/MultiSelect";
 import {
-  LineChart, AreaChart, Area, Line, XAxis, YAxis, CartesianGrid,
+  LineChart, BarChart, Bar, AreaChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine
 } from "recharts";
 
@@ -116,6 +116,8 @@ export default function AgenteDashboard() {
 
   const [contabilizacao,   setContabilizacao]   = useState([]);
   const [loadingContab,    setLoadingContab]    = useState(false);
+  const [encargosHist,     setEncargosHist]     = useState([]);
+  const [loadingEncargos,  setLoadingEncargos]  = useState(false);
 
   const [desligamento,     setDesligamento]     = useState(null);
 
@@ -307,6 +309,31 @@ export default function AgenteDashboard() {
       .catch(() => {})
       .finally(() => setLoadingContab(false));
   }, [agente, mesSelecionado]);
+
+  // ── 5b. Histórico completo de encargos por agente (todos os meses) ──
+  useEffect(() => {
+    if (!agente) return;
+    setLoadingEncargos(true);
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contabilizacao`)
+      .then(r => r.json())
+      .then(json => {
+        if (json.error || !Array.isArray(json)) return;
+        // Agrega valor_encargo por mês (soma de todos os perfis)
+        const porMes = {};
+        for (const r of json) {
+          const mes = r.mes_referencia;
+          if (!mes) continue;
+          const v = r.valor_encargo != null ? Number(r.valor_encargo) : 0;
+          porMes[mes] = (porMes[mes] || 0) + v;
+        }
+        const agregado = Object.entries(porMes)
+          .map(([mes, total]) => ({ mes, total: Math.round(total * 100) / 100 }))
+          .sort((a, b) => a.mes.localeCompare(b.mes));
+        setEncargosHist(agregado);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingEncargos(false));
+  }, [agente]);
 
   // ── 5. Busca usinas quando o agente ou mês selecionado mudar ────────
   useEffect(() => {
@@ -1541,7 +1568,72 @@ export default function AgenteDashboard() {
           );
         })()}
 
-        {/* ── Encargos CCEE: ESS e EER ──────────────────────────── */}
+        {/* ── Encargos CCEE pagos pelo agente ──────────────────── */}
+        {(loadingEncargos || encargosHist.length > 0) && (
+          <div style={s.chartBox}>
+            <div style={s.cargasHeader}>
+              <h2 style={s.chartTitle}>Encargos CCEE</h2>
+              {loadingEncargos && <span style={{ fontSize: 12, color: "#94a3b8" }}>Carregando...</span>}
+            </div>
+            {encargosHist.length > 0 && (() => {
+              const valores = encargosHist.map(d => d.total).filter(v => isFinite(v));
+              const minV = Math.min(...valores);
+              const maxV = Math.max(...valores);
+              const pad  = (maxV - minV) * 0.12 || Math.abs(maxV) * 0.1 || 100;
+              const yDomain = [Math.floor(minV - pad), Math.ceil(maxV + pad)];
+              const fmtTick = v => {
+                const n = Number(v);
+                if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+                if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
+                return n.toFixed(0);
+              };
+              return (
+                <>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart data={encargosHist} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                      <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#9ca3af" }} />
+                      <YAxis
+                        tick={{ fontSize: 11, fill: "#9ca3af" }}
+                        domain={yDomain}
+                        tickFormatter={fmtTick}
+                        label={{ value: "R$", angle: -90, position: "insideLeft", offset: 10, style: { fontSize: 11, fill: "#9ca3af" } }}
+                        width={55}
+                      />
+                      <Tooltip
+                        contentStyle={{ borderRadius: 8, fontSize: 13, border: "1px solid #e2e8f0" }}
+                        formatter={v => [`R$ ${Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`, "Encargos"]}
+                      />
+                      <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
+                      <Bar dataKey="total" name="Encargos" fill="#6366f1" radius={[3, 3, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                  <div style={{ overflowX: "auto", marginTop: 16 }}>
+                    <table style={s.tabelaSimples}>
+                      <thead>
+                        <tr>
+                          <th style={s.thSimples}>Mês</th>
+                          <th style={{ ...s.thSimples, textAlign: "right" }}>Encargos (R$)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...encargosHist].reverse().map((r, i) => (
+                          <tr key={r.mes} style={i % 2 === 0 ? { background: "#fafbfc" } : {}}>
+                            <td style={s.tdSimples}>{r.mes}</td>
+                            <td style={{ ...s.tdSimples, textAlign: "right", fontWeight: 600, color: r.total < 0 ? "#16a34a" : "#374151" }}>
+                              {r.total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
         {/* ── Contabilização por Perfil ─────────────────────────── */}
         {contabilizacao.length > 0 && (
           <div style={s.chartBox}>
