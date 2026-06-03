@@ -1022,6 +1022,29 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+// GET /agentes/busca?q= — autocomplete de agentes por nome ou razão social
+app.get("/agentes/busca", async (req, res) => {
+  const q = (req.query.q || "").trim();
+  if (q.length < 2) return res.json([]);
+  try {
+    const { rows } = await pool.query(
+      `SELECT agente, razao_social, sigla, classe
+         FROM ccee_agentes
+        WHERE agente ILIKE $1 OR razao_social ILIKE $1
+        ORDER BY
+          CASE WHEN agente ILIKE $2 THEN 0
+               WHEN razao_social ILIKE $2 THEN 1
+               ELSE 2 END,
+          agente
+        LIMIT 10`,
+      [`%${q}%`, `${q}%`]
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /inteligencia/:agente — dados do mês + metadados
 // Query param opcional: ?mes=YYYY-MM (default: mês recente)
 app.get("/inteligencia/:agente", limitePowerBI, async (req, res) => {

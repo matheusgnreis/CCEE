@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -55,9 +55,14 @@ function fmtMes(m) {
 
 export default function Home() {
   const router = useRouter();
-  const [busca, setBusca] = useState("");
-  const [pld,   setPld]   = useState(null);
-  const [pldErr, setPldErr] = useState(null);
+  const [busca,       setBusca]       = useState("");
+  const [sugestoes,   setSugestoes]   = useState([]);
+  const [dropOpen,    setDropOpen]    = useState(false);
+  const [dropIdx,     setDropIdx]     = useState(-1);
+  const [pld,         setPld]         = useState(null);
+  const [pldErr,      setPldErr]      = useState(null);
+  const debounceRef   = useRef(null);
+  const containerRef  = useRef(null);
 
   useEffect(() => {
     fetch(`${API_URL}/pld/resumo?submercado=SE`)
@@ -66,8 +71,63 @@ export default function Home() {
       .catch(e => setPldErr(e.message));
   }, []);
 
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClick(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setDropOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  const fetchSugestoes = useCallback((q) => {
+    clearTimeout(debounceRef.current);
+    if (q.trim().length < 2) { setSugestoes([]); setDropOpen(false); return; }
+    debounceRef.current = setTimeout(() => {
+      fetch(`${API_URL}/agentes/busca?q=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (Array.isArray(data)) { setSugestoes(data); setDropOpen(data.length > 0); }
+        })
+        .catch(() => {});
+    }, 300);
+  }, []);
+
+  function handleInputChange(e) {
+    const val = e.target.value.toUpperCase();
+    setBusca(val);
+    setDropIdx(-1);
+    fetchSugestoes(val);
+  }
+
+  function selecionarSugestao(item) {
+    setDropOpen(false);
+    setSugestoes([]);
+    setBusca(item.agente);
+    router.push(`/inteligencia/${encodeURIComponent(item.agente)}`);
+  }
+
+  function handleKeyDown(e) {
+    if (!dropOpen || sugestoes.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setDropIdx(i => Math.min(i + 1, sugestoes.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setDropIdx(i => Math.max(i - 1, -1));
+    } else if (e.key === "Enter" && dropIdx >= 0) {
+      e.preventDefault();
+      selecionarSugestao(sugestoes[dropIdx]);
+    } else if (e.key === "Escape") {
+      setDropOpen(false);
+    }
+  }
+
   function handleBusca(e) {
     e.preventDefault();
+    setDropOpen(false);
     const nome = busca.trim().toUpperCase();
     if (nome.length >= 2) {
       router.push(`/inteligencia/${encodeURIComponent(nome)}`);
@@ -115,19 +175,42 @@ export default function Home() {
             Acompanhe consumo, compra, resultado e balanço energético de agentes
             registrados na CCEE. Dados atualizados diretamente dos dados abertos da CCEE.
           </p>
-          <form onSubmit={handleBusca} className="search-form" style={s.searchForm}>
-            <input
-              type="text"
-              placeholder="Nome do agente"
-              value={busca}
-              onChange={e => setBusca(e.target.value.toUpperCase())}
-              className="search-input"
-              style={s.searchInput}
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <button type="submit" className="search-btn" style={s.searchBtn}>Buscar →</button>
-          </form>
+          <div ref={containerRef} style={{ position: "relative", maxWidth: 560, margin: "0 auto 20px" }}>
+            <form onSubmit={handleBusca} className="search-form" style={{ ...s.searchForm, margin: 0 }}>
+              <input
+                type="text"
+                placeholder="Nome do agente ou razão social"
+                value={busca}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                onFocus={() => sugestoes.length > 0 && setDropOpen(true)}
+                className="search-input"
+                style={s.searchInput}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button type="submit" className="search-btn" style={s.searchBtn}>Buscar →</button>
+            </form>
+            {dropOpen && sugestoes.length > 0 && (
+              <ul style={s.dropdown}>
+                {sugestoes.map((item, i) => (
+                  <li
+                    key={item.agente}
+                    onMouseDown={() => selecionarSugestao(item)}
+                    style={{
+                      ...s.dropItem,
+                      background: i === dropIdx ? "rgba(37,99,235,0.08)" : "transparent",
+                    }}
+                  >
+                    <span style={s.dropAgente}>{item.agente}</span>
+                    {item.razao_social && (
+                      <span style={s.dropRazao}>{item.razao_social}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <a
             href="https://www.ccee.org.br"
             target="_blank"
@@ -422,6 +505,45 @@ const s = {
     color: "#64748b",
     textDecoration: "none",
     marginTop: 4,
+  },
+  dropdown: {
+    position: "absolute",
+    top: "calc(100% + 4px)",
+    left: 0,
+    right: 0,
+    background: "#1e293b",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 10,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+    listStyle: "none",
+    margin: 0,
+    padding: "4px 0",
+    zIndex: 200,
+    maxHeight: 320,
+    overflowY: "auto",
+  },
+  dropItem: {
+    padding: "10px 16px",
+    cursor: "pointer",
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    borderRadius: 6,
+    margin: "0 4px",
+    transition: "background 0.1s",
+  },
+  dropAgente: {
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#f1f5f9",
+    letterSpacing: 0.2,
+  },
+  dropRazao: {
+    fontSize: 12,
+    color: "#94a3b8",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
   btnPrimary: {
     display: "inline-block",
