@@ -46,12 +46,14 @@ const TipRamo = ({ active, payload, label }) => {
 };
 
 export default function MercadoDashboard() {
-  const [pld,      setPld]      = useState([]);
-  const [modRamo,  setModRamo]  = useState([]);
-  const [loadPld,  setLoadPld]  = useState(true);
-  const [loadMod,  setLoadMod]  = useState(true);
-  const [errPld,   setErrPld]   = useState(null);
-  const [errMod,   setErrMod]   = useState(null);
+  const [pld,          setPld]          = useState([]);
+  const [modRamo,      setModRamo]      = useState([]);
+  const [loadPld,      setLoadPld]      = useState(true);
+  const [loadMod,      setLoadMod]      = useState(true);
+  const [errPld,       setErrPld]       = useState(null);
+  const [errMod,       setErrMod]       = useState(null);
+  const [selectedSub,  setSelectedSub]  = useState(null);
+  const [selectedRamo, setSelectedRamo] = useState(null);
 
   useEffect(() => {
     fetch(`${API_URL}/mercado/pld`)
@@ -72,7 +74,6 @@ export default function MercadoDashboard() {
     ? [...new Set(pld.flatMap(r => Object.keys(r).filter(k => k !== "mes")))]
     : [];
 
-  // Pivota modRamo: [{ramo, mes, custo_medio_rs_mwh}] → [{mes, ramo1: v, ramo2: v}]
   const ramos = [...new Set(modRamo.map(r => r.ramo))].sort();
   const modChart = (() => {
     const porMes = {};
@@ -83,9 +84,28 @@ export default function MercadoDashboard() {
     return Object.values(porMes).sort((a,b) => a.mes.localeCompare(b.mes));
   })();
 
-  // Último mês disponível na modulação
   const modUltimoMes = modChart.at(-1)?.mes || null;
   const modUltimo    = modChart.at(-1) || null;
+
+  function handleClickSub(data) {
+    const key = data.dataKey;
+    setSelectedSub(prev => prev === key ? null : key);
+  }
+
+  function handleClickRamo(data) {
+    const key = data.dataKey;
+    setSelectedRamo(prev => prev === key ? null : key);
+  }
+
+  function subOpacity(sub) {
+    if (!selectedSub) return 1;
+    return sub === selectedSub ? 1 : 0.12;
+  }
+
+  function ramoOpacity(ramo) {
+    if (!selectedRamo) return 1;
+    return ramo === selectedRamo ? 1 : 0.12;
+  }
 
   return (
     <div style={s.page}>
@@ -120,7 +140,10 @@ export default function MercadoDashboard() {
         {/* ── PLD histórico ───────────────────────────────────── */}
         <div style={s.box}>
           <h2 style={s.boxTitle}>PLD Médio Mensal por Submercado (R$/MWh)</h2>
-          <p style={s.boxDesc}>Média das horas de cada mês — Fonte: CCEE Dados Abertos · pld_horario</p>
+          <p style={s.boxDesc}>
+            Média das horas de cada mês — Fonte: CCEE Dados Abertos · pld_horario
+            {selectedSub && <> · <button onClick={() => setSelectedSub(null)} style={s.btnLimpar}>Mostrar todos</button></>}
+          </p>
 
           {errPld && <div style={s.err}>{errPld}</div>}
 
@@ -136,10 +159,29 @@ export default function MercadoDashboard() {
                   <XAxis dataKey="mes" tickFormatter={fmtMes} tick={{ fontSize:11 }} />
                   <YAxis tick={{ fontSize:11 }} tickFormatter={v=>`R$${v}`} width={64} />
                   <Tooltip content={<TipPld />} />
-                  <Legend formatter={v=><span style={{ fontSize:12 }}>{v}</span>} />
+                  <Legend
+                    onClick={handleClickSub}
+                    formatter={(v, entry) => (
+                      <span style={{
+                        fontSize: 12,
+                        cursor: "pointer",
+                        opacity: selectedSub ? (entry.dataKey === selectedSub ? 1 : 0.4) : 1,
+                        fontWeight: selectedSub && entry.dataKey === selectedSub ? 700 : 400,
+                      }}>{v}</span>
+                    )}
+                  />
                   {submercados.map(sub => (
-                    <Line key={sub} type="monotone" dataKey={sub} name={`Sub ${sub}`}
-                      stroke={SUB_CORES[sub]||"#94a3b8"} strokeWidth={2} dot={false} connectNulls />
+                    <Line
+                      key={sub}
+                      type="monotone"
+                      dataKey={sub}
+                      name={`Sub ${sub}`}
+                      stroke={SUB_CORES[sub]||"#94a3b8"}
+                      strokeWidth={selectedSub === sub ? 3 : 2}
+                      strokeOpacity={subOpacity(sub)}
+                      dot={false}
+                      connectNulls
+                    />
                   ))}
                 </LineChart>
               </ResponsiveContainer>
@@ -150,7 +192,16 @@ export default function MercadoDashboard() {
                     <tr>
                       <th style={s.th}>Mês</th>
                       {submercados.map(sub => (
-                        <th key={sub} style={{ ...s.th, color:SUB_CORES[sub]||"#64748b" }}>Sub {sub} (R$/MWh)</th>
+                        <th
+                          key={sub}
+                          onClick={() => setSelectedSub(p => p === sub ? null : sub)}
+                          style={{
+                            ...s.th,
+                            color: selectedSub ? (sub === selectedSub ? SUB_CORES[sub]||"#64748b" : "#cbd5e1") : SUB_CORES[sub]||"#64748b",
+                            cursor: "pointer",
+                            fontWeight: selectedSub === sub ? 800 : 600,
+                          }}
+                        >Sub {sub} (R$/MWh)</th>
                       ))}
                     </tr>
                   </thead>
@@ -159,7 +210,12 @@ export default function MercadoDashboard() {
                       <tr key={r.mes} style={i%2===0 ? { background:"#fafbfc" } : {}}>
                         <td style={{ ...s.td, fontWeight:600 }}>{fmtMes(r.mes)}</td>
                         {submercados.map(sub => (
-                          <td key={sub} style={{ ...s.td, textAlign:"right", color:SUB_CORES[sub]||"#374151" }}>
+                          <td key={sub} style={{
+                            ...s.td,
+                            textAlign:"right",
+                            color: selectedSub ? (sub === selectedSub ? SUB_CORES[sub]||"#374151" : "#cbd5e1") : SUB_CORES[sub]||"#374151",
+                            fontWeight: selectedSub === sub ? 700 : 400,
+                          }}>
                             {r[sub] != null ? Number(r[sub]).toLocaleString("pt-BR",{minimumFractionDigits:2}) : "—"}
                           </td>
                         ))}
@@ -178,6 +234,7 @@ export default function MercadoDashboard() {
           <p style={s.boxDesc}>
             Custo médio de modulação dos agentes agrupados por ramo — positivo indica consumo concentrado em horas de PLD alto, negativo indica perfil favorável.<br />
             Fonte: cálculo sobre PLD horário CCEE × perfil de carga dos agentes cadastrados.
+            {selectedRamo && <> · <button onClick={() => setSelectedRamo(null)} style={s.btnLimpar}>Mostrar todos</button></>}
           </p>
 
           {errMod && <div style={s.err}>{errMod}</div>}
@@ -199,7 +256,17 @@ export default function MercadoDashboard() {
                     label={{ value:"R$/MWh", angle:-90, position:"insideLeft", offset:10, style:{ fontSize:11, fill:"#9ca3af" } }}
                   />
                   <Tooltip content={<TipRamo />} />
-                  <Legend formatter={v=><span style={{ fontSize:11 }}>{v}</span>} />
+                  <Legend
+                    onClick={handleClickRamo}
+                    formatter={(v, entry) => (
+                      <span style={{
+                        fontSize: 11,
+                        cursor: "pointer",
+                        opacity: selectedRamo ? (entry.dataKey === selectedRamo ? 1 : 0.35) : 1,
+                        fontWeight: selectedRamo && entry.dataKey === selectedRamo ? 700 : 400,
+                      }}>{v}</span>
+                    )}
+                  />
                   <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="4 2" strokeWidth={1} />
                   {ramos.map((ramo, i) => (
                     <Line
@@ -208,8 +275,9 @@ export default function MercadoDashboard() {
                       dataKey={ramo}
                       name={ramo}
                       stroke={RAMO_CORES[i % RAMO_CORES.length]}
-                      strokeWidth={2}
-                      dot={{ r:3 }}
+                      strokeWidth={selectedRamo === ramo ? 3 : 2}
+                      strokeOpacity={ramoOpacity(ramo)}
+                      dot={{ r: selectedRamo === ramo ? 4 : 3, fillOpacity: ramoOpacity(ramo) }}
                       connectNulls
                     />
                   ))}
@@ -235,10 +303,21 @@ export default function MercadoDashboard() {
                         .filter(r => r.mes === modUltimoMes)
                         .sort((a,b) => Number(b.custo_medio_rs_mwh) - Number(a.custo_medio_rs_mwh))
                         .map((r, i) => {
-                          const custo = Number(r.custo_medio_rs_mwh);
+                          const custo     = Number(r.custo_medio_rs_mwh);
+                          const selecionado = selectedRamo === r.ramo;
+                          const desbotado   = selectedRamo && !selecionado;
                           return (
-                            <tr key={r.ramo} style={i%2===0 ? { background:"#fafbfc" } : {}}>
-                              <td style={s.td}>{r.ramo}</td>
+                            <tr
+                              key={r.ramo}
+                              onClick={() => setSelectedRamo(p => p === r.ramo ? null : r.ramo)}
+                              style={{
+                                ...(i%2===0 ? { background:"#fafbfc" } : {}),
+                                opacity: desbotado ? 0.35 : 1,
+                                cursor: "pointer",
+                                ...(selecionado ? { background:"#eff6ff" } : {}),
+                              }}
+                            >
+                              <td style={{ ...s.td, fontWeight: selecionado ? 700 : 400 }}>{r.ramo}</td>
                               <td style={{ ...s.td, textAlign:"right", fontWeight:600, color: custo > 0 ? "#dc2626" : "#16a34a" }}>
                                 {custo.toLocaleString("pt-BR",{minimumFractionDigits:2, maximumFractionDigits:2})}
                               </td>
@@ -283,4 +362,5 @@ const s = {
   table:   { width:"100%", borderCollapse:"collapse", fontSize:13 },
   th:      { padding:"9px 12px", textAlign:"left", background:"#f8fafc", color:"#64748b", fontWeight:600, borderBottom:"2px solid #e2e8f0", whiteSpace:"nowrap" },
   td:      { padding:"8px 12px", borderBottom:"1px solid #f1f5f9", whiteSpace:"nowrap" },
+  btnLimpar: { fontSize:11, color:"#2563eb", background:"none", border:"none", cursor:"pointer", padding:"0 4px", textDecoration:"underline" },
 };
