@@ -566,6 +566,11 @@ async function calcularModulacaoGeracao(agente, meses, siglasUsinas) {
       [agente, mes]
     );
     if (Number(nDB.rows[0].n) === 0) {
+      const espacoOk = await checarEspaco(`ger ${agente} ${mes}`);
+      if (!espacoOk) {
+        console.log(`\n  🔴 Banco cheio — interrompendo modulação de geração.`);
+        return;
+      }
       try {
         const registros = await buscarGeracaoHoraria(mes, siglasUsinas);
         if (registros.length > 0) await salvarGeracaoHoraria(agente, registros);
