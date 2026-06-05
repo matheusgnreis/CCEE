@@ -18,9 +18,10 @@ const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 function normalizarMes(valor) {
   if (valor == null) return null;
   const str = valor.toString().trim();
-  if (/^\d{4}-\d{2}$/.test(str))  return str;
-  if (/^\d{6}$/.test(str))        return `${str.slice(0, 4)}-${str.slice(4, 6)}`;
-  if (/^\d{4}\/\d{2}$/.test(str)) return str.replace("/", "-");
+  if (/^\d{4}-\d{2}$/.test(str))    return str;
+  if (/^\d{6}$/.test(str))          return `${str.slice(0, 4)}-${str.slice(4, 6)}`;
+  if (/^\d{4}\/\d{2}$/.test(str))   return str.replace("/", "-");
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 7); // YYYY-MM-DD → YYYY-MM
   return str;
 }
 
@@ -49,6 +50,7 @@ async function fetchPagina(datasetId, filtros, offset = 0) {
   const url        = `${CKAN_SEARCH_URL}?${params}`;
   const controller = new AbortController();
   const timer      = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  console.log(`Fetching page: ${url}`);
 
   try {
     const res = await fetch(url, {
@@ -108,7 +110,7 @@ async function fetchMesRecente(datasetId, filtros) {
   const url        = `${CKAN_SEARCH_URL}?${params}`;
   const controller = new AbortController();
   const timer      = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
+  console.log(`Fetching recent month: ${url}`);
   try {
     const res = await fetch(url, {
       signal:  controller.signal,
@@ -187,7 +189,7 @@ async function descobrirIdsPorAno(anchorId, fallbackIds) {
     const ids = {};
     for (const r of (pkg.resources || [])) {
       const texto = `${r.name || ""} ${r.description || ""} ${r.url || ""}`;
-      const m     = texto.match(/\b(20\d{2})\b/);
+      const m     = texto.match(/(?<!\d)(20\d{2})(?!\d)/);
       if (m && r.id) ids[Number(m[1])] = r.id;
     }
     if (Object.keys(ids).length) {

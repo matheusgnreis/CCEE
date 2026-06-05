@@ -9,13 +9,17 @@ const rateLimit = require("express-rate-limit");
 const { buscarCargas }            = require("./ccee-abertos/cargas");
 const { buscarGeracaoHoraria }    = require("./ccee-abertos/geracao-horaria");
 const { buscarUsinas }            = require("./ccee-abertos/geracao");
-const { buscarContabilizacao }    = require("./ccee-abertos/contabilizacao");
+const { buscarContabilizacao }       = require("./ccee-abertos/contabilizacao");
+const { buscarConsumoMensalPerfil }  = require("./ccee-abertos/consumo-mensal-perfil");
+const { buscarContratosPerfil }      = require("./ccee-abertos/contratos-perfil");
 const { buscarMesRecente }        = require("./ccee-abertos/mcp");
 const { buscarDesligamento }      = require("./ccee-abertos/desligamento");
 const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require("./ccee-abertos/consumo-horario");
 const { buscarPldHorario, buscarPldHorarioMapa, anosDisponiveis: anosDisponiveisPld } = require("./ccee-abertos/pld-horario");
 const { normalizarMes } = require("./ccee-abertos/utils");
+const { decodificarBitmaskDSR, extrairSerieDSR, extrairSerieGeracao, mergeHistorico } = require("./powerbi-utils");
 const cron                        = require("node-cron");
+const cache                       = require("./cache");
 
 // Cache do mês mais recente disponível nas cargas da CCEE (TTL 1 hora)
 let _mesCCEECache = { mes: null, ts: 0 };
@@ -161,107 +165,7 @@ function extrairDados(result, agente, mes) {
   };
 }
 
-// Extrai série histórica genérica — bitmask DSR (Ø = null-mask, R = carry-mask)
-// Colunas: [ANO, MES_NOME(D0), MES_ANO(D1), campoA, campoB, (campoC?)]
-function extrairSerieDSR(result, agente, campoA, campoB, campoC = null) {
-  const dsr = result?.result?.data?.dsr?.DS?.[0];
-  if (!dsr) return [];
-
-  const dm = dsr?.PH?.[0]?.DM0;
-  if (!dm || !Array.isArray(dm)) return [];
-
-  const meses = dsr?.ValueDicts?.D1 || [];
-  const rows  = [];
-  const N     = campoC ? 6 : 5;
-  let prev    = new Array(N).fill(null);
-
-  for (const item of dm) {
-    const C    = item.C || [];
-    const full = new Array(N).fill(null);
-    let ci     = 0;
-
-    if (typeof item["Ø"] === "number") {
-      // Ø: bit=1 → campo é null (omitido de C), bit=0 → próximo valor de C
-      const mask = item["Ø"];
-      for (let i = 0; i < N; i++)
-        full[i] = (mask & (1 << i)) ? null : (C[ci++] ?? null);
-    } else {
-      // R: bit=1 → carrega de prev, bit=0 → próximo valor de C
-      const mask = typeof item.R === "number" ? item.R : 0;
-      for (let i = 0; i < N; i++)
-        full[i] = (mask & (1 << i)) ? prev[i] : (C[ci++] ?? null);
-    }
-    prev = full;
-
-    const mesVal = typeof full[2] === "number" ? meses[full[2]] : full[2];
-    if (!mesVal || typeof mesVal !== "string") continue;
-
-    const mes = mesVal.replace("/", "-");
-    if (!/^\d{4}-\d{2}$/.test(mes)) continue;
-
-    const row = { agente, mes, [campoA]: Number(full[3]) || 0, [campoB]: Number(full[4]) || 0 };
-    if (campoC) row[campoC] = full[5] != null ? Number(full[5]) || null : null;
-    rows.push(row);
-  }
-
-  return rows;
-}
-
-// Merge de duas séries históricas por mês
-function mergeHistorico(serieA, serieB) {
-  const map = {};
-  serieA.forEach(r => { map[r.mes] = { ...r }; });
-  serieB.forEach(r => {
-    if (map[r.mes]) Object.assign(map[r.mes], r);
-    else map[r.mes] = { ...r };
-  });
-  return Object.values(map).sort((a, b) => a.mes.localeCompare(b.mes));
-}
-
-// Extrai série histórica de Montante Gerado (7 colunas, bitmask real Ø/R)
-// Colunas: [ANO, MES_NOME, MES_ANO(D1), Montante Gerado, Compra, % compra, % geração alocada]
-// Ø row: bit=1 → campo é null (omitido de C). R row: bit=1 → campo é carried de prev.
-function extrairSerieGeracao(result, agente) {
-  const dsr = result?.result?.data?.dsr?.DS?.[0];
-  if (!dsr) return [];
-
-  const dm = dsr?.PH?.[0]?.DM0;
-  if (!dm || !Array.isArray(dm)) return [];
-
-  const meses = dsr?.ValueDicts?.D1 || [];
-  const rows  = [];
-  const N     = 7;
-  let prev    = new Array(N).fill(null);
-
-  for (const item of dm) {
-    const C    = item.C || [];
-    const full = new Array(N).fill(null);
-    let ci     = 0;
-
-    if (typeof item["Ø"] === "number") {
-      // Ø: bit=1 → null, bit=0 → next C value
-      const mask = item["Ø"];
-      for (let i = 0; i < N; i++)
-        full[i] = (mask & (1 << i)) ? null : (C[ci++] ?? null);
-    } else {
-      // R: bit=1 → carry from prev, bit=0 → next C value
-      const mask = typeof item.R === "number" ? item.R : 0;
-      for (let i = 0; i < N; i++)
-        full[i] = (mask & (1 << i)) ? prev[i] : (C[ci++] ?? null);
-    }
-    prev = full;
-
-    const mesVal = typeof full[2] === "number" ? meses[full[2]] : full[2];
-    if (!mesVal || typeof mesVal !== "string") continue;
-
-    const mes = mesVal.replace("/", "-");
-    if (!/^\d{4}-\d{2}$/.test(mes)) continue;
-
-    rows.push({ agente, mes, geracao: full[3] != null ? (Number(full[3]) || null) : null });
-  }
-
-  return rows;
-}
+// extrairSerieDSR, extrairSerieGeracao e mergeHistorico vêm de ./powerbi-utils
 
 // Extrai metadados estáticos — estrutura PH[0].DM0 com ValueDicts (G0-G4 + M0)
 function extrairMetadados(result, agente) {
@@ -518,10 +422,10 @@ async function buscarPowerBI(agente, mes, usarMaisRecente = false) {
 
     const { financeiro, historico, metadados, recursoRequisito, geracaoSerie } = mapearResultados(json);
 
-    const serieBalMcp    = extrairSerieDSR(historico,        agente, "balanco_energetico", "mcp");
-    const serieCompCons  = extrairSerieDSR(recursoRequisito, agente, "compra",             "consumo");
-    const serieGeracao   = extrairSerieGeracao(geracaoSerie, agente);
-    const hist           = mergeHistorico(mergeHistorico(serieBalMcp, serieCompCons), serieGeracao);
+    const serieBalMcp   = extrairSerieDSR(historico,        "balanco_energetico", "mcp").map(r => ({ ...r, agente }));
+    const serieCompCons = extrairSerieDSR(recursoRequisito, "compra",             "consumo").map(r => ({ ...r, agente }));
+    const serieGeracao  = extrairSerieGeracao(geracaoSerie).map(r => ({ ...r, agente }));
+    const hist          = mergeHistorico(mergeHistorico(serieBalMcp, serieCompCons), serieGeracao);
 
     // Usa o último mês do histórico como mês de referência real
     // Mais confiável do que calcular pelo dia de hoje
@@ -656,33 +560,17 @@ async function buscarPowerBISimples(agente, mes, usarMaisRecente = false) {
 
 // ─── PLD Power BI ─────────────────────────────────────────────────────────────
 
-// Decodifica tabela flat [DataHora, SUBMERCADO_TEXTO, PLDhora_avg] com bitmask DSR
-// Filtragem por data usa BRT (UTC-3) → médias mensais exatas sem desvio de fuso
+// Decodifica tabela flat [DataHora, SUBMERCADO_TEXTO, PLDhora_avg] com bitmask DSR.
+// Power BI envia timestamps como hora local BRT tratada como UTC (naive local time) —
+// não aplicar offset, usar UTC components diretamente como BRT.
 function parsePldBiFlat(result) {
   const dsr   = result?.result?.data?.dsr?.DS?.[0];
   if (!dsr) return [];
   const dm0   = dsr?.PH?.[0]?.DM0 || [];
   const dicts = dsr?.ValueDicts || {};
   const rows  = [];
-  const N     = 3;
-  let prev    = new Array(N).fill(null);
 
-  for (const item of dm0) {
-    const C    = item.C || [];
-    const full = new Array(N).fill(null);
-    let ci     = 0;
-
-    if (typeof item["Ø"] === "number") {
-      const mask = item["Ø"];
-      for (let i = 0; i < N; i++)
-        full[i] = (mask & (1 << i)) ? null : (C[ci++] ?? null);
-    } else {
-      const mask = typeof item.R === "number" ? item.R : 0;
-      for (let i = 0; i < N; i++)
-        full[i] = (mask & (1 << i)) ? prev[i] : (C[ci++] ?? null);
-    }
-    prev = full;
-
+  for (const full of decodificarBitmaskDSR(dm0, 3)) {
     const ts = full[0];
     if (!ts || typeof ts !== "number") continue;
 
@@ -691,23 +579,16 @@ function parsePldBiFlat(result) {
       ? (dicts.D0?.[rawSub] ?? "").toLowerCase()
       : String(rawSub ?? "").toLowerCase();
 
-    // Measure values are usually raw floats, but Power BI may compress them into D1
     const rawPld = full[2];
     if (rawPld == null) continue;
-    let pld;
-    if (dicts.D1 && Number.isInteger(rawPld) && rawPld >= 0 && rawPld < dicts.D1.length) {
-      pld = Number(dicts.D1[rawPld] ?? rawPld);
-    } else {
-      pld = Number(rawPld);
-    }
+    const pld = (dicts.D1 && Number.isInteger(rawPld) && rawPld >= 0 && rawPld < dicts.D1.length)
+      ? Number(dicts.D1[rawPld] ?? rawPld)
+      : Number(rawPld);
     if (!sub || isNaN(pld)) continue;
 
-    // Power BI envia timestamps como hora local BRT tratada como UTC (naive local time)
-    // Não aplicar offset — usar UTC components diretamente como BRT
     const dt      = new Date(ts);
     const dataStr = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()+1).padStart(2,"0")}-${String(dt.getUTCDate()).padStart(2,"0")}`;
     const horaStr = `${String(dt.getUTCHours()).padStart(2,"0")}:00`;
-
     rows.push({ ts, data: dataStr, hora: horaStr, sub, pld });
   }
   return rows;
@@ -1027,19 +908,22 @@ app.get("/agentes/busca", async (req, res) => {
   const q = (req.query.q || "").trim();
   if (q.length < 2) return res.json([]);
   try {
-    const { rows } = await pool.query(
-      `SELECT agente, razao_social, sigla, classe
-         FROM ccee_agentes
-        WHERE agente ILIKE $1 OR razao_social ILIKE $1
-        ORDER BY
-          CASE WHEN agente ILIKE $2 THEN 0
-               WHEN razao_social ILIKE $2 THEN 1
-               ELSE 2 END,
-          agente
-        LIMIT 10`,
-      [`%${q}%`, `${q}%`]
-    );
-    res.json(rows);
+    const data = await cache.cached(`busca:${q.toLowerCase()}`, 600, async () => {
+      const { rows } = await pool.query(
+        `SELECT agente, razao_social, sigla, classe
+           FROM ccee_agentes
+          WHERE agente ILIKE $1 OR razao_social ILIKE $1
+          ORDER BY
+            CASE WHEN agente ILIKE $2 THEN 0
+                 WHEN razao_social ILIKE $2 THEN 1
+                 ELSE 2 END,
+            agente
+          LIMIT 10`,
+        [`%${q}%`, `${q}%`]
+      );
+      return rows;
+    });
+    res.json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1229,30 +1113,19 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
   const { estado, cidade, ramo, submercado, mes, razao_social: razaoSocialParam } = req.query;
 
   try {
-    // Verifica se já existe no banco
+    // Só busca online se agente não tiver nenhum dado no banco ainda
     const existe = await pool.query(
       "SELECT 1 FROM ccee_cargas WHERE agente = $1 LIMIT 1",
       [agente]
     );
-
-    const maxCargasDB = existe.rows.length > 0
-      ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = $1", [agente])).rows[0]?.mes
-      : null;
-
-    const mesRecenteCCEE = await ultimoMesDisponivelCCEE();
-    const precisaAtualizar = !maxCargasDB || (mesRecenteCCEE && mesRecenteCCEE > maxCargasDB);
-
-    if (precisaAtualizar) {
-      console.log(`[cargas] Buscando na API aberta | banco="${maxCargasDB}" | CCEE="${mesRecenteCCEE}"...`);
+    if (existe.rows.length === 0) {
+      console.log(`[cargas] Agente novo — buscando na API aberta CCEE...`);
       const metaAgente  = razaoSocialParam
         ? { rows: [{ razao_social: razaoSocialParam }] }
         : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
       const razaoSocial = metaAgente.rows[0]?.razao_social || null;
       const registros   = await buscarCargas(agente, { razaoSocial });
-      console.log(`[cargas] API retornou ${registros.length} registros`);
       if (registros.length > 0) await salvarCargas(agente, agente, registros);
-    } else {
-      console.log(`[cargas] Banco atualizado até "${maxCargasDB}", sem necessidade de rebuscar`);
     }
 
     // Resolve o mês a usar: se solicitado mas sem dados, cai pro mais recente disponível
@@ -1299,13 +1172,16 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
       params.push(subFull);
     }
 
-    const r = await pool.query(`
-      SELECT * FROM ccee_cargas
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY mes_referencia DESC, sigla_parcela_carga ASC
-    `, params);
-
-    return res.json({ mes: mesEfetivo, registros: r.rows });
+    const cacheKey = `cargas:${agente}:${mesEfetivo||""}:${estado||""}:${cidade||""}:${ramo||""}:${submercado||""}`;
+    const data = await cache.cached(cacheKey, 3600, async () => {
+      const r = await pool.query(`
+        SELECT * FROM ccee_cargas
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY mes_referencia DESC, sigla_parcela_carga ASC
+      `, params);
+      return { mes: mesEfetivo, registros: r.rows };
+    });
+    return res.json(data);
   } catch (e) {
     console.error("Erro em /cargas:", e.message);
     return res.status(500).json({ error: e.message });
@@ -1327,34 +1203,17 @@ app.get("/inteligencia/:agente/usinas", async (req, res) => {
       [agente]
     );
 
-    const maxUsinaDB = existe.rows.length > 0
-      ? (await pool.query("SELECT MAX(mes_referencia) AS mes FROM ccee_usinas WHERE agente = $1", [agente])).rows[0]?.mes
-      : null;
-
-    const mesRecenteCCEEU = await ultimoMesDisponivelCCEE();
-    const precisaAtualizar = !maxUsinaDB || (mesRecenteCCEEU && mesRecenteCCEEU > maxUsinaDB);
-
-    if (precisaAtualizar) {
-      console.log(`[usinas] Buscando na API aberta | banco="${maxUsinaDB}" | CCEE="${mesRecenteCCEEU}"...`);
+    // Só busca online se agente não tiver nenhum dado no banco ainda
+    if (existe.rows.length === 0) {
+      console.log(`[usinas] Agente novo — buscando na API aberta CCEE...`);
       const metaAgente  = razaoSocialParam
         ? { rows: [{ razao_social: razaoSocialParam }] }
         : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
       const razaoSocial = metaAgente.rows[0]?.razao_social || null;
-      if (!razaoSocial) {
-        console.warn(`[usinas] razao_social não encontrada para "${agente}" — busca ignorada`);
-      } else {
+      if (razaoSocial) {
         const registros = await buscarUsinas(razaoSocial);
-        console.log(`[usinas] API retornou ${registros.length} registros`);
-        if (registros.length > 0) {
-          await salvarUsinas(agente, agente, registros);
-          // Dispara modulação de geração agora que as usinas estão no banco
-          dispararModulacaoGeracaoBackground(agente).catch(err =>
-            console.warn("[mod-ger-auto] Erro ao disparar após usinas:", err.message)
-          );
-        }
+        if (registros.length > 0) await salvarUsinas(agente, agente, registros);
       }
-    } else {
-      console.log(`[usinas] Banco atualizado até "${maxUsinaDB}", sem necessidade de rebuscar`);
     }
 
     let mesEfetivo = mes || null;
@@ -1381,13 +1240,16 @@ app.get("/inteligencia/:agente/usinas", async (req, res) => {
     if (submercado) { conditions.push(`submercado ILIKE $${idx++}`);             params.push(submercado); }
     if (estado)     { conditions.push(`estado_uf = $${idx++}`);                  params.push(estado.toUpperCase()); }
 
-    const r = await pool.query(`
-      SELECT * FROM ccee_usinas
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY mes_referencia DESC, sigla_ativo ASC
-    `, params);
-
-    return res.json({ mes: mesEfetivo, registros: r.rows });
+    const cacheKey = `usinas:${agente}:${mesEfetivo||""}:${fonte||""}:${submercado||""}:${estado||""}`;
+    const data = await cache.cached(cacheKey, 3600, async () => {
+      const r = await pool.query(`
+        SELECT * FROM ccee_usinas
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY mes_referencia DESC, sigla_ativo ASC
+      `, params);
+      return { mes: mesEfetivo, registros: r.rows };
+    });
+    return res.json(data);
   } catch (e) {
     console.error("Erro em /usinas:", e.message);
     return res.status(500).json({ error: e.message });
@@ -1572,24 +1434,116 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
       }
     }
 
-    const where = mes ? "WHERE agente = $1 AND mes_referencia = $2" : "WHERE agente = $1";
-    const params = mes ? [agente, mes] : [agente];
+    // Se mes solicitado não tiver dados, usa o mês mais recente disponível (≤ mes)
+    let mesContab = mes || null;
+    if (mes) {
+      const check = await pool.query(
+        "SELECT MAX(mes_referencia) AS m FROM ccee_contabilizacao WHERE agente = $1 AND mes_referencia <= $2",
+        [agente, mes]
+      );
+      mesContab = check.rows[0]?.m || null;
+    }
 
-    const r = await pool.query(`
-      SELECT mes_referencia, sigla_perfil_agente, cod_perf_agente,
-             valor_tm_mcp, compensacao_mre, valor_encargo, valor_ajuste_exposicao,
-             valor_ajuste_alivio_ret, efeito_contrat_disp, efeito_contrat_cota_gf,
-             efeito_contrat_nuclear, ajuste_recontab, ajuste_mcsd_ex,
-             resultado_financeiro_er, efeito_ccearq, efeito_contrat_itaipu,
-             efeito_repasse_risco_hidro, efeito_desloc_pld_cmo, resultado_final
-      FROM ccee_contabilizacao
-      ${where}
-      ORDER BY mes_referencia DESC, sigla_perfil_agente ASC
-    `, params);
+    const where  = mesContab ? "WHERE agente = $1 AND mes_referencia = $2" : "WHERE agente = $1";
+    const params = mesContab ? [agente, mesContab] : [agente];
 
-    return res.json(r.rows);
+    const data = await cache.cached(`contab:${agente}:${mesContab||"all"}`, 3600, async () => {
+      const r = await pool.query(`
+        SELECT mes_referencia, sigla_perfil_agente, cod_perf_agente,
+               valor_tm_mcp, compensacao_mre, valor_encargo, valor_ajuste_exposicao,
+               valor_ajuste_alivio_ret, efeito_contrat_disp, efeito_contrat_cota_gf,
+               efeito_contrat_nuclear, ajuste_recontab, ajuste_mcsd_ex,
+               resultado_financeiro_er, efeito_ccearq, efeito_contrat_itaipu,
+               efeito_repasse_risco_hidro, efeito_desloc_pld_cmo, resultado_final
+        FROM ccee_contabilizacao
+        ${where}
+        ORDER BY mes_referencia DESC, sigla_perfil_agente ASC
+      `, params);
+      return r.rows;
+    });
+    return res.json(data);
   } catch (e) {
     console.error("Erro em /contabilizacao:", e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Salvar consumo mensal perfil ─────────────────────────────────────────────
+async function salvarConsumoMensalPerfil(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_consumo_mensal_perfil (agente, mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::numeric[])
+      ON CONFLICT (agente, mes_referencia, sigla_perfil) DO UPDATE
+        SET consumo_mwh = EXCLUDED.consumo_mwh, consumo_geracao_mwh = EXCLUDED.consumo_geracao_mwh, created_at = NOW()
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.sigla_perfil),
+      lote.map(r => r.consumo_mwh),
+      lote.map(r => r.consumo_geracao_mwh ?? null),
+    ]);
+  }
+}
+
+// ── Salvar contratos mensal perfil ───────────────────────────────────────────
+async function salvarContratosMensalPerfil(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_contrato_mensal_perfil (agente, mes_referencia, sigla_perfil, compra_mwh, venda_mwh)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::numeric[])
+      ON CONFLICT (agente, mes_referencia, sigla_perfil) DO UPDATE
+        SET compra_mwh = EXCLUDED.compra_mwh, venda_mwh = EXCLUDED.venda_mwh, created_at = NOW()
+    `, [
+      lote.map(() => agente),
+      lote.map(r => r.mes_referencia),
+      lote.map(r => r.sigla_perfil),
+      lote.map(r => r.compra_mwh ?? null),
+      lote.map(r => r.venda_mwh  ?? null),
+    ]);
+  }
+}
+
+// GET /inteligencia/:agente/consumo-mensal-perfil
+app.get("/inteligencia/:agente/consumo-mensal-perfil", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  try {
+    const data = await cache.cached(`consumo-mensal-perfil:${agente}`, 3600, async () => {
+      const { rows } = await pool.query(`
+        SELECT mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh
+        FROM ccee_consumo_mensal_perfil
+        WHERE agente = $1
+        ORDER BY mes_referencia, sigla_perfil
+      `, [agente]);
+      return rows;
+    });
+    return res.json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/contratos-mensal-perfil
+app.get("/inteligencia/:agente/contratos-mensal-perfil", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  try {
+    const data = await cache.cached(`contratos-mensal-perfil:${agente}`, 3600, async () => {
+      const { rows } = await pool.query(`
+        SELECT mes_referencia, sigla_perfil, compra_mwh, venda_mwh
+        FROM ccee_contrato_mensal_perfil
+        WHERE agente = $1
+        ORDER BY mes_referencia, sigla_perfil
+      `, [agente]);
+      return rows;
+    });
+    return res.json(data);
+  } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
@@ -1755,37 +1709,27 @@ app.get("/inteligencia/:agente/sazonalizacao", async (req, res) => {
 app.get("/inteligencia/:agente/curva-carga", async (req, res) => {
   const agente = normalizarAgente(decodeURIComponent(req.params.agente));
   try {
-    const r = await pool.query(`
-      SELECT
-        submercado,
-        ((periodo - 1) % 24) + 1  AS hora,
-        AVG(consumo_mwh)           AS consumo_medio,
-        COUNT(*)                   AS n_amostras
-      FROM ccee_consumo_horario
-      WHERE agente = $1
-      GROUP BY submercado, hora
-      ORDER BY submercado, hora
-    `, [agente]);
-
-    if (!r.rows.length) return res.json([]);
-
-    // Normaliza em pu por submercado (cada sub tem seu próprio pico)
-    const maxPorSub = {};
-    for (const row of r.rows) {
-      const v = Number(row.consumo_medio);
-      if (!maxPorSub[row.submercado] || v > maxPorSub[row.submercado])
-        maxPorSub[row.submercado] = v;
-    }
-
-    return res.json(r.rows.map(row => ({
-      submercado:     row.submercado,
-      hora:           Number(row.hora),
-      consumo_medio:  Number(Number(row.consumo_medio).toFixed(4)),
-      pu:             maxPorSub[row.submercado] > 0
-                        ? Number((Number(row.consumo_medio) / maxPorSub[row.submercado]).toFixed(4))
-                        : 0,
-      n_amostras:     Number(row.n_amostras),
-    })));
+    const data = await cache.cached(`curva-carga:${agente}`, 86400, async () => {
+      const r = await pool.query(`
+        SELECT submercado, hora, consumo_med AS consumo_medio, n_amostras
+        FROM ccee_curva_tipica WHERE agente = $1 ORDER BY submercado, hora
+      `, [agente]);
+      if (!r.rows.length) return [];
+      const maxPorSub = {};
+      for (const row of r.rows) {
+        const v = Number(row.consumo_medio);
+        if (!maxPorSub[row.submercado] || v > maxPorSub[row.submercado]) maxPorSub[row.submercado] = v;
+      }
+      return r.rows.map(row => ({
+        submercado:    row.submercado,
+        hora:          Number(row.hora),
+        consumo_medio: Number(Number(row.consumo_medio).toFixed(4)),
+        pu:            maxPorSub[row.submercado] > 0
+                         ? Number((Number(row.consumo_medio) / maxPorSub[row.submercado]).toFixed(4)) : 0,
+        n_amostras:    Number(row.n_amostras),
+      }));
+    });
+    return res.json(data);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -1795,36 +1739,27 @@ app.get("/inteligencia/:agente/curva-carga", async (req, res) => {
 app.get("/inteligencia/:agente/curva-carga-perfil", async (req, res) => {
   const agente = normalizarAgente(decodeURIComponent(req.params.agente));
   try {
-    const r = await pool.query(`
-      SELECT
-        sigla_perfil,
-        ((periodo - 1) % 24) + 1  AS hora,
-        AVG(consumo_mwh)           AS consumo_medio,
-        COUNT(*)                   AS n_amostras
-      FROM ccee_consumo_horario_perfil
-      WHERE agente = $1
-      GROUP BY sigla_perfil, hora
-      ORDER BY sigla_perfil, hora
-    `, [agente]);
-
-    if (!r.rows.length) return res.json([]);
-
-    const maxPorPerfil = {};
-    for (const row of r.rows) {
-      const v = Number(row.consumo_medio);
-      if (!maxPorPerfil[row.sigla_perfil] || v > maxPorPerfil[row.sigla_perfil])
-        maxPorPerfil[row.sigla_perfil] = v;
-    }
-
-    return res.json(r.rows.map(row => ({
-      sigla_perfil:  row.sigla_perfil,
-      hora:          Number(row.hora),
-      consumo_medio: Number(Number(row.consumo_medio).toFixed(4)),
-      pu:            maxPorPerfil[row.sigla_perfil] > 0
-                       ? Number((Number(row.consumo_medio) / maxPorPerfil[row.sigla_perfil]).toFixed(4))
-                       : 0,
-      n_amostras:    Number(row.n_amostras),
-    })));
+    const data = await cache.cached(`curva-carga-perfil:${agente}`, 86400, async () => {
+      const r = await pool.query(`
+        SELECT sigla_perfil, hora, consumo_med AS consumo_medio, n_amostras
+        FROM ccee_curva_tipica_perfil WHERE agente = $1 ORDER BY sigla_perfil, hora
+      `, [agente]);
+      if (!r.rows.length) return [];
+      const maxPorPerfil = {};
+      for (const row of r.rows) {
+        const v = Number(row.consumo_medio);
+        if (!maxPorPerfil[row.sigla_perfil] || v > maxPorPerfil[row.sigla_perfil]) maxPorPerfil[row.sigla_perfil] = v;
+      }
+      return r.rows.map(row => ({
+        sigla_perfil:  row.sigla_perfil,
+        hora:          Number(row.hora),
+        consumo_medio: Number(Number(row.consumo_medio).toFixed(4)),
+        pu:            maxPorPerfil[row.sigla_perfil] > 0
+                         ? Number((Number(row.consumo_medio) / maxPorPerfil[row.sigla_perfil]).toFixed(4)) : 0,
+        n_amostras:    Number(row.n_amostras),
+      }));
+    });
+    return res.json(data);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -3534,7 +3469,7 @@ async function buscarPldMensal() {
 // GET /mercado/pld — médias mensais de PLD por submercado (últimos 2 anos)
 app.get("/mercado/pld", async (_req, res) => {
   try {
-    const dados = await buscarPldMensal();
+    const dados = await cache.cached("mercado:pld", 3600, () => buscarPldMensal());
     return res.json(dados);
   } catch (e) {
     console.error("[mercado/pld] Erro:", e.message);
@@ -3542,30 +3477,32 @@ app.get("/mercado/pld", async (_req, res) => {
   }
 });
 
-
 // GET /mercado/modulacao-ramo — custo de modulação médio por ramo de atividade
 app.get("/mercado/modulacao-ramo", async (_req, res) => {
   try {
-    const r = await pool.query(`
-      WITH agent_ramo AS (
-        SELECT DISTINCT ON (agente) agente, ramo_atividade
-        FROM ccee_cargas
-        WHERE ramo_atividade IS NOT NULL
-        ORDER BY agente, mes_referencia DESC
-      )
-      SELECT
-        ar.ramo_atividade                                 AS ramo,
-        m.mes_referencia                                  AS mes,
-        ROUND(AVG(m.custo_modulacao_rs_mwh)::numeric, 4) AS custo_medio_rs_mwh,
-        ROUND(SUM(m.consumo_total_mwh)::numeric, 2)      AS consumo_mwh,
-        COUNT(DISTINCT m.agente)                          AS n_agentes
-      FROM ccee_modulacao m
-      JOIN agent_ramo ar ON m.agente = ar.agente
-      WHERE m.custo_modulacao_rs_mwh IS NOT NULL
-      GROUP BY ar.ramo_atividade, m.mes_referencia
-      ORDER BY m.mes_referencia, ar.ramo_atividade
-    `);
-    return res.json(r.rows);
+    const data = await cache.cached("mercado:modulacao-ramo", 3600, async () => {
+      const r = await pool.query(`
+        WITH agent_ramo AS (
+          SELECT DISTINCT ON (agente) agente, ramo_atividade
+          FROM ccee_cargas
+          WHERE ramo_atividade IS NOT NULL
+          ORDER BY agente, mes_referencia DESC
+        )
+        SELECT
+          ar.ramo_atividade                                 AS ramo,
+          m.mes_referencia                                  AS mes,
+          ROUND(AVG(m.custo_modulacao_rs_mwh)::numeric, 4) AS custo_medio_rs_mwh,
+          ROUND(SUM(m.consumo_total_mwh)::numeric, 2)      AS consumo_mwh,
+          COUNT(DISTINCT m.agente)                          AS n_agentes
+        FROM ccee_modulacao m
+        JOIN agent_ramo ar ON m.agente = ar.agente
+        WHERE m.custo_modulacao_rs_mwh IS NOT NULL
+        GROUP BY ar.ramo_atividade, m.mes_referencia
+        ORDER BY m.mes_referencia, ar.ramo_atividade
+      `);
+      return r.rows;
+    });
+    return res.json(data);
   } catch (e) {
     console.error("[mercado/modulacao-ramo] Erro:", e.message);
     return res.status(500).json({ error: e.message });

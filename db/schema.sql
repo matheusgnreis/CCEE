@@ -237,6 +237,32 @@ CREATE TABLE ccee_consumo_horario_perfil (
 CREATE INDEX idx_chp_agente ON ccee_consumo_horario_perfil (agente);
 CREATE INDEX idx_chp_mes    ON ccee_consumo_horario_perfil (mes_referencia);
 
+-- ─── Curva de carga típica (média histórica por hora do dia) ────────────────
+-- Pré-calculada a partir do horário bruto. Atualizada após cada modulação.
+CREATE TABLE ccee_curva_tipica (
+  agente       TEXT    NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  submercado   TEXT    NOT NULL,
+  hora         INTEGER NOT NULL,
+  consumo_med  NUMERIC NOT NULL,
+  n_amostras   INTEGER NOT NULL,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (agente, submercado, hora)
+);
+
+CREATE INDEX idx_ct_agente ON ccee_curva_tipica (agente);
+
+CREATE TABLE ccee_curva_tipica_perfil (
+  agente       TEXT    NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  sigla_perfil TEXT    NOT NULL,
+  hora         INTEGER NOT NULL,
+  consumo_med  NUMERIC NOT NULL,
+  n_amostras   INTEGER NOT NULL,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (agente, sigla_perfil, hora)
+);
+
+CREATE INDEX idx_ctp_agente ON ccee_curva_tipica_perfil (agente);
+
 -- ─── Modulação horária por perfil de agente ───────────────────────────────────
 CREATE TABLE ccee_modulacao_perfil (
   id                     SERIAL      PRIMARY KEY,
@@ -295,6 +321,31 @@ CREATE TABLE ccee_jobs (
 
 CREATE INDEX idx_jobs_agente_mes ON ccee_jobs (agente, mes);
 CREATE INDEX idx_jobs_status     ON ccee_jobs (status);
+
+-- ─── Consumo mensal por perfil (dados abertos CCEE) ─────────────────────────
+CREATE TABLE ccee_consumo_mensal_perfil (
+  agente         TEXT    NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  mes_referencia CHAR(7) NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  sigla_perfil   TEXT    NOT NULL,
+  consumo_mwh    NUMERIC NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (agente, mes_referencia, sigla_perfil)
+);
+CREATE INDEX idx_cmp_agente ON ccee_consumo_mensal_perfil (agente);
+CREATE INDEX idx_cmp_mes    ON ccee_consumo_mensal_perfil (mes_referencia);
+
+-- ─── Contratos (compra/venda) mensal por perfil ───────────────────────────────
+CREATE TABLE ccee_contrato_mensal_perfil (
+  agente         TEXT    NOT NULL REFERENCES ccee_agentes(agente) ON DELETE CASCADE,
+  mes_referencia CHAR(7) NOT NULL CHECK (mes_referencia ~ '^\d{4}-\d{2}$'),
+  sigla_perfil   TEXT    NOT NULL,
+  compra_mwh     NUMERIC,
+  venda_mwh      NUMERIC,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (agente, mes_referencia, sigla_perfil)
+);
+CREATE INDEX idx_ctmp_agente ON ccee_contrato_mensal_perfil (agente);
+CREATE INDEX idx_ctmp_mes    ON ccee_contrato_mensal_perfil (mes_referencia);
 
 -- ─── Geocodificação de cidades ────────────────────────────────────────────────
 CREATE TABLE ccee_cidades_geo (

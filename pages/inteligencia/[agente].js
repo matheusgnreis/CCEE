@@ -138,6 +138,13 @@ export default function AgenteDashboard() {
   const [sazoSub,           setSazoSub]           = useState(null);
   const [sazoPerfilData,    setSazoPerfilData]     = useState(null);
 
+  const [consumoMensalPerfil,   setConsumoMensalPerfil]   = useState([]);
+  const [contratosMensalPerfil, setContratosMensalPerfil] = useState([]);
+  const [loadingPerfisCV,       setLoadingPerfisCV]       = useState(false);
+  const [cvMetrica,             setCvMetrica]             = useState("consumo");
+  const [cvModo,                setCvModo]                = useState("total");
+  const [cvPerfisSelecionados,  setCvPerfisSelecionados]  = useState(new Set());
+
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
   const fetchedMesRef = useRef(null);
@@ -309,6 +316,19 @@ export default function AgenteDashboard() {
       .catch(() => {})
       .finally(() => setLoadingContab(false));
   }, [agente, mesSelecionado]);
+
+  // ── 5a. Consumo mensal e contratos por perfil (histórico, uma vez por agente) ──
+  useEffect(() => {
+    if (!agente) return;
+    setLoadingPerfisCV(true);
+    Promise.all([
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-mensal-perfil`).then(r => r.json()),
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contratos-mensal-perfil`).then(r => r.json()),
+    ]).then(([consumo, contratos]) => {
+      if (Array.isArray(consumo))   setConsumoMensalPerfil(consumo);
+      if (Array.isArray(contratos)) setContratosMensalPerfil(contratos);
+    }).catch(() => {}).finally(() => setLoadingPerfisCV(false));
+  }, [agente]);
 
   // ── 5b. Histórico completo de encargos por agente (todos os meses) ──
   useEffect(() => {
@@ -1634,11 +1654,162 @@ export default function AgenteDashboard() {
           </div>
         )}
 
+        {/* ── Consumo, Compra e Venda por Perfil ──────────────────── */}
+        {(consumoMensalPerfil.length > 0 || contratosMensalPerfil.length > 0) && (() => {
+          const CORES_PERFIL = ["#2563eb","#16a34a","#dc2626","#d97706","#7c3aed","#0891b2","#ea580c","#059669","#6366f1","#f59e0b","#374151","#db2777"];
+          const mapa = new Map();
+          for (const r of consumoMensalPerfil) {
+            const k = `${r.mes_referencia}|${r.sigla_perfil}`;
+            if (!mapa.has(k)) mapa.set(k, { mes_referencia: r.mes_referencia, sigla_perfil: r.sigla_perfil, consumo_mwh: null, compra_mwh: null, venda_mwh: null });
+            mapa.get(k).consumo_mwh = Number(r.consumo_mwh);
+          }
+          for (const r of contratosMensalPerfil) {
+            const k = `${r.mes_referencia}|${r.sigla_perfil}`;
+            if (!mapa.has(k)) mapa.set(k, { mes_referencia: r.mes_referencia, sigla_perfil: r.sigla_perfil, consumo_mwh: null, compra_mwh: null, venda_mwh: null });
+            const e = mapa.get(k);
+            e.compra_mwh = r.compra_mwh != null ? Number(r.compra_mwh) : null;
+            e.venda_mwh  = r.venda_mwh  != null ? Number(r.venda_mwh)  : null;
+          }
+          const todos   = [...mapa.values()];
+          const meses   = [...new Set(todos.map(r => r.mes_referencia))].sort();
+          const perfis  = [...new Set(todos.map(r => r.sigla_perfil))].sort();
+          const campo   = cvMetrica === "consumo" ? "consumo_mwh" : cvMetrica === "compra" ? "compra_mwh" : "venda_mwh";
+          const chartData = meses.map(mes => {
+            const row = { mes, mesLabel: mes.slice(5) + "/" + mes.slice(2, 4) };
+            let total = 0;
+            for (const p of perfis) {
+              const v = mapa.get(`${mes}|${p}`)?.[campo] ?? null;
+              row[p] = v;
+              if (v != null) total += v;
+            }
+            row.__total = total || null;
+            return row;
+          });
+          const perfisFiltrados = cvModo === "perfil" && cvPerfisSelecionados.size > 0
+            ? perfis.filter(p => cvPerfisSelecionados.has(p)) : perfis;
+          const ultimoMes  = meses[meses.length - 1];
+          const tabelaDados = perfis.map(p => {
+            const item = mapa.get(`${ultimoMes}|${p}`);
+            return { sigla_perfil: p, consumo_mwh: item?.consumo_mwh, compra_mwh: item?.compra_mwh, venda_mwh: item?.venda_mwh };
+          });
+          const totalRow = {
+            sigla_perfil: "TOTAL",
+            consumo_mwh: tabelaDados.reduce((s, r) => s + (r.consumo_mwh ?? 0), 0) || null,
+            compra_mwh:  tabelaDados.reduce((s, r) => s + (r.compra_mwh  ?? 0), 0) || null,
+            venda_mwh:   tabelaDados.reduce((s, r) => s + (r.venda_mwh   ?? 0), 0) || null,
+          };
+          const fmtMwh = v => v != null ? v.toLocaleString("pt-BR", { maximumFractionDigits: 1 }) : "—";
+          const btnStyle = (ativo) => ({
+            fontSize: 12, padding: "4px 12px", borderRadius: 20, cursor: "pointer",
+            border: "1px solid #e2e8f0",
+            background: ativo ? "#0f172a" : "#fff",
+            color:      ativo ? "#fff"    : "#374151",
+            fontWeight: ativo ? 600       : 400,
+          });
+          return (
+            <div style={s.chartBox}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+                <h2 style={{ ...s.chartTitle, margin: 0 }}>Consumo, Compra e Venda por Perfil</h2>
+                {loadingPerfisCV && <span style={{ fontSize: 12, color: "#94a3b8" }}>Carregando...</span>}
+              </div>
+
+              {/* Controles de métrica e modo */}
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+                {[["consumo","Consumo"],["compra","Compra"],["venda","Venda"]].map(([k, l]) => (
+                  <button key={k} onClick={() => setCvMetrica(k)} style={btnStyle(cvMetrica === k)}>{l}</button>
+                ))}
+                <div style={{ width: 1, background: "#e2e8f0", alignSelf: "stretch" }} />
+                <button onClick={() => { setCvModo("total"); setCvPerfisSelecionados(new Set()); }} style={btnStyle(cvModo === "total")}>Total</button>
+                <button onClick={() => setCvModo("perfil")} style={btnStyle(cvModo === "perfil")}>Por Perfil</button>
+              </div>
+
+              {/* Chips de perfil */}
+              {cvModo === "perfil" && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                  {perfis.map((p, i) => {
+                    const cor = CORES_PERFIL[i % CORES_PERFIL.length];
+                    const sel = cvPerfisSelecionados.size === 0 || cvPerfisSelecionados.has(p);
+                    return (
+                      <button key={p} onClick={() => setCvPerfisSelecionados(prev => {
+                        const base = prev.size === 0 ? new Set(perfis) : new Set(prev);
+                        if (base.has(p) && base.size > 1) base.delete(p); else base.add(p);
+                        return base.size === perfis.length ? new Set() : base;
+                      })}
+                        style={{ fontSize: 11, padding: "3px 10px", borderRadius: 20, cursor: "pointer",
+                          border: `1px solid ${cor}`, background: sel ? cor : "#fff", color: sel ? "#fff" : cor }}>
+                        {p}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Gráfico */}
+              <ResponsiveContainer width="100%" height={260}>
+                <LineChart data={chartData} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                  <XAxis dataKey="mesLabel" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : Number(v).toFixed(0)} width={48} />
+                  <Tooltip formatter={(v, name) => [
+                    v != null ? `${Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} MWh` : "—",
+                    name === "__total" ? "Total" : name,
+                  ]} labelFormatter={l => l} />
+                  {cvModo === "total"
+                    ? <Line type="monotone" dataKey="__total" name="Total" stroke="#2563eb" strokeWidth={2} dot={false} connectNulls />
+                    : perfisFiltrados.map((p, i) => (
+                        <Line key={p} type="monotone" dataKey={p} name={p}
+                          stroke={CORES_PERFIL[perfis.indexOf(p) % CORES_PERFIL.length]}
+                          strokeWidth={1.5} dot={false} connectNulls />
+                      ))
+                  }
+                </LineChart>
+              </ResponsiveContainer>
+
+              {/* Tabela do último mês */}
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>Último mês disponível: {ultimoMes}</div>
+                <div style={{ overflowX: "auto", maxHeight: 320, overflowY: "auto" }}>
+                  <table style={s.tabelaSimples}>
+                    <thead>
+                      <tr>
+                        <th style={s.thSimples}>Perfil</th>
+                        <th style={{ ...s.thSimples, textAlign: "right" }}>Consumo (MWh)</th>
+                        <th style={{ ...s.thSimples, textAlign: "right" }}>Compra (MWh)</th>
+                        <th style={{ ...s.thSimples, textAlign: "right" }}>Venda (MWh)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...tabelaDados, totalRow].map((r, i) => (
+                        <tr key={r.sigla_perfil}
+                          style={r.sigla_perfil === "TOTAL" ? { background: "#f1f5f9" } : i % 2 === 0 ? { background: "#fafbfc" } : {}}>
+                          <td style={{ ...s.tdSimples, fontWeight: r.sigla_perfil === "TOTAL" ? 700 : 600, whiteSpace: "nowrap" }}>
+                            {r.sigla_perfil === "TOTAL" ? "Total" : r.sigla_perfil}
+                          </td>
+                          <td style={{ ...s.tdSimples, textAlign: "right" }}>{fmtMwh(r.consumo_mwh)}</td>
+                          <td style={{ ...s.tdSimples, textAlign: "right" }}>{fmtMwh(r.compra_mwh)}</td>
+                          <td style={{ ...s.tdSimples, textAlign: "right" }}>{fmtMwh(r.venda_mwh)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* ── Contabilização por Perfil ─────────────────────────── */}
         {contabilizacao.length > 0 && (
           <div style={s.chartBox}>
             <div style={s.cargasHeader}>
-              <h2 style={s.chartTitle}>Contabilização por Perfil</h2>
+              <h2 style={s.chartTitle}>
+                Contabilização por Perfil
+                {contabilizacao[0]?.mes_referencia && contabilizacao[0].mes_referencia !== mesSelecionado && (
+                  <span style={{ fontSize: 12, fontWeight: 400, color: "#94a3b8", marginLeft: 10 }}>
+                    (dados mais recentes disponíveis: {contabilizacao[0].mes_referencia})
+                  </span>
+                )}
+              </h2>
               {loadingContab && <span style={{ fontSize: 12, color: "#94a3b8" }}>Carregando...</span>}
             </div>
 
