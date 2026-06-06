@@ -979,6 +979,8 @@ async function main() {
     const agregado       = {};
     const agregadoPerfil = {};
 
+    // Ping periódico para evitar que o pool caia ocioso durante downloads longos
+    const pingInterval = setInterval(() => pool.query("SELECT 1").catch(() => {}), 30000);
     await withRetry(() => {
       agentesDoMes.forEach(a => { agregado[a.agente] = {}; agregadoPerfil[a.agente] = {}; });
       return streamGzip(urlConsumo[mes], row => {
@@ -1006,6 +1008,7 @@ async function main() {
       agregadoPerfil[aKey][keyPerfil].consumo_mwh += consumo;
       });
     });
+    clearInterval(pingInterval);
 
     for (const { agente } of agentesDoMes) {
       const regs      = Object.values(agregado[agente]);

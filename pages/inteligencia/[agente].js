@@ -141,7 +141,7 @@ export default function AgenteDashboard() {
   const [consumoMensalPerfil,   setConsumoMensalPerfil]   = useState([]);
   const [contratosMensalPerfil, setContratosMensalPerfil] = useState([]);
   const [loadingPerfisCV,       setLoadingPerfisCV]       = useState(false);
-  const [cvMetrica,             setCvMetrica]             = useState("consumo");
+  const [cvMetrica,             setCvMetrica]             = useState("consumo_compra");
   const [cvModo,                setCvModo]                = useState("total");
   const [cvPerfisSelecionados,  setCvPerfisSelecionados]  = useState(new Set());
 
@@ -1673,16 +1673,20 @@ export default function AgenteDashboard() {
           const todos   = [...mapa.values()];
           const meses   = [...new Set(todos.map(r => r.mes_referencia))].sort();
           const perfis  = [...new Set(todos.map(r => r.sigla_perfil))].sort();
-          const campo   = cvMetrica === "consumo" ? "consumo_mwh" : cvMetrica === "compra" ? "compra_mwh" : "venda_mwh";
           const chartData = meses.map(mes => {
             const row = { mes, mesLabel: mes.slice(5) + "/" + mes.slice(2, 4) };
-            let total = 0;
+            let totConsumo = 0, totCompra = 0, totVenda = 0;
             for (const p of perfis) {
-              const v = mapa.get(`${mes}|${p}`)?.[campo] ?? null;
-              row[p] = v;
-              if (v != null) total += v;
+              const item = mapa.get(`${mes}|${p}`);
+              if (!item) continue;
+              if (item.consumo_mwh != null) { totConsumo += item.consumo_mwh; }
+              if (item.compra_mwh  != null) { totCompra  += item.compra_mwh; }
+              if (item.venda_mwh   != null) { totVenda   += item.venda_mwh; }
+              row[p] = cvMetrica === "venda" ? item.venda_mwh : item.consumo_mwh;
             }
-            row.__total = total || null;
+            row.__consumo = totConsumo || null;
+            row.__compra  = totCompra  || null;
+            row.__venda   = totVenda   || null;
             return row;
           });
           const perfisFiltrados = cvModo === "perfil" && cvPerfisSelecionados.size > 0
@@ -1715,7 +1719,7 @@ export default function AgenteDashboard() {
 
               {/* Controles de métrica e modo */}
               <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
-                {[["consumo","Consumo"],["compra","Compra"],["venda","Venda"]].map(([k, l]) => (
+                {[["consumo_compra","Consumo + Compra"],["venda","Venda"]].map(([k, l]) => (
                   <button key={k} onClick={() => setCvMetrica(k)} style={btnStyle(cvMetrica === k)}>{l}</button>
                 ))}
                 <div style={{ width: 1, background: "#e2e8f0", alignSelf: "stretch" }} />
@@ -1752,16 +1756,20 @@ export default function AgenteDashboard() {
                   <YAxis tick={{ fontSize: 11 }} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : Number(v).toFixed(0)} width={48} />
                   <Tooltip formatter={(v, name) => [
                     v != null ? `${Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} MWh` : "—",
-                    name === "__total" ? "Total" : name,
+                    name === "__consumo" ? "Consumo" : name === "__compra" ? "Compra" : name === "__venda" ? "Venda" : name,
                   ]} labelFormatter={l => l} />
-                  {cvModo === "total"
-                    ? <Line type="monotone" dataKey="__total" name="Total" stroke="#2563eb" strokeWidth={2} dot={false} connectNulls />
-                    : perfisFiltrados.map((p, i) => (
-                        <Line key={p} type="monotone" dataKey={p} name={p}
-                          stroke={CORES_PERFIL[perfis.indexOf(p) % CORES_PERFIL.length]}
-                          strokeWidth={1.5} dot={false} connectNulls />
-                      ))
-                  }
+                  {cvModo === "total" ? (
+                    cvMetrica === "consumo_compra" ? (<>
+                      <Line type="monotone" dataKey="__consumo" name="__consumo" stroke="#2563eb" strokeWidth={2} dot={false} connectNulls />
+                      <Line type="monotone" dataKey="__compra"  name="__compra"  stroke="#16a34a" strokeWidth={2} dot={false} connectNulls />
+                    </>) : (
+                      <Line type="monotone" dataKey="__venda" name="__venda" stroke="#dc2626" strokeWidth={2} dot={false} connectNulls />
+                    )
+                  ) : perfisFiltrados.map((p, i) => (
+                    <Line key={p} type="monotone" dataKey={p} name={p}
+                      stroke={CORES_PERFIL[perfis.indexOf(p) % CORES_PERFIL.length]}
+                      strokeWidth={1.5} dot={false} connectNulls />
+                  ))}
                 </LineChart>
               </ResponsiveContainer>
 
