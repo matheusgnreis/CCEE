@@ -39,8 +39,10 @@ const DELAY_MS       = 1500;
 
 const args          = process.argv.slice(2);
 const MES_FIXO      = (() => { const i = args.indexOf("--mes"); return i !== -1 ? (args[i + 1] || null) : null; })();
-const SEM_POWERBI   = args.includes("--sem-powerbi");
-const SEM_CONTAB    = args.includes("--sem-contab");
+const SO_MODULACAO  = args.includes("--so-modulacao");
+const SEM_POWERBI   = args.includes("--sem-powerbi") || SO_MODULACAO;
+const SEM_CONTAB    = args.includes("--sem-contab")  || SO_MODULACAO;
+const SEM_PERFIL    = args.includes("--sem-perfil")  || SO_MODULACAO;
 const TODOS_MESES   = args.includes("--todos-meses"); // streama todos os meses p/ descoberta
 const APENAS_UF     = (() => {                        // --apenas-uf MG  (ou SP, RJ, etc.)
   const idx = args.indexOf("--apenas-uf");
@@ -822,6 +824,9 @@ async function main() {
   } // fim else SEM_CONTAB
 
   // ── Fase 2.6: Consumo mensal e contratos por perfil ─────────────────────────
+  if (SEM_PERFIL) {
+    console.log(`\n[2.6/4] Consumo/contratos por perfil pulado (--sem-perfil)`);
+  } else {
   console.log(`\n[2.6/4] Atualizando consumo mensal e contratos por perfil`);
   let perfAtualizados = 0;
   const totalPerf = agentesAtivos.filter(a => a.razao_social).length;
@@ -865,6 +870,7 @@ async function main() {
     await delay(DELAY_MS);
   }
   console.log(`\n  ${perfAtualizados} agentes atualizados`);
+  } // fim else SEM_PERFIL
 
   // ── Fase 2.7: Histórico Power BI (balanco, mcp, compra, consumo, geracao) ───
   if (!SEM_POWERBI) {
