@@ -80,6 +80,21 @@ function fmt(v) {
   return Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
 }
 
+function exportarCSV(linhas, colunas, nomeArquivo) {
+  const cab  = colunas.map(c => c.label).join(";");
+  const body = linhas.map(l => colunas.map(c => {
+    const v = l[c.key];
+    return typeof v === "number" ? String(v).replace(".", ",") : (v ?? "");
+  }).join(";")).join("\n");
+  const blob = new Blob([`﻿${cab}\n${body}`], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url;
+  a.download = nomeArquivo;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function AgenteDashboard() {
   const router = useRouter();
   const agente = router.query.agente
@@ -696,7 +711,22 @@ export default function AgenteDashboard() {
             <div style={s.chartBox}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
                 <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Carga Típica</h2>
-                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu por submercado</span>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu (consumo médio ÷ pico) por submercado</span>
+                <button
+                  onClick={() => exportarCSV(
+                    curvaCarga,
+                    [
+                      { key: "submercado",    label: "Submercado" },
+                      { key: "hora",          label: "Hora" },
+                      { key: "consumo_medio", label: "Consumo Médio (MWh)" },
+                      { key: "pu",            label: "PU" },
+                      { key: "n_amostras",    label: "Amostras" },
+                    ],
+                    `curva-carga-tipica_${agente}.csv`
+                  )}
+                  style={s.csvBtn} title="Exportar CSV">
+                  ⬇ CSV
+                </button>
                 {activeSubCarga && (
                   <button onClick={() => setActiveSubCarga(null)}
                     style={{ fontSize: 11, color: "#6b7280", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>
@@ -785,7 +815,22 @@ export default function AgenteDashboard() {
             <div style={s.chartBox}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
                 <h2 style={{ ...s.chartTitle, margin: 0 }}>Curva de Carga por Perfil</h2>
-                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu por perfil de agente</span>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>média histórica por hora do dia • pu (consumo médio ÷ pico) por perfil de agente</span>
+                <button
+                  onClick={() => exportarCSV(
+                    curvaCargaPerfil,
+                    [
+                      { key: "sigla_perfil",  label: "Perfil" },
+                      { key: "hora",          label: "Hora" },
+                      { key: "consumo_medio", label: "Consumo Médio (MWh)" },
+                      { key: "pu",            label: "PU" },
+                      { key: "n_amostras",    label: "Amostras" },
+                    ],
+                    `curva-carga-perfil_${agente}.csv`
+                  )}
+                  style={s.csvBtn} title="Exportar CSV">
+                  ⬇ CSV
+                </button>
                 {activePerfilCarga && (
                   <button onClick={() => setActivePerfilCarga(null)}
                     style={{ fontSize: 11, color: "#6b7280", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>
