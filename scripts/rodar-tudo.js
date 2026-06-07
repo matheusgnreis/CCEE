@@ -44,9 +44,11 @@ const SEM_POWERBI   = args.includes("--sem-powerbi") || SO_MODULACAO;
 const SEM_CONTAB    = args.includes("--sem-contab")  || SO_MODULACAO;
 const SEM_PERFIL    = args.includes("--sem-perfil")  || SO_MODULACAO;
 const TODOS_MESES   = args.includes("--todos-meses"); // streama todos os meses p/ descoberta
-const APENAS_UF     = (() => {                        // --apenas-uf MG  (ou SP, RJ, etc.)
+const APENAS_UF     = (() => {                        // --apenas-uf MG  ou  --apenas-uf PB,PE,CE,RN,BA,...
   const idx = args.indexOf("--apenas-uf");
-  return idx !== -1 ? (args[idx + 1] || "").toUpperCase() : null;
+  if (idx === -1) return null;
+  const lista = (args[idx + 1] || "").toUpperCase().split(",").map(s => s.trim()).filter(Boolean);
+  return lista.length ? lista : null;
 })();
 
 // Limite de tamanho do banco (MB). Lê de DB_MAX_MB no .env, padrão 4500 MB (~4,4 GB)
@@ -774,16 +776,16 @@ async function main() {
     nomeToAgenteKey.set(normalizarNome(nome), meta.agente);
   }
 
-  // Filtro por UF (ex: --apenas-uf MG)
+  // Filtro por UF (ex: --apenas-uf MG  ou  --apenas-uf PB,PE,CE,RN,BA,AL,SE,MA,PI)
   if (APENAS_UF) {
     const { rows: comUF } = await pool.query(
-      "SELECT DISTINCT agente FROM ccee_cargas WHERE agente = ANY($1) AND estado_uf = $2",
+      "SELECT DISTINCT agente FROM ccee_cargas WHERE agente = ANY($1) AND estado_uf = ANY($2)",
       [agentesAtivos.map(a => a.agente), APENAS_UF]
     );
     const comUFSet = new Set(comUF.map(r => r.agente));
     const antes = agentesAtivos.length;
     agentesAtivos = agentesAtivos.filter(a => comUFSet.has(a.agente));
-    console.log(`\n  Filtro UF=${APENAS_UF}: ${agentesAtivos.length} de ${antes} agentes têm carga no estado`);
+    console.log(`\n  Filtro UF=${APENAS_UF.join(",")}: ${agentesAtivos.length} de ${antes} agentes têm carga no(s) estado(s)`);
   }
 
   console.log(`\n  ${agentesAtivos.length} agentes para processar`);
