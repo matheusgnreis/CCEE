@@ -337,11 +337,12 @@ export default function AgenteDashboard() {
       .finally(() => setLoadingCurvaGer(false));
   }, [agente]);
 
-  // ── 5. Busca contabilização por perfil quando agente ou mês mudar ──
+  // ── 5. Busca contabilização por perfil quando agente, mês ou grupo mudar ──
   useEffect(() => {
     if (!agente || !mesSelecionado) return;
     setLoadingContab(true);
-    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contabilizacao?mes=${mesSelecionado}`)
+    const qGrupo = grupo.length > 1 ? "&grupo=true" : "";
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contabilizacao?mes=${mesSelecionado}${qGrupo}`)
       .then(r => r.json())
       .then(json => {
         if (json.error) console.warn("Contabilização:", json.error);
@@ -349,20 +350,21 @@ export default function AgenteDashboard() {
       })
       .catch(() => {})
       .finally(() => setLoadingContab(false));
-  }, [agente, mesSelecionado]);
+  }, [agente, mesSelecionado, grupo]);
 
-  // ── 5a. Consumo mensal e contratos por perfil (histórico, uma vez por agente) ──
+  // ── 5a. Consumo mensal e contratos por perfil (histórico, uma vez por agente/grupo) ──
   useEffect(() => {
     if (!agente) return;
+    const q = grupo.length > 1 ? "?grupo=true" : "";
     setLoadingPerfisCV(true);
     Promise.all([
-      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-mensal-perfil`).then(r => r.json()),
-      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contratos-mensal-perfil`).then(r => r.json()),
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-mensal-perfil${q}`).then(r => r.json()),
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contratos-mensal-perfil${q}`).then(r => r.json()),
     ]).then(([consumo, contratos]) => {
       if (Array.isArray(consumo))   setConsumoMensalPerfil(consumo);
       if (Array.isArray(contratos)) setContratosMensalPerfil(contratos);
     }).catch(() => {}).finally(() => setLoadingPerfisCV(false));
-  }, [agente]);
+  }, [agente, grupo]);
 
   // ── 5b. Histórico completo de encargos por agente (todos os meses) ──
   useEffect(() => {
@@ -1748,13 +1750,14 @@ export default function AgenteDashboard() {
           const mapa = new Map();
           for (const r of consumoMensalPerfil) {
             const k = `${r.mes_referencia}|${r.sigla_perfil}`;
-            if (!mapa.has(k)) mapa.set(k, { mes_referencia: r.mes_referencia, sigla_perfil: r.sigla_perfil, consumo_mwh: null, compra_mwh: null, venda_mwh: null });
+            if (!mapa.has(k)) mapa.set(k, { mes_referencia: r.mes_referencia, sigla_perfil: r.sigla_perfil, agente: r.agente || null, consumo_mwh: null, compra_mwh: null, venda_mwh: null });
             mapa.get(k).consumo_mwh = Number(r.consumo_mwh);
           }
           for (const r of contratosMensalPerfil) {
             const k = `${r.mes_referencia}|${r.sigla_perfil}`;
-            if (!mapa.has(k)) mapa.set(k, { mes_referencia: r.mes_referencia, sigla_perfil: r.sigla_perfil, consumo_mwh: null, compra_mwh: null, venda_mwh: null });
+            if (!mapa.has(k)) mapa.set(k, { mes_referencia: r.mes_referencia, sigla_perfil: r.sigla_perfil, agente: r.agente || null, consumo_mwh: null, compra_mwh: null, venda_mwh: null });
             const e = mapa.get(k);
+            if (r.agente) e.agente = r.agente;
             e.compra_mwh = r.compra_mwh != null ? Number(r.compra_mwh) : null;
             e.venda_mwh  = r.venda_mwh  != null ? Number(r.venda_mwh)  : null;
           }
@@ -1782,7 +1785,7 @@ export default function AgenteDashboard() {
           const ultimoMes  = meses[meses.length - 1];
           const tabelaDados = perfis.map(p => {
             const item = mapa.get(`${ultimoMes}|${p}`);
-            return { sigla_perfil: p, consumo_mwh: item?.consumo_mwh, compra_mwh: item?.compra_mwh, venda_mwh: item?.venda_mwh };
+            return { sigla_perfil: p, agente: item?.agente, consumo_mwh: item?.consumo_mwh, compra_mwh: item?.compra_mwh, venda_mwh: item?.venda_mwh };
           });
           const totalRow = {
             sigla_perfil: "TOTAL",
@@ -1868,6 +1871,7 @@ export default function AgenteDashboard() {
                   <table style={s.tabelaSimples}>
                     <thead>
                       <tr>
+                        {grupo.length > 1 && <th style={s.thSimples}>Agente</th>}
                         <th style={s.thSimples}>Perfil</th>
                         <th style={{ ...s.thSimples, textAlign: "right" }}>Consumo (MWh)</th>
                         <th style={{ ...s.thSimples, textAlign: "right" }}>Compra (MWh)</th>
@@ -1878,6 +1882,11 @@ export default function AgenteDashboard() {
                       {[...tabelaDados, totalRow].map((r, i) => (
                         <tr key={r.sigla_perfil}
                           style={r.sigla_perfil === "TOTAL" ? { background: "#f1f5f9" } : i % 2 === 0 ? { background: "#fafbfc" } : {}}>
+                          {grupo.length > 1 && (
+                            <td style={{ ...s.tdSimples, fontWeight: 600, whiteSpace: "nowrap" }}>
+                              {r.sigla_perfil === "TOTAL" ? "" : (r.agente || "")}
+                            </td>
+                          )}
                           <td style={{ ...s.tdSimples, fontWeight: r.sigla_perfil === "TOTAL" ? 700 : 600, whiteSpace: "nowrap" }}>
                             {r.sigla_perfil === "TOTAL" ? "Total" : r.sigla_perfil}
                           </td>
@@ -1915,6 +1924,7 @@ export default function AgenteDashboard() {
                   <thead>
                     <tr>
                       {[
+                        ...(grupo.length > 1 ? ["Agente"] : []),
                         "Perfil", "MCP (R$)", "Encargo (R$)", "Exposição (R$)",
                         "Ef. Disp.", "Ef. Cota GF", "Ef. Nuclear",
                         "Ef. CCEAR-Q", "Ef. Itaipu", "Ef. RRH",
@@ -1926,6 +1936,7 @@ export default function AgenteDashboard() {
                   <tbody>
                     {contabilizacao.map((r, i) => (
                       <tr key={r.sigla_perfil_agente + i} style={i % 2 === 0 ? { background: "#fafbfc" } : {}}>
+                        {grupo.length > 1 && <td style={{ ...s.tdSimples, fontWeight: 600, whiteSpace: "nowrap" }}>{r.agente}</td>}
                         <td style={{ ...s.tdSimples, fontWeight: 600, whiteSpace: "nowrap" }}>{r.sigla_perfil_agente}</td>
                         {[
                           r.valor_tm_mcp, r.valor_encargo, r.valor_ajuste_exposicao,

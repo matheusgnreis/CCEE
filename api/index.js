@@ -1484,12 +1484,22 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
       mesContab = check.rows[0]?.m || null;
     }
 
-    const where  = mesContab ? "WHERE agente = $1 AND mes_referencia = $2" : "WHERE agente = $1";
-    const params = mesContab ? [agente, mesContab] : [agente];
+    const isGrupoContab = req.query.grupo === "true";
+    let agentesContab = [agente];
+    if (isGrupoContab) agentesContab = await getGrupoAgentes(agente);
 
-    const data = await cache.cached(`contab:${agente}:${mesContab||"all"}`, 3600, async () => {
+    let where, params;
+    if (isGrupoContab) {
+      where  = mesContab ? "WHERE agente = ANY($1) AND mes_referencia = $2" : "WHERE agente = ANY($1)";
+      params = mesContab ? [agentesContab, mesContab] : [agentesContab];
+    } else {
+      where  = mesContab ? "WHERE agente = $1 AND mes_referencia = $2" : "WHERE agente = $1";
+      params = mesContab ? [agente, mesContab] : [agente];
+    }
+
+    const data = await cache.cached(`contab:${isGrupoContab?"grupo:":""}${agente}:${mesContab||"all"}`, 3600, async () => {
       const r = await pool.query(`
-        SELECT mes_referencia, sigla_perfil_agente, cod_perf_agente,
+        SELECT agente, mes_referencia, sigla_perfil_agente, cod_perf_agente,
                valor_tm_mcp, compensacao_mre, valor_encargo, valor_ajuste_exposicao,
                valor_ajuste_alivio_ret, efeito_contrat_disp, efeito_contrat_cota_gf,
                efeito_contrat_nuclear, ajuste_recontab, ajuste_mcsd_ex,
@@ -1497,7 +1507,7 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
                efeito_repasse_risco_hidro, efeito_desloc_pld_cmo, resultado_final
         FROM ccee_contabilizacao
         ${where}
-        ORDER BY mes_referencia DESC, sigla_perfil_agente ASC
+        ORDER BY mes_referencia DESC, agente ASC, sigla_perfil_agente ASC
       `, params);
       return r.rows;
     });
@@ -1552,15 +1562,23 @@ async function salvarContratosMensalPerfil(agente, registros) {
 
 // GET /inteligencia/:agente/consumo-mensal-perfil
 app.get("/inteligencia/:agente/consumo-mensal-perfil", async (req, res) => {
-  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const agente  = normalizarAgente(decodeURIComponent(req.params.agente));
+  const isGrupo = req.query.grupo === "true";
   try {
-    const data = await cache.cached(`consumo-mensal-perfil:${agente}`, 3600, async () => {
-      const { rows } = await pool.query(`
-        SELECT mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh
-        FROM ccee_consumo_mensal_perfil
-        WHERE agente = $1
-        ORDER BY mes_referencia, sigla_perfil
-      `, [agente]);
+    const agents   = isGrupo ? await getGrupoAgentes(agente) : [agente];
+    const cacheKey = `consumo-mensal-perfil:${isGrupo?"grupo:":""}${agente}`;
+    const data = await cache.cached(cacheKey, 3600, async () => {
+      const { rows } = isGrupo
+        ? await pool.query(`
+            SELECT agente, mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh
+            FROM ccee_consumo_mensal_perfil WHERE agente = ANY($1)
+            ORDER BY mes_referencia, agente, sigla_perfil
+          `, [agents])
+        : await pool.query(`
+            SELECT mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh
+            FROM ccee_consumo_mensal_perfil WHERE agente = $1
+            ORDER BY mes_referencia, sigla_perfil
+          `, [agente]);
       return rows;
     });
     return res.json(data);
@@ -1571,15 +1589,23 @@ app.get("/inteligencia/:agente/consumo-mensal-perfil", async (req, res) => {
 
 // GET /inteligencia/:agente/contratos-mensal-perfil
 app.get("/inteligencia/:agente/contratos-mensal-perfil", async (req, res) => {
-  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const agente  = normalizarAgente(decodeURIComponent(req.params.agente));
+  const isGrupo = req.query.grupo === "true";
   try {
-    const data = await cache.cached(`contratos-mensal-perfil:${agente}`, 3600, async () => {
-      const { rows } = await pool.query(`
-        SELECT mes_referencia, sigla_perfil, compra_mwh, venda_mwh
-        FROM ccee_contrato_mensal_perfil
-        WHERE agente = $1
-        ORDER BY mes_referencia, sigla_perfil
-      `, [agente]);
+    const agents   = isGrupo ? await getGrupoAgentes(agente) : [agente];
+    const cacheKey = `contratos-mensal-perfil:${isGrupo?"grupo:":""}${agente}`;
+    const data = await cache.cached(cacheKey, 3600, async () => {
+      const { rows } = isGrupo
+        ? await pool.query(`
+            SELECT agente, mes_referencia, sigla_perfil, compra_mwh, venda_mwh
+            FROM ccee_contrato_mensal_perfil WHERE agente = ANY($1)
+            ORDER BY mes_referencia, agente, sigla_perfil
+          `, [agents])
+        : await pool.query(`
+            SELECT mes_referencia, sigla_perfil, compra_mwh, venda_mwh
+            FROM ccee_contrato_mensal_perfil WHERE agente = $1
+            ORDER BY mes_referencia, sigla_perfil
+          `, [agente]);
       return rows;
     });
     return res.json(data);
