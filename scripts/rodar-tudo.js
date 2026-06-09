@@ -414,7 +414,7 @@ async function salvarUsinas(agente, registros) {
 }
 
 async function salvarContabilizacao(agente, registros) {
-  if (!registros.length) return;
+  if (!registros.length) return null;
 
   // Detecta o CODIGO_AGENTE deste agente: procura registro onde a sigla_perfil_agente bate com o agente
   const matchProprio = registros.find(r =>
@@ -426,6 +426,29 @@ async function salvarContabilizacao(agente, registros) {
   const filtrados = codAgente != null
     ? registros.filter(r => parseInt(r.codigo_agente, 10) === codAgente)
     : registros;
+
+  // Detecta "agentes irmãos": outros CODIGO_AGENTE presentes na mesma razão social
+  // Retornado para que o caller possa auto-onboardar agentes que compartilham NOME_EMPRESARIAL
+  let irmaos = null;
+  if (codAgente != null) {
+    const outrasCodes = new Map(); // codAgente → Map<codPerfil, sigla>
+    for (const r of registros) {
+      const ca = parseInt(r.codigo_agente, 10);
+      if (ca === codAgente) continue;
+      if (!outrasCodes.has(ca)) outrasCodes.set(ca, new Map());
+      const cp = r.cod_perf_agente != null ? parseInt(r.cod_perf_agente, 10) : null;
+      if (cp != null) outrasCodes.get(ca).set(cp, (r.sigla_perfil_agente || "").trim());
+    }
+    if (outrasCodes.size) {
+      irmaos = [];
+      for (const [ca, perfisMap] of outrasCodes) {
+        // Sigla primária: preferência pelo perfil cujo cod_perf = cod_agente (perfil "raiz")
+        const siglaPrimaria = perfisMap.get(ca) || [...perfisMap.values()][0] || null;
+        irmaos.push({ codAgente: ca, siglaPrimaria, perfis: [...perfisMap.entries()].map(([cp, s]) => ({ cod_perf_agente: cp, sigla_perfil_agente: s })) });
+      }
+      console.log(`    irmãos detectados: ${irmaos.map(i => `cod_agente=${i.codAgente} sigla="${i.siglaPrimaria}"`).join(" | ")}`);
+    }
+  }
 
   if (codAgente != null) {
     // Popula mapeamento agente → perfis CCEE
@@ -442,7 +465,7 @@ async function salvarContabilizacao(agente, registros) {
       console.log(`    contabilização filtrada: ${filtrados.length} de ${registros.length} (por codigo_agente)`);
   }
 
-  if (!filtrados.length) return;
+  if (!filtrados.length) return irmaos;
   const BATCH = 200;
   for (let i = 0; i < filtrados.length; i += BATCH) {
     const lote = filtrados.slice(i, i + BATCH);
@@ -482,6 +505,7 @@ async function salvarContabilizacao(agente, registros) {
     ]);
   }
   console.log(`    contabilização: ${filtrados.length} registros`);
+  return irmaos;
 }
 
 async function _getPerfilCodeMap(agente) {
@@ -573,7 +597,7 @@ async function salvarDadosPowerBI(agente, registros) {
   }
 }
 
-async function onboardarAgente(agente, razaoSocial, sigla) {
+async function onboardarAgente(agente, razaoSocial, sigla, nomeToAgente) {
   console.log(`\n  ► Onboarding: ${agente}`);
   try {
     const anos = Array.from({ length: new Date().getFullYear() - PRIMEIRO_ANO_CONTAB + 1 }, (_, i) => PRIMEIRO_ANO_CONTAB + i);
@@ -583,7 +607,8 @@ async function onboardarAgente(agente, razaoSocial, sigla) {
       buscarContabilizacao(razaoSocial || agente, { anos }),
       buscarUsinas(razaoSocial || agente),
     ]);
-    if (contab.status === "fulfilled") await salvarContabilizacao(agente, contab.value);
+    let irmaos = null;
+    if (contab.status === "fulfilled") irmaos = await salvarContabilizacao(agente, contab.value);
     // Cargas depois: salvarCargas já consulta ccee_agente_perfis para filtrar por perfil
     try {
       const cargas = await buscarCargas(sigla, { razaoSocial });
@@ -592,6 +617,42 @@ async function onboardarAgente(agente, razaoSocial, sigla) {
       console.warn(`    cargas: ${e.message}`);
     }
     if (usinas.status === "fulfilled") await salvarUsinas(agente, usinas.value);
+
+    // Auto-onboarding de agentes irmãos: outros CODIGO_AGENTE que compartilham a mesma razão social
+    if (irmaos && nomeToAgente && !SEM_POWERBI) {
+      for (const irmao of irmaos) {
+        if (!irmao.siglaPrimaria) continue;
+        // Verifica se já existe no banco (por cod_agente_ccee em ccee_agente_perfis)
+        const { rows: existe } = await pool.query(
+          "SELECT agente FROM ccee_agente_perfis WHERE cod_agente_ccee = $1 LIMIT 1",
+          [irmao.codAgente]
+        );
+        if (existe.length) {
+          console.log(`    irmão cod_agente=${irmao.codAgente} já onboardado como "${existe[0].agente}"`);
+          continue;
+        }
+        console.log(`    tentando onboarding do irmão "${irmao.siglaPrimaria}" (cod_agente=${irmao.codAgente})`);
+        let meta = null;
+        try { meta = await buscarMetaPowerBI(irmao.siglaPrimaria); } catch {}
+        if (!meta) {
+          console.log(`    irmão "${irmao.siglaPrimaria}": não encontrado no Power BI`);
+          // Insere com dados mínimos para que o pipeline consiga processar
+          const agenteKey = irmao.siglaPrimaria;
+          await inserirAgente(agenteKey, { razao_social: razaoSocial, sigla: agenteKey, classe: "Consumidor Livre" });
+          await salvarAgentePerfilMapping(agenteKey, irmao.codAgente, irmao.perfis);
+          if (nomeToAgente) nomeToAgente.set(razaoSocial, { agente: agenteKey, razao_social: razaoSocial, sigla: agenteKey });
+          console.log(`    irmão "${agenteKey}" inserido com dados mínimos`);
+          continue;
+        }
+        if (CLASSES_SKIP.has(meta.classe)) { console.log(`    irmão "${irmao.siglaPrimaria}": ${meta.classe} — pulado`); continue; }
+        const agenteKey = meta.sigla || irmao.siglaPrimaria;
+        await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || razaoSocial });
+        if (nomeToAgente) nomeToAgente.set(razaoSocial, { agente: agenteKey, razao_social: meta.razao_social || razaoSocial, sigla: meta.sigla });
+        console.log(`    irmão onboardado: "${agenteKey}" (${meta.classe})`);
+        await delay(DELAY_MS);
+        await onboardarAgente(agenteKey, meta.razao_social || razaoSocial, meta.sigla, null);
+      }
+    }
   } catch (e) {
     console.warn(`    Erro no onboarding CKAN: ${e.message}`);
   }
@@ -997,7 +1058,7 @@ async function main() {
       await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || nome });
       nomeToAgente.set(nome, { agente: agenteKey, razao_social: meta.razao_social || nome, sigla: meta.sigla, cnpj: meta.cnpj, classe: meta.classe });
 
-      await onboardarAgente(agenteKey, meta.razao_social || nome, meta.sigla);
+      await onboardarAgente(agenteKey, meta.razao_social || nome, meta.sigla, nomeToAgente);
       if (i < novosNomes.length - 1) await delay(DELAY_MS);
     }
   } else if (novosNomes.length > 0) {
@@ -1011,9 +1072,12 @@ async function main() {
     [...nomeToAgente.values()].map(a => [a.agente, a])
   ).values()].filter(a => !CLASSES_SKIP.has(a.classe));
 
-  const nomeToAgenteKey = new Map(); // NOME_normalizado → agente_key
+  // Suporta múltiplos agentes por NOME_EMPRESARIAL (ex: MONSANTO e MONSANTO SEMENTES)
+  const nomeToAgenteKeys = new Map(); // NOME_normalizado → agente_key[]
   for (const [nome, meta] of nomeToAgente) {
-    nomeToAgenteKey.set(normalizarNome(nome), meta.agente);
+    const k = normalizarNome(nome);
+    if (!nomeToAgenteKeys.has(k)) nomeToAgenteKeys.set(k, []);
+    nomeToAgenteKeys.get(k).push(meta.agente);
   }
 
   // Filtro por UF (ex: --apenas-uf MG  ou  --apenas-uf PB,PE,CE,RN,BA,AL,SE,MA,PI)
@@ -1062,7 +1126,35 @@ async function main() {
     process.stdout.write(`\n  [${contabIdx}/${totalContab}] ${agente} (${anosContab.join(",")})...`);
     try {
       const registros = await buscarContabilizacao(razao_social, { anos: anosContab });
-      if (registros.length) { await salvarContabilizacao(agente, registros); contabAtualizados++; }
+      if (registros.length) {
+        const irmaos = await salvarContabilizacao(agente, registros);
+        contabAtualizados++;
+        // Auto-onboarding de agentes irmãos detectados nesta contabilização
+        if (irmaos && !SEM_POWERBI) {
+          for (const irmao of irmaos) {
+            if (!irmao.siglaPrimaria) continue;
+            const { rows: existe } = await pool.query(
+              "SELECT agente FROM ccee_agente_perfis WHERE cod_agente_ccee = $1 LIMIT 1",
+              [irmao.codAgente]
+            );
+            if (existe.length) continue;
+            process.stdout.write(`\n    → irmão novo "${irmao.siglaPrimaria}" (cod_agente=${irmao.codAgente}) detectado`);
+            let meta = null;
+            try { meta = await buscarMetaPowerBI(irmao.siglaPrimaria); } catch {}
+            const agenteKey = meta?.sigla || irmao.siglaPrimaria;
+            if (!meta || CLASSES_SKIP.has(meta.classe)) {
+              await inserirAgente(agenteKey, { razao_social: razao_social, sigla: agenteKey, classe: meta?.classe || "Consumidor Livre" });
+            } else {
+              await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || razao_social });
+            }
+            await salvarAgentePerfilMapping(agenteKey, irmao.codAgente, irmao.perfis);
+            nomeToAgente.set(razao_social, { agente: agenteKey, razao_social, sigla: agenteKey });
+            process.stdout.write(` → onboardado como "${agenteKey}"`);
+            await delay(DELAY_MS);
+            await onboardarAgente(agenteKey, razao_social, agenteKey, null);
+          }
+        }
+      }
       process.stdout.write(` ${registros.length} registros`);
     } catch (e) {
       process.stdout.write(` ⚠ ${e.message.slice(0, 60)}`);
@@ -1259,14 +1351,22 @@ async function main() {
       agentesDoMes.forEach(a => { agregado[a.agente] = {}; agregadoPerfil[a.agente] = {}; agregadoUC[a.agente] = {}; });
       return streamGzip(urlConsumo[mes], row => {
       const nome  = normalizarNome(row.NOME_EMPRESARIAL);
-      const aKey  = nomeToAgenteKey.get(nome);
-      if (!aKey || !agentesSet.has(aKey)) return;
+      const aKeysAll = nomeToAgenteKeys.get(nome);
+      if (!aKeysAll) return;
 
-      const sigla      = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
-      const perfilInfo = perfisPorAgente[aKey];
-      // Se há mapeamento de perfis, só aceita linhas cujo perfil pertence a este agente
-      if (perfilInfo && !perfilInfo.siglas.has(sigla)) return;
-      const perfCodes  = perfilInfo?.siglaToInfo?.get(sigla);
+      const sigla = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
+
+      // Encontra qual agente é dono deste perfil (suporte a múltiplos agentes por NOME_EMPRESARIAL)
+      let aKey = null;
+      let perfCodes = null;
+      for (const k of aKeysAll) {
+        if (!agentesSet.has(k)) continue;
+        const pi = perfisPorAgente[k];
+        if (!pi) { if (!aKey) aKey = k; continue; } // sem mapeamento ainda → candidato fallback
+        if (pi.siglas.has(sigla)) { aKey = k; perfCodes = pi.siglaToInfo.get(sigla); break; }
+      }
+      if (!aKey) return;
+
       const codPerfil  = perfCodes?.cod_perf_agente ?? null;
       const codAgente  = perfCodes?.cod_agente_ccee ?? null;
 
