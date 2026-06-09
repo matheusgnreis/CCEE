@@ -7,8 +7,11 @@
 //
 // Uso:
 //   node scripts/rodar-tudo.js
-//   node scripts/rodar-tudo.js --mes 2025-03   (mês específico)
-//   node scripts/rodar-tudo.js --sem-powerbi    (pula onboarding de novos agentes)
+//   node scripts/rodar-tudo.js --mes 2025-03          (mês específico)
+//   node scripts/rodar-tudo.js --sem-powerbi          (pula onboarding de novos agentes)
+//   node scripts/rodar-tudo.js --apenas-agentes "A,B" (só estes agentes)
+//   node scripts/rodar-tudo.js --apenas-uf MG         (só agentes com carga no estado)
+//   node scripts/rodar-tudo.js --salvar-horario        (mantém ccee_consumo_horario após processar)
 
 require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
 const fetch  = require("node-fetch");
@@ -44,6 +47,7 @@ const SEM_POWERBI   = args.includes("--sem-powerbi") || SO_MODULACAO;
 const SEM_CONTAB    = args.includes("--sem-contab")  || SO_MODULACAO;
 const SEM_PERFIL    = args.includes("--sem-perfil")  || SO_MODULACAO;
 const TODOS_MESES   = args.includes("--todos-meses"); // streama todos os meses p/ descoberta
+const SALVAR_HORARIO = args.includes("--salvar-horario"); // não descarta ccee_consumo_horario após processar
 const APENAS_UF     = (() => {                        // --apenas-uf MG  ou  --apenas-uf PB,PE,CE,RN,BA,...
   const idx = args.indexOf("--apenas-uf");
   if (idx === -1) return null;
@@ -295,11 +299,42 @@ async function inserirAgente(agente, meta) {
 
 // ─── Fase 3: CKAN — cargas, usinas, contabilização ───────────────────────────
 
+async function salvarAgentePerfilMapping(agente, codAgente, perfis) {
+  if (!perfis.length) return;
+  await pool.query(`
+    INSERT INTO ccee_agente_perfis (agente, cod_agente_ccee, cod_perf_agente, sigla_perfil_agente)
+    SELECT * FROM UNNEST($1::text[], $2::integer[], $3::integer[], $4::text[])
+    ON CONFLICT (agente, cod_perf_agente) DO UPDATE
+      SET cod_agente_ccee = EXCLUDED.cod_agente_ccee,
+          sigla_perfil_agente = EXCLUDED.sigla_perfil_agente
+  `, [
+    perfis.map(() => agente),
+    perfis.map(() => codAgente),
+    perfis.map(p => p.cod_perf_agente),
+    perfis.map(p => p.sigla_perfil_agente),
+  ]);
+}
+
 async function salvarCargas(agente, registros) {
   if (!registros.length) return;
+
+  // Filtra pelas siglas de perfil já mapeadas para este agente (evita misturar com outros agentes da mesma razão social)
+  const { rows: perfilRows } = await pool.query(
+    "SELECT sigla_perfil_agente FROM ccee_agente_perfis WHERE agente = $1",
+    [agente]
+  );
+  let filtrados = registros;
+  if (perfilRows.length > 0) {
+    const siglas = new Set(perfilRows.map(r => r.sigla_perfil_agente.trim().toUpperCase()));
+    filtrados = registros.filter(r => siglas.has((r.sigla_perfil_agente || "").trim().toUpperCase()));
+    if (filtrados.length !== registros.length)
+      console.log(`    cargas filtradas por perfis conhecidos: ${filtrados.length} de ${registros.length}`);
+  }
+  if (!filtrados.length) return;
+
   const BATCH = 200;
-  for (let i = 0; i < registros.length; i += BATCH) {
-    const lote = registros.slice(i, i + BATCH);
+  for (let i = 0; i < filtrados.length; i += BATCH) {
+    const lote = filtrados.slice(i, i + BATCH);
     await pool.query(`
       INSERT INTO ccee_cargas (
         agente, sigla_perfil_agente, mes_referencia, cod_perf_agente, nome_empresarial,
@@ -333,7 +368,7 @@ async function salvarCargas(agente, registros) {
       lote.map(r => r.consumo_total ?? null),
     ]);
   }
-  console.log(`    cargas: ${registros.length} registros`);
+  console.log(`    cargas: ${filtrados.length} registros`);
 }
 
 async function salvarUsinas(agente, registros) {
@@ -380,9 +415,37 @@ async function salvarUsinas(agente, registros) {
 
 async function salvarContabilizacao(agente, registros) {
   if (!registros.length) return;
+
+  // Detecta o CODIGO_AGENTE deste agente: procura registro onde a sigla_perfil_agente bate com o agente
+  const matchProprio = registros.find(r =>
+    (r.sigla_perfil_agente || "").trim().toUpperCase() === agente.trim().toUpperCase()
+  );
+  const codAgente = matchProprio?.codigo_agente ? parseInt(matchProprio.codigo_agente, 10) : null;
+
+  // Filtra somente registros do mesmo CODIGO_AGENTE (descarta outros agentes da mesma empresa)
+  const filtrados = codAgente != null
+    ? registros.filter(r => parseInt(r.codigo_agente, 10) === codAgente)
+    : registros;
+
+  if (codAgente != null) {
+    // Popula mapeamento agente → perfis CCEE
+    const perfisMap = new Map();
+    for (const r of filtrados) {
+      const cp = r.cod_perf_agente != null ? parseInt(r.cod_perf_agente, 10) : null;
+      if (cp != null && !perfisMap.has(cp))
+        perfisMap.set(cp, { cod_perf_agente: cp, sigla_perfil_agente: (r.sigla_perfil_agente || "").trim() });
+    }
+    const perfis = [...perfisMap.values()];
+    await salvarAgentePerfilMapping(agente, codAgente, perfis);
+    console.log(`    cod_agente_ccee: ${codAgente} | perfis: ${perfis.map(p => p.sigla_perfil_agente).join(", ")}`);
+    if (filtrados.length !== registros.length)
+      console.log(`    contabilização filtrada: ${filtrados.length} de ${registros.length} (por codigo_agente)`);
+  }
+
+  if (!filtrados.length) return;
   const BATCH = 200;
-  for (let i = 0; i < registros.length; i += BATCH) {
-    const lote = registros.slice(i, i + BATCH);
+  for (let i = 0; i < filtrados.length; i += BATCH) {
+    const lote = filtrados.slice(i, i + BATCH);
     await pool.query(`
       INSERT INTO ccee_contabilizacao (
         agente, mes_referencia, sigla_perfil_agente, nome_empresarial, cod_perf_agente,
@@ -418,23 +481,40 @@ async function salvarContabilizacao(agente, registros) {
       lote.map(r => r.efeito_desloc_pld_cmo), lote.map(r => r.resultado_final),
     ]);
   }
-  console.log(`    contabilização: ${registros.length} registros`);
+  console.log(`    contabilização: ${filtrados.length} registros`);
+}
+
+async function _getPerfilCodeMap(agente) {
+  const { rows } = await pool.query(
+    "SELECT sigla_perfil_agente, cod_perf_agente, cod_agente_ccee FROM ccee_agente_perfis WHERE agente = $1",
+    [agente]
+  );
+  return new Map(rows.map(r => [r.sigla_perfil_agente.trim().toUpperCase(), {
+    cod_perf_agente: r.cod_perf_agente,
+    cod_agente_ccee: r.cod_agente_ccee,
+  }]));
 }
 
 async function salvarConsumoMensalPerfilDB(agente, registros) {
   if (!registros.length) return;
+  const codeMap = await _getPerfilCodeMap(agente);
   const BATCH = 500;
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
+    const info = (r) => codeMap.get((r.sigla_perfil || "").trim().toUpperCase());
     await pool.query(`
-      INSERT INTO ccee_consumo_mensal_perfil (agente, mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh)
-      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::numeric[])
+      INSERT INTO ccee_consumo_mensal_perfil (agente, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, consumo_mwh, consumo_geracao_mwh)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::integer[], $6::numeric[], $7::numeric[])
       ON CONFLICT (agente, mes_referencia, sigla_perfil) DO UPDATE
-        SET consumo_mwh = EXCLUDED.consumo_mwh, consumo_geracao_mwh = EXCLUDED.consumo_geracao_mwh
+        SET consumo_mwh = EXCLUDED.consumo_mwh, consumo_geracao_mwh = EXCLUDED.consumo_geracao_mwh,
+            cod_agente_ccee = COALESCE(EXCLUDED.cod_agente_ccee, ccee_consumo_mensal_perfil.cod_agente_ccee),
+            cod_perf_agente = COALESCE(EXCLUDED.cod_perf_agente, ccee_consumo_mensal_perfil.cod_perf_agente)
     `, [
       lote.map(() => agente),
       lote.map(r => r.mes_referencia),
       lote.map(r => r.sigla_perfil),
+      lote.map(r => info(r)?.cod_agente_ccee ?? null),
+      lote.map(r => info(r)?.cod_perf_agente ?? null),
       lote.map(r => r.consumo_mwh),
       lote.map(r => r.consumo_geracao_mwh ?? null),
     ]);
@@ -443,18 +523,24 @@ async function salvarConsumoMensalPerfilDB(agente, registros) {
 
 async function salvarContratosMensalPerfilDB(agente, registros) {
   if (!registros.length) return;
+  const codeMap = await _getPerfilCodeMap(agente);
   const BATCH = 500;
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
+    const info = (r) => codeMap.get((r.sigla_perfil || "").trim().toUpperCase());
     await pool.query(`
-      INSERT INTO ccee_contrato_mensal_perfil (agente, mes_referencia, sigla_perfil, compra_mwh, venda_mwh)
-      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::numeric[])
+      INSERT INTO ccee_contrato_mensal_perfil (agente, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, compra_mwh, venda_mwh)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::integer[], $6::numeric[], $7::numeric[])
       ON CONFLICT (agente, mes_referencia, sigla_perfil) DO UPDATE
-        SET compra_mwh = EXCLUDED.compra_mwh, venda_mwh = EXCLUDED.venda_mwh
+        SET compra_mwh = EXCLUDED.compra_mwh, venda_mwh = EXCLUDED.venda_mwh,
+            cod_agente_ccee = COALESCE(EXCLUDED.cod_agente_ccee, ccee_contrato_mensal_perfil.cod_agente_ccee),
+            cod_perf_agente = COALESCE(EXCLUDED.cod_perf_agente, ccee_contrato_mensal_perfil.cod_perf_agente)
     `, [
       lote.map(() => agente),
       lote.map(r => r.mes_referencia),
       lote.map(r => r.sigla_perfil),
+      lote.map(r => info(r)?.cod_agente_ccee ?? null),
+      lote.map(r => info(r)?.cod_perf_agente ?? null),
       lote.map(r => r.compra_mwh ?? null),
       lote.map(r => r.venda_mwh  ?? null),
     ]);
@@ -490,14 +576,22 @@ async function salvarDadosPowerBI(agente, registros) {
 async function onboardarAgente(agente, razaoSocial, sigla) {
   console.log(`\n  ► Onboarding: ${agente}`);
   try {
-    const [cargas, usinas, contab] = await Promise.allSettled([
-      buscarCargas(sigla, { razaoSocial }),
+    const anos = Array.from({ length: new Date().getFullYear() - PRIMEIRO_ANO_CONTAB + 1 }, (_, i) => PRIMEIRO_ANO_CONTAB + i);
+    // Contabilização primeiro: popula ccee_agente_perfis com o mapeamento CODIGO_AGENTE → perfis,
+    // que será usado por salvarCargas para filtrar corretamente os registros da empresa
+    const [contab, usinas] = await Promise.allSettled([
+      buscarContabilizacao(razaoSocial || agente, { anos }),
       buscarUsinas(razaoSocial || agente),
-      buscarContabilizacao(razaoSocial || agente, { anos: Array.from({ length: new Date().getFullYear() - PRIMEIRO_ANO_CONTAB + 1 }, (_, i) => PRIMEIRO_ANO_CONTAB + i) }),
     ]);
-    if (cargas.status  === "fulfilled") await salvarCargas(agente, cargas.value);
-    if (usinas.status  === "fulfilled") await salvarUsinas(agente, usinas.value);
-    if (contab.status  === "fulfilled") await salvarContabilizacao(agente, contab.value);
+    if (contab.status === "fulfilled") await salvarContabilizacao(agente, contab.value);
+    // Cargas depois: salvarCargas já consulta ccee_agente_perfis para filtrar por perfil
+    try {
+      const cargas = await buscarCargas(sigla, { razaoSocial });
+      await salvarCargas(agente, cargas);
+    } catch (e) {
+      console.warn(`    cargas: ${e.message}`);
+    }
+    if (usinas.status === "fulfilled") await salvarUsinas(agente, usinas.value);
   } catch (e) {
     console.warn(`    Erro no onboarding CKAN: ${e.message}`);
   }
@@ -527,11 +621,13 @@ async function salvarConsumoPerfil(agente, registros) {
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
     await pool.query(`
-      INSERT INTO ccee_consumo_horario_perfil (agente, mes_referencia, sigla_perfil, periodo, submercado, consumo_mwh)
-      SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::text[],$4::integer[],$5::text[],$6::numeric[])
+      INSERT INTO ccee_consumo_horario_perfil (agente, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, periodo, submercado, consumo_mwh)
+      SELECT * FROM UNNEST($1::text[],$2::char(7)[],$3::text[],$4::integer[],$5::integer[],$6::integer[],$7::text[],$8::numeric[])
       ON CONFLICT (agente, mes_referencia, sigla_perfil, periodo, submercado) DO NOTHING
     `, [
       lote.map(() => agente), lote.map(r => r.mes_referencia), lote.map(r => r.sigla_perfil),
+      lote.map(r => r.cod_agente_ccee ?? null),
+      lote.map(r => r.cod_perf_agente ?? null),
       lote.map(r => r.periodo), lote.map(r => r.submercado), lote.map(r => r.consumo_mwh),
     ]);
   }
@@ -543,13 +639,15 @@ async function salvarConsumoUC(agente, registros) {
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
     await pool.query(`
-      INSERT INTO ccee_consumo_horario_uc (agente, nome_carga, mes_referencia, sigla_perfil, periodo, submercado, consumo_mwh)
-      SELECT * FROM UNNEST($1::text[],$2::text[],$3::char(7)[],$4::text[],$5::integer[],$6::text[],$7::numeric[])
+      INSERT INTO ccee_consumo_horario_uc (agente, nome_carga, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, periodo, submercado, consumo_mwh)
+      SELECT * FROM UNNEST($1::text[],$2::text[],$3::char(7)[],$4::text[],$5::integer[],$6::integer[],$7::integer[],$8::text[],$9::numeric[])
       ON CONFLICT (agente, nome_carga, mes_referencia, periodo, submercado) DO NOTHING
     `, [
       lote.map(() => agente), lote.map(r => r.nome_carga), lote.map(r => r.mes_referencia),
-      lote.map(r => r.sigla_perfil || ""), lote.map(r => r.periodo),
-      lote.map(r => r.submercado), lote.map(r => r.consumo_mwh),
+      lote.map(r => r.sigla_perfil || ""),
+      lote.map(r => r.cod_agente_ccee ?? null),
+      lote.map(r => r.cod_perf_agente ?? null),
+      lote.map(r => r.periodo), lote.map(r => r.submercado), lote.map(r => r.consumo_mwh),
     ]);
   }
 }
@@ -686,6 +784,94 @@ async function salvarModulacaoGeracao(agente, mes, resultados) {
   ]);
 }
 
+// Calcula custo de modulação por unidade consumidora, usando dados em memória (regsUC)
+// evita re-query do banco pois o ccee_consumo_horario temporário já foi/será deletado
+function calcularModulacaoUC(regsUC, pldMapa) {
+  // Agrupa por (nome_carga, submercado) — cada UC pode ter múltiplos submercados
+  const grupos = {};
+  for (const r of regsUC) {
+    const key = `${r.nome_carga}|${r.submercado}`;
+    if (!grupos[key]) grupos[key] = {
+      nome_carga:      r.nome_carga,
+      sigla_perfil:    r.sigla_perfil    || "",
+      cod_agente_ccee: r.cod_agente_ccee ?? null,
+      cod_perf_agente: r.cod_perf_agente ?? null,
+      submercado:      r.submercado,
+      rows:            [],
+    };
+    grupos[key].rows.push(r);
+  }
+
+  const resultados = [];
+  for (const g of Object.values(grupos)) {
+    const sub = g.submercado;
+    let totalConsumo = 0, somaCurva = 0;
+    for (const r of g.rows) {
+      const mwh = Number(r.consumo_mwh) || 0;
+      const pld = pldMapa[`${r.periodo}|${sub}`];
+      if (pld == null) continue;
+      totalConsumo += mwh;
+      somaCurva    += mwh * pld;
+    }
+    let somaPld = 0, nHoras = 0;
+    for (const [key, pld] of Object.entries(pldMapa)) {
+      if (key.endsWith(`|${sub}`)) { somaPld += pld; nHoras++; }
+    }
+    if (!nHoras || !totalConsumo) continue;
+    const flat  = totalConsumo / nHoras;
+    const custo = (somaCurva - flat * somaPld) / totalConsumo;
+    resultados.push({
+      nome_carga:             g.nome_carga,
+      sigla_perfil:           g.sigla_perfil,
+      cod_agente_ccee:        g.cod_agente_ccee,
+      cod_perf_agente:        g.cod_perf_agente,
+      submercado:             sub,
+      consumo_total_mwh:      Number(totalConsumo.toFixed(4)),
+      n_horas:                nHoras,
+      soma_curva_rs:          Number(somaCurva.toFixed(4)),
+      soma_flat_rs:           Number((flat * somaPld).toFixed(4)),
+      custo_modulacao_rs_mwh: Number(custo.toFixed(4)),
+    });
+  }
+  return resultados;
+}
+
+async function salvarModulacaoUC(agente, mes, resultados) {
+  if (!resultados.length) return;
+  await pool.query(`
+    INSERT INTO ccee_modulacao_uc
+      (agente, nome_carga, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente,
+       submercado, consumo_total_mwh, n_horas, soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh)
+    SELECT * FROM UNNEST(
+      $1::text[],$2::text[],$3::char(7)[],$4::text[],$5::integer[],$6::integer[],
+      $7::text[],$8::numeric[],$9::integer[],$10::numeric[],$11::numeric[],$12::numeric[]
+    )
+    ON CONFLICT (agente, nome_carga, mes_referencia, submercado) DO UPDATE SET
+      consumo_total_mwh      = EXCLUDED.consumo_total_mwh,
+      n_horas                = EXCLUDED.n_horas,
+      soma_curva_rs          = EXCLUDED.soma_curva_rs,
+      soma_flat_rs           = EXCLUDED.soma_flat_rs,
+      custo_modulacao_rs_mwh = EXCLUDED.custo_modulacao_rs_mwh,
+      cod_agente_ccee        = COALESCE(EXCLUDED.cod_agente_ccee, ccee_modulacao_uc.cod_agente_ccee),
+      cod_perf_agente        = COALESCE(EXCLUDED.cod_perf_agente, ccee_modulacao_uc.cod_perf_agente),
+      created_at             = NOW()
+  `, [
+    resultados.map(() => agente),
+    resultados.map(r => r.nome_carga),
+    resultados.map(() => mes),
+    resultados.map(r => r.sigla_perfil),
+    resultados.map(r => r.cod_agente_ccee),
+    resultados.map(r => r.cod_perf_agente),
+    resultados.map(r => r.submercado),
+    resultados.map(r => r.consumo_total_mwh),
+    resultados.map(r => r.n_horas),
+    resultados.map(r => r.soma_curva_rs),
+    resultados.map(r => r.soma_flat_rs),
+    resultados.map(r => r.custo_modulacao_rs_mwh),
+  ]);
+  console.log(`    modulação UC: ${resultados.length} UCs`);
+}
+
 async function calcularModulacaoGeracao(agente, meses, siglasUsinas) {
   for (const mes of meses) {
     const nDB = await pool.query(
@@ -730,6 +916,37 @@ async function main() {
   console.log("\n" + "═".repeat(60));
   console.log("🚀 PIPELINE COMPLETO — CCEE Monitor");
   console.log("═".repeat(60));
+
+  // Garante que as tabelas novas existam (schema completo em criar-banco.js)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ccee_consumo_horario_uc (
+      agente TEXT NOT NULL, nome_carga TEXT NOT NULL, mes_referencia CHAR(7) NOT NULL,
+      sigla_perfil TEXT NOT NULL DEFAULT '', cod_perf_agente INTEGER,
+      periodo INTEGER NOT NULL, submercado TEXT NOT NULL,
+      consumo_mwh NUMERIC(14,6) NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (agente, nome_carga, mes_referencia, periodo, submercado)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ccee_agente_perfis (
+      agente TEXT NOT NULL, cod_agente_ccee INTEGER NOT NULL,
+      cod_perf_agente INTEGER NOT NULL, sigla_perfil_agente TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (agente, cod_perf_agente)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ccee_modulacao_uc (
+      agente TEXT NOT NULL, nome_carga TEXT NOT NULL, mes_referencia CHAR(7) NOT NULL,
+      sigla_perfil TEXT NOT NULL DEFAULT '', cod_agente_ccee INTEGER, cod_perf_agente INTEGER,
+      submercado TEXT NOT NULL,
+      consumo_total_mwh NUMERIC(14,4), n_horas INTEGER,
+      soma_curva_rs NUMERIC(18,4), soma_flat_rs NUMERIC(18,4), custo_modulacao_rs_mwh NUMERIC(14,4),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (agente, nome_carga, mes_referencia, submercado)
+    )
+  `);
 
   // Carrega CKAN resources
   const [recursosCon, recursosGer] = await Promise.all([listarConsumo(), listarGeracao()]);
@@ -1014,6 +1231,24 @@ async function main() {
     console.log(`\n  📥 ${mes} (${agentesDoMes.length} agentes)`);
     const agentesSet = new Set(agentesDoMes.map(a => a.agente));
 
+    // Carrega mapeamento de perfis: sigla_upper → { siglas, siglaToInfo: { cod_perf_agente, cod_agente_ccee } }
+    const perfisPorAgente = {};
+    for (const { agente } of agentesDoMes) {
+      const { rows: pRows } = await pool.query(
+        "SELECT sigla_perfil_agente, cod_perf_agente, cod_agente_ccee FROM ccee_agente_perfis WHERE agente = $1",
+        [agente]
+      );
+      if (pRows.length > 0) {
+        perfisPorAgente[agente] = {
+          siglas:      new Set(pRows.map(r => r.sigla_perfil_agente.trim().toUpperCase())),
+          siglaToInfo: new Map(pRows.map(r => [r.sigla_perfil_agente.trim().toUpperCase(), {
+            cod_perf_agente: r.cod_perf_agente,
+            cod_agente_ccee: r.cod_agente_ccee,
+          }])),
+        };
+      }
+    }
+
     const agregado       = {};
     const agregadoPerfil = {};
     const agregadoUC     = {};
@@ -1027,6 +1262,14 @@ async function main() {
       const aKey  = nomeToAgenteKey.get(nome);
       if (!aKey || !agentesSet.has(aKey)) return;
 
+      const sigla      = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
+      const perfilInfo = perfisPorAgente[aKey];
+      // Se há mapeamento de perfis, só aceita linhas cujo perfil pertence a este agente
+      if (perfilInfo && !perfilInfo.siglas.has(sigla)) return;
+      const perfCodes  = perfilInfo?.siglaToInfo?.get(sigla);
+      const codPerfil  = perfCodes?.cod_perf_agente ?? null;
+      const codAgente  = perfCodes?.cod_agente_ccee ?? null;
+
       const horaDia = parseInt(row.PERIODO_COMERCIALIZACAO, 10);
       const dataStr = (row.DATA || "").trim();
       let diaMes = 1;
@@ -1036,20 +1279,19 @@ async function main() {
       const subBruto   = (row.SUBMERCADO || "").trim().toUpperCase();
       const submercado = SUB_MAP[subBruto] || subBruto;
       const consumo    = parseFloat((row.CONSUMO_CARGA_ACL || "0").replace(",", ".")) || 0;
-      const sigla      = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
       if (!periodo || !submercado) return;
 
       const key       = `${periodo}|${submercado}`;
       const keyPerfil = `${sigla}|${periodo}|${submercado}`;
       if (!agregado[aKey][key]) agregado[aKey][key] = { mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
       agregado[aKey][key].consumo_mwh += consumo;
-      if (!agregadoPerfil[aKey][keyPerfil]) agregadoPerfil[aKey][keyPerfil] = { mes_referencia: mes, sigla_perfil: sigla, periodo, submercado, consumo_mwh: 0 };
+      if (!agregadoPerfil[aKey][keyPerfil]) agregadoPerfil[aKey][keyPerfil] = { mes_referencia: mes, sigla_perfil: sigla, cod_agente_ccee: codAgente, cod_perf_agente: codPerfil, periodo, submercado, consumo_mwh: 0 };
       agregadoPerfil[aKey][keyPerfil].consumo_mwh += consumo;
 
       const nomeCarga = (row.NOME_CARGA || row.NOME_DA_CARGA || row.COD_PARCELA_CARGA || "").trim();
       if (nomeCarga) {
         const keyUC = `${nomeCarga}|${periodo}|${submercado}`;
-        if (!agregadoUC[aKey][keyUC]) agregadoUC[aKey][keyUC] = { mes_referencia: mes, nome_carga: nomeCarga, sigla_perfil: sigla, periodo, submercado, consumo_mwh: 0 };
+        if (!agregadoUC[aKey][keyUC]) agregadoUC[aKey][keyUC] = { mes_referencia: mes, nome_carga: nomeCarga, sigla_perfil: sigla, cod_agente_ccee: codAgente, cod_perf_agente: codPerfil, periodo, submercado, consumo_mwh: 0 };
         agregadoUC[aKey][keyUC].consumo_mwh += consumo;
       }
       });
@@ -1083,17 +1325,19 @@ async function main() {
       `, [agente, mes]);
 
       await pool.query(`
-        INSERT INTO ccee_curva_tipica_perfil (agente, sigla_perfil, hora, consumo_med, n_amostras, updated_at)
-        SELECT $1, sigla_perfil, ((periodo-1)%24)+1 AS hora, AVG(consumo_mwh), COUNT(*), NOW()
+        INSERT INTO ccee_curva_tipica_perfil (agente, sigla_perfil, cod_agente_ccee, cod_perf_agente, hora, consumo_med, n_amostras, updated_at)
+        SELECT $1, sigla_perfil, MAX(cod_agente_ccee), MAX(cod_perf_agente), ((periodo-1)%24)+1 AS hora, AVG(consumo_mwh), COUNT(*), NOW()
         FROM ccee_consumo_horario_perfil WHERE agente=$1 AND mes_referencia=$2
         GROUP BY sigla_perfil, hora
         ON CONFLICT (agente, sigla_perfil, hora) DO UPDATE SET
-          consumo_med = (
+          consumo_med     = (
             ccee_curva_tipica_perfil.consumo_med * ccee_curva_tipica_perfil.n_amostras +
             EXCLUDED.consumo_med * EXCLUDED.n_amostras
           ) / (ccee_curva_tipica_perfil.n_amostras + EXCLUDED.n_amostras),
-          n_amostras  = ccee_curva_tipica_perfil.n_amostras + EXCLUDED.n_amostras,
-          updated_at  = NOW()
+          n_amostras      = ccee_curva_tipica_perfil.n_amostras + EXCLUDED.n_amostras,
+          cod_agente_ccee = COALESCE(EXCLUDED.cod_agente_ccee, ccee_curva_tipica_perfil.cod_agente_ccee),
+          cod_perf_agente = COALESCE(EXCLUDED.cod_perf_agente, ccee_curva_tipica_perfil.cod_perf_agente),
+          updated_at      = NOW()
       `, [agente, mes]);
 
       // Calcula modulação se ainda não foi feita
@@ -1102,15 +1346,29 @@ async function main() {
         modOkSet.add(`${agente}|${mes}`);
       }
 
-      // Bruto processado — apaga imediatamente (curva típica e modulação já salvos)
-      await pool.query(
-        "DELETE FROM ccee_consumo_horario WHERE agente=$1 AND mes_referencia=$2",
-        [agente, mes]
-      );
-      await pool.query(
-        "DELETE FROM ccee_consumo_horario_perfil WHERE agente=$1 AND mes_referencia=$2",
-        [agente, mes]
-      );
+      // Calcula modulação por UC usando dados em memória (pldMapa já cacheado por calcularModulacao)
+      if (regsUC.length) {
+        try {
+          const pldMapa = await getPldMapa(mes);
+          const modUC   = calcularModulacaoUC(regsUC, pldMapa);
+          if (modUC.length) await salvarModulacaoUC(agente, mes, modUC);
+        } catch (e) {
+          console.warn(`    Modulação UC ${mes}: ${e.message}`);
+        }
+      }
+
+      // Descarta dados brutos (curva típica e modulação já salvos)
+      // Com --salvar-horario, mantém os dados para consulta futura (banco maior)
+      if (!SALVAR_HORARIO) {
+        await pool.query(
+          "DELETE FROM ccee_consumo_horario WHERE agente=$1 AND mes_referencia=$2",
+          [agente, mes]
+        );
+        await pool.query(
+          "DELETE FROM ccee_consumo_horario_perfil WHERE agente=$1 AND mes_referencia=$2",
+          [agente, mes]
+        );
+      }
 
       // Libera referências para o GC
       delete agregado[agente];

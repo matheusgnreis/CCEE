@@ -2,7 +2,7 @@
 // Deleta todos os dados de agentes especificados e recria a tabela ccee_consumo_horario_uc.
 // Uso:
 //   node scripts/reset-agentes.js MONSANTO "MONSANTO SEMENTES"
-//   node scripts/reset-agentes.js --criar-tabela-uc        (só cria a tabela, sem deletar)
+//   node scripts/reset-agentes.js --criar-tabela-uc        (só cria as tabelas, sem deletar)
 //
 // Após rodar, execute:
 //   node scripts/rodar-tudo.js --apenas-agentes "MONSANTO,MONSANTO SEMENTES"
@@ -30,7 +30,9 @@ const TABELAS = [
   "ccee_consumo_mensal_perfil",
   "ccee_contrato_mensal_perfil",
   "ccee_contabilizacao",
+  "ccee_agente_perfis",
   "ccee_modulacao",
+  "ccee_modulacao_uc",
   "ccee_curva_tipica",
   "ccee_curva_tipica_perfil",
 ];
@@ -56,9 +58,32 @@ async function criarTabelaUC() {
   console.log("✅ Tabela ccee_consumo_horario_uc criada/verificada");
 }
 
+async function criarTabelaAgentesPerfis() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ccee_agente_perfis (
+      agente               TEXT    NOT NULL,
+      cod_agente_ccee      INTEGER NOT NULL,
+      cod_perf_agente      INTEGER NOT NULL,
+      sigla_perfil_agente  TEXT    NOT NULL,
+      created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (agente, cod_perf_agente)
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_agente_perfis_agente
+      ON ccee_agente_perfis (agente)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_agente_perfis_cod_agente
+      ON ccee_agente_perfis (cod_agente_ccee)
+  `);
+  console.log("✅ Tabela ccee_agente_perfis criada/verificada");
+}
+
 async function main() {
   try {
     await criarTabelaUC();
+    await criarTabelaAgentesPerfis();
 
     if (APENAS_CRIAR) {
       console.log("Apenas criação de tabela solicitada. Encerrando.");

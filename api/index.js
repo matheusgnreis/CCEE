@@ -1518,21 +1518,40 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
   }
 });
 
+// ── Lookup cod_agente_ccee + cod_perf_agente via ccee_agente_perfis ──────────
+async function _getPerfilCodeMap(agente) {
+  const { rows } = await pool.query(
+    "SELECT sigla_perfil_agente, cod_perf_agente, cod_agente_ccee FROM ccee_agente_perfis WHERE agente = $1",
+    [agente]
+  );
+  return new Map(rows.map(r => [r.sigla_perfil_agente.trim().toUpperCase(), {
+    cod_perf_agente: r.cod_perf_agente,
+    cod_agente_ccee: r.cod_agente_ccee,
+  }]));
+}
+
 // ── Salvar consumo mensal perfil ─────────────────────────────────────────────
 async function salvarConsumoMensalPerfil(agente, registros) {
   if (!registros.length) return;
+  const codeMap = await _getPerfilCodeMap(agente);
   const BATCH = 500;
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
+    const info = (r) => codeMap.get((r.sigla_perfil || "").trim().toUpperCase());
     await pool.query(`
-      INSERT INTO ccee_consumo_mensal_perfil (agente, mes_referencia, sigla_perfil, consumo_mwh, consumo_geracao_mwh)
-      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::numeric[])
+      INSERT INTO ccee_consumo_mensal_perfil (agente, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, consumo_mwh, consumo_geracao_mwh)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::integer[], $6::numeric[], $7::numeric[])
       ON CONFLICT (agente, mes_referencia, sigla_perfil) DO UPDATE
-        SET consumo_mwh = EXCLUDED.consumo_mwh, consumo_geracao_mwh = EXCLUDED.consumo_geracao_mwh, created_at = NOW()
+        SET consumo_mwh = EXCLUDED.consumo_mwh, consumo_geracao_mwh = EXCLUDED.consumo_geracao_mwh,
+            cod_agente_ccee = COALESCE(EXCLUDED.cod_agente_ccee, ccee_consumo_mensal_perfil.cod_agente_ccee),
+            cod_perf_agente = COALESCE(EXCLUDED.cod_perf_agente, ccee_consumo_mensal_perfil.cod_perf_agente),
+            created_at = NOW()
     `, [
       lote.map(() => agente),
       lote.map(r => r.mes_referencia),
       lote.map(r => r.sigla_perfil),
+      lote.map(r => info(r)?.cod_agente_ccee ?? null),
+      lote.map(r => info(r)?.cod_perf_agente ?? null),
       lote.map(r => r.consumo_mwh),
       lote.map(r => r.consumo_geracao_mwh ?? null),
     ]);
@@ -1542,18 +1561,25 @@ async function salvarConsumoMensalPerfil(agente, registros) {
 // ── Salvar contratos mensal perfil ───────────────────────────────────────────
 async function salvarContratosMensalPerfil(agente, registros) {
   if (!registros.length) return;
+  const codeMap = await _getPerfilCodeMap(agente);
   const BATCH = 500;
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
+    const info = (r) => codeMap.get((r.sigla_perfil || "").trim().toUpperCase());
     await pool.query(`
-      INSERT INTO ccee_contrato_mensal_perfil (agente, mes_referencia, sigla_perfil, compra_mwh, venda_mwh)
-      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::numeric[], $5::numeric[])
+      INSERT INTO ccee_contrato_mensal_perfil (agente, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, compra_mwh, venda_mwh)
+      SELECT * FROM UNNEST($1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::integer[], $6::numeric[], $7::numeric[])
       ON CONFLICT (agente, mes_referencia, sigla_perfil) DO UPDATE
-        SET compra_mwh = EXCLUDED.compra_mwh, venda_mwh = EXCLUDED.venda_mwh, created_at = NOW()
+        SET compra_mwh = EXCLUDED.compra_mwh, venda_mwh = EXCLUDED.venda_mwh,
+            cod_agente_ccee = COALESCE(EXCLUDED.cod_agente_ccee, ccee_contrato_mensal_perfil.cod_agente_ccee),
+            cod_perf_agente = COALESCE(EXCLUDED.cod_perf_agente, ccee_contrato_mensal_perfil.cod_perf_agente),
+            created_at = NOW()
     `, [
       lote.map(() => agente),
       lote.map(r => r.mes_referencia),
       lote.map(r => r.sigla_perfil),
+      lote.map(r => info(r)?.cod_agente_ccee ?? null),
+      lote.map(r => info(r)?.cod_perf_agente ?? null),
       lote.map(r => r.compra_mwh ?? null),
       lote.map(r => r.venda_mwh  ?? null),
     ]);
@@ -2008,6 +2034,57 @@ app.get("/inteligencia/:agente/consumo-horario/ucs", async (req, res) => {
   }
 });
 
+// GET /inteligencia/:agente/modulacao-uc?mes=YYYY-MM — modulação por unidade consumidora
+app.get("/inteligencia/:agente/modulacao-uc", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const mes    = req.query.mes;
+  if (!mes || !/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Parâmetro ?mes=YYYY-MM é obrigatório" });
+  try {
+    const { rows } = await pool.query(`
+      SELECT nome_carga, sigla_perfil, cod_agente_ccee, cod_perf_agente,
+             submercado, consumo_total_mwh, n_horas,
+             soma_curva_rs, soma_flat_rs, custo_modulacao_rs_mwh
+      FROM ccee_modulacao_uc
+      WHERE agente = $1 AND mes_referencia = $2
+      ORDER BY custo_modulacao_rs_mwh DESC NULLS LAST
+    `, [agente, mes]);
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/modulacao-uc/historico — todos os meses disponíveis por UC
+app.get("/inteligencia/:agente/modulacao-uc/historico", async (req, res) => {
+  const agente    = normalizarAgente(decodeURIComponent(req.params.agente));
+  const nomeCarga = req.query.nome_carga;
+  try {
+    let rows;
+    if (nomeCarga) {
+      const r = await pool.query(`
+        SELECT mes_referencia, submercado, consumo_total_mwh, custo_modulacao_rs_mwh
+        FROM ccee_modulacao_uc
+        WHERE agente = $1 AND nome_carga = $2
+        ORDER BY mes_referencia, submercado
+      `, [agente, nomeCarga]);
+      rows = r.rows;
+    } else {
+      const r = await pool.query(`
+        SELECT nome_carga, sigla_perfil, cod_perf_agente,
+               mes_referencia, submercado, consumo_total_mwh, custo_modulacao_rs_mwh
+        FROM ccee_modulacao_uc
+        WHERE agente = $1
+        ORDER BY nome_carga, mes_referencia, submercado
+      `, [agente]);
+      rows = r.rows;
+    }
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /inteligencia/:agente/refresh — força busca no Power BI
 app.post("/inteligencia/:agente/refresh", limitePowerBI, async (req, res) => {
   const agenteRaw = decodeURIComponent(req.params.agente);
@@ -2054,20 +2131,24 @@ async function salvarConsumoHorario(agente, registros) {
 
 async function salvarConsumoHorarioPerfil(agente, registros) {
   if (!registros.length) return;
+  const codeMap = await _getPerfilCodeMap(agente);
   const BATCH = 500;
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
+    const info = (r) => codeMap.get((r.sigla_perfil || "").trim().toUpperCase());
     await pool.query(`
       INSERT INTO ccee_consumo_horario_perfil
-        (agente, mes_referencia, sigla_perfil, periodo, submercado, consumo_mwh)
+        (agente, mes_referencia, sigla_perfil, cod_agente_ccee, cod_perf_agente, periodo, submercado, consumo_mwh)
       SELECT * FROM UNNEST(
-        $1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::text[], $6::numeric[]
+        $1::text[], $2::char(7)[], $3::text[], $4::integer[], $5::integer[], $6::integer[], $7::text[], $8::numeric[]
       )
       ON CONFLICT (agente, mes_referencia, sigla_perfil, periodo, submercado) DO NOTHING
     `, [
       lote.map(() => agente),
       lote.map(r => r.mes_referencia),
       lote.map(r => r.sigla_perfil),
+      lote.map(r => info(r)?.cod_agente_ccee ?? null),
+      lote.map(r => info(r)?.cod_perf_agente ?? null),
       lote.map(r => r.periodo),
       lote.map(r => r.submercado),
       lote.map(r => r.consumo_mwh),
