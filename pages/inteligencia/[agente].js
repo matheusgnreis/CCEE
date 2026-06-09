@@ -160,6 +160,8 @@ export default function AgenteDashboard() {
   const [cvModo,                setCvModo]                = useState("total");
   const [cvPerfisSelecionados,  setCvPerfisSelecionados]  = useState(new Set());
 
+  const [grupo,                 setGrupo]                 = useState([]);  // agentes com mesma razão social
+
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
   const fetchedMesRef = useRef(null);
@@ -259,6 +261,7 @@ export default function AgenteDashboard() {
     if (filtroCidade) params.set("cidade",     filtroCidade);
     if (filtroRamo)   params.set("ramo",       filtroRamo);
     if (filtroSub)    params.set("submercado", filtroSub);
+    if (grupo.length > 1) params.set("grupo", "true");
 
     setLoadingCargas(true);
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/cargas?${params}`)
@@ -276,22 +279,38 @@ export default function AgenteDashboard() {
       })
       .catch(err => setError(`Cargas: ${err.message}`))
       .finally(() => setLoadingCargas(false));
-  }, [agente, mesSelecionado, filtroEstados, filtroCidade, filtroRamo, filtroSub]);
+  }, [agente, mesSelecionado, filtroEstados, filtroCidade, filtroRamo, filtroSub, grupo]);
 
-  // ── 4. Curvas de carga e geração típicas em pu (carrega uma vez por agente)
+  // ── 4. Curvas de carga, geração típicas em pu e grupo (carrega uma vez por agente)
   useEffect(() => {
     if (!agente) return;
+
+    // Grupo: detecta irmãos primeiro, então carrega curva-carga-perfil já com grupo
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/grupo`)
+      .then(r => r.json())
+      .then(rows => {
+        if (!rows.error) {
+          setGrupo(rows);
+          const isGrupo = rows.length > 1;
+          fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga-perfil${isGrupo ? "?grupo=true" : ""}`)
+            .then(r => r.json())
+            .then(json => { if (!json.error) setCurvaCargaPerfil(json); })
+            .catch(() => {});
+        }
+      })
+      .catch(() => {
+        fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga-perfil`)
+          .then(r => r.json())
+          .then(json => { if (!json.error) setCurvaCargaPerfil(json); })
+          .catch(() => {});
+      });
+
     setLoadingCurva(true);
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga`)
       .then(r => r.json())
       .then(json => { if (!json.error) setCurvaCarga(json); })
       .catch(() => {})
       .finally(() => setLoadingCurva(false));
-
-    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga-perfil`)
-      .then(r => r.json())
-      .then(json => { if (!json.error) setCurvaCargaPerfil(json); })
-      .catch(() => {});
 
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/sazonalizacao`)
       .then(r => r.json())
@@ -395,7 +414,8 @@ export default function AgenteDashboard() {
     if (!agente || loadingHist) return;
 
     const fetchModulacao = () => {
-      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/modulacao`)
+      const qGrupo = grupo.length > 1 ? "?grupo=true" : "";
+      fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/modulacao${qGrupo}`)
         .then(r => r.json())
         .then(json => {
           if (json.error) return;
@@ -502,6 +522,27 @@ export default function AgenteDashboard() {
                     {meta.situacao}
                   </span>
                 )}
+              </div>
+            )}
+
+            {/* Banner de grupo — mesma razão social */}
+            {grupo.length > 1 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                <span style={{ fontSize: 12, color: "#64748b" }}>
+                  {grupo.length} agentes com mesma razão social:
+                </span>
+                {grupo.map(g => (
+                  <a key={g.agente} href={`/inteligencia/${encodeURIComponent(g.agente)}`}
+                    style={{
+                      fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
+                      textDecoration: "none",
+                      background: g.agente === agente ? "#2563eb" : "#eff6ff",
+                      color:      g.agente === agente ? "#fff"     : "#2563eb",
+                      border: `1px solid ${g.agente === agente ? "#2563eb" : "#bfdbfe"}`,
+                    }}>
+                    {g.agente}
+                  </a>
+                ))}
               </div>
             )}
           </div>
@@ -1084,7 +1125,7 @@ export default function AgenteDashboard() {
                 <table style={s.table}>
                   <thead>
                     <tr>
-                      {["Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Demanda (MW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
+                      {[...(grupo.length > 1 ? ["Agente"] : []),"Parcela","Mês ref.","Cidade","UF","Ramo","Submercado","Demanda (MW)","Consumo ACL (MWh)","Consumo Total (MWh)"].map(h => (
                         <th key={h} style={s.th}>{h}</th>
                       ))}
                     </tr>
@@ -1092,6 +1133,7 @@ export default function AgenteDashboard() {
                   <tbody>
                     {cargas.map((c, i) => (
                       <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                        {grupo.length > 1 && <td style={{ ...s.td, fontWeight: 600, whiteSpace: "nowrap" }}>{c.agente}</td>}
                         <td style={s.td}>{c.sigla_parcela_carga || "—"}</td>
                         <td style={s.td}>{c.mes_referencia || "—"}</td>
                         <td style={s.td}>{c.cidade || "—"}</td>
@@ -1138,7 +1180,7 @@ export default function AgenteDashboard() {
                 <table style={s.table}>
                   <thead>
                     <tr>
-                      {["Mês","Submercado","Consumo (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)",""].map(h => (
+                      {[...(grupo.length > 1 ? ["Agente"] : []),"Mês","Submercado","Consumo (MWh)","Horas","Curva (R$)","Flat (R$)","Custo Mod. (R$/MWh)",""].map(h => (
                         <th key={h} style={s.th}>{h}</th>
                       ))}
                     </tr>
@@ -1161,6 +1203,7 @@ export default function AgenteDashboard() {
                         const subParams = (subsPorMes[r.mes_referencia] || []).join(",");
                         return (
                           <tr key={i} style={i % 2 === 0 ? s.trEven : {}}>
+                            {grupo.length > 1 && <td style={{ ...s.td, fontWeight: 600, whiteSpace: "nowrap" }}>{r.agente}</td>}
                             <td style={s.td}>{r.mes_referencia}</td>
                             <td style={s.td}>{r.submercado}</td>
                             <td style={{ ...s.td, textAlign: "right" }}>{fmt(r.consumo_total_mwh)}</td>

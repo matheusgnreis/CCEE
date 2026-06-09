@@ -929,6 +929,39 @@ app.get("/agentes/busca", async (req, res) => {
   }
 });
 
+// ─── Helper: agentes do mesmo grupo (mesma razão social) ────────────────────
+async function getGrupoAgentes(agente) {
+  const { rows } = await pool.query(`
+    SELECT a2.agente
+    FROM ccee_agentes a1
+    JOIN ccee_agentes a2
+      ON TRIM(UPPER(a1.razao_social)) = TRIM(UPPER(a2.razao_social))
+      AND TRIM(COALESCE(a1.razao_social,'')) != ''
+    WHERE a1.agente = $1
+    ORDER BY a2.agente
+  `, [agente]);
+  return rows.map(r => r.agente);
+}
+
+// GET /inteligencia/:agente/grupo — todos os agentes com mesma razão social
+app.get("/inteligencia/:agente/grupo", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  try {
+    const { rows } = await pool.query(`
+      SELECT a2.agente, a2.razao_social, a2.cnpj, a2.classe, a2.situacao
+      FROM ccee_agentes a1
+      JOIN ccee_agentes a2
+        ON TRIM(UPPER(a1.razao_social)) = TRIM(UPPER(a2.razao_social))
+        AND TRIM(COALESCE(a1.razao_social,'')) != ''
+      WHERE a1.agente = $1
+      ORDER BY a2.agente
+    `, [agente]);
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /inteligencia/:agente — dados do mês + metadados
 // Query param opcional: ?mes=YYYY-MM (default: mês recente)
 app.get("/inteligencia/:agente", limitePowerBI, async (req, res) => {
@@ -1073,22 +1106,25 @@ app.get("/inteligencia/:agente/modulacao", async (req, res) => {
   const agente = normalizarAgente(agenteRaw);
 
   try {
+    const grupo   = req.query.grupo === "true";
+    const agentes = grupo ? await getGrupoAgentes(agente) : [agente];
+
     const [resultados, totalMeses] = await Promise.all([
       pool.query(`
-        SELECT mes_referencia, submercado, consumo_total_mwh, n_horas,
+        SELECT agente, mes_referencia, submercado, consumo_total_mwh, n_horas,
                custo_modulacao_rs_mwh, soma_curva_rs, soma_flat_rs
         FROM ccee_modulacao
-        WHERE agente = $1
-        ORDER BY mes_referencia DESC, submercado ASC
-      `, [agente]),
+        WHERE agente = ANY($1)
+        ORDER BY mes_referencia DESC, agente ASC, submercado ASC
+      `, [agentes]),
       pool.query(`
         SELECT COUNT(*) AS total
         FROM ccee_dados
-        WHERE agente = $1 AND mes >= $2
-      `, [agente, PRIMEIRO_MES_PLD])
+        WHERE agente = ANY($1) AND mes >= $2
+      `, [agentes, PRIMEIRO_MES_PLD])
     ]);
 
-    const calculando = modulacaoEmAndamento.has(agente) || modulacaoGeracaoEmAndamento.has(agente);
+    const calculando = agentes.some(a => modulacaoEmAndamento.has(a) || modulacaoGeracaoEmAndamento.has(a));
 
     return res.json({
       calculando,
@@ -1096,6 +1132,7 @@ app.get("/inteligencia/:agente/modulacao", async (req, res) => {
       total_meses: Number(totalMeses.rows[0].total),
       calculados:  resultados.rows.length,
       resultados:  resultados.rows,
+      grupo:       agentes,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
@@ -1112,47 +1149,50 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
   const agente = normalizarAgente(agenteRaw);
   const { estado, cidade, ramo, submercado, mes, razao_social: razaoSocialParam } = req.query;
 
+  const grupo = req.query.grupo === "true";
+
   try {
-    // Só busca online se agente não tiver nenhum dado no banco ainda
-    const existe = await pool.query(
-      "SELECT 1 FROM ccee_cargas WHERE agente = $1 LIMIT 1",
-      [agente]
-    );
-    if (existe.rows.length === 0) {
-      console.log(`[cargas] Agente novo — buscando na API aberta CCEE...`);
-      const metaAgente  = razaoSocialParam
-        ? { rows: [{ razao_social: razaoSocialParam }] }
-        : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
-      const razaoSocial = metaAgente.rows[0]?.razao_social || null;
-      const registros   = await buscarCargas(agente, { razaoSocial });
-      if (registros.length > 0) await salvarCargas(agente, agente, registros);
+    // Grupo: usa todos os agentes da mesma razão social; caso contrário só o principal
+    const agentes = grupo ? await getGrupoAgentes(agente) : [agente];
+
+    // Fallback online: busca CKAN só para o agente principal se ainda não há dados no banco
+    if (!grupo) {
+      const existe = await pool.query(
+        "SELECT 1 FROM ccee_cargas WHERE agente = $1 LIMIT 1", [agente]
+      );
+      if (existe.rows.length === 0) {
+        console.log(`[cargas] Agente novo — buscando na API aberta CCEE...`);
+        const metaAgente  = razaoSocialParam
+          ? { rows: [{ razao_social: razaoSocialParam }] }
+          : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
+        const razaoSocial = metaAgente.rows[0]?.razao_social || null;
+        const registros   = await buscarCargas(agente, { razaoSocial });
+        if (registros.length > 0) await salvarCargas(agente, agente, registros);
+      }
     }
 
-    // Resolve o mês a usar: se solicitado mas sem dados, cai pro mais recente disponível
+    // Resolve o mês a usar
     let mesEfetivo = mes || null;
     if (mesEfetivo) {
       const check = await pool.query(
-        "SELECT 1 FROM ccee_cargas WHERE agente = $1 AND mes_referencia = $2 LIMIT 1",
-        [agente, mesEfetivo]
+        "SELECT 1 FROM ccee_cargas WHERE agente = ANY($1) AND mes_referencia = $2 LIMIT 1",
+        [agentes, mesEfetivo]
       );
       if (check.rows.length === 0) {
         const ultimo = await pool.query(
-          "SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = $1",
-          [agente]
+          "SELECT MAX(mes_referencia) AS mes FROM ccee_cargas WHERE agente = ANY($1)", [agentes]
         );
         mesEfetivo = ultimo.rows[0]?.mes || null;
       }
     }
 
-    // Monta query com filtros opcionais
     const SUB_MAP_FULL = { SE: "SUDESTE", S: "SUL", NE: "NORDESTE", N: "NORTE" };
-    const conditions = ["agente = $1"];
-    const params     = [agente];
+    const conditions = ["agente = ANY($1)"];
+    const params     = [agentes];
     let   idx        = 2;
 
     if (mesEfetivo) { conditions.push(`mes_referencia = $${idx++}`); params.push(mesEfetivo); }
 
-    // Estado: aceita múltiplos valores separados por vírgula (ex: "MG,SP")
     if (estado) {
       const estados = estado.toUpperCase().split(",").map(e => e.trim()).filter(Boolean);
       if (estados.length === 1) {
@@ -1172,14 +1212,14 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
       params.push(subFull);
     }
 
-    const cacheKey = `cargas:${agente}:${mesEfetivo||""}:${estado||""}:${cidade||""}:${ramo||""}:${submercado||""}`;
+    const cacheKey = `cargas:${agentes.join(",")}:${mesEfetivo||""}:${estado||""}:${cidade||""}:${ramo||""}:${submercado||""}`;
     const data = await cache.cached(cacheKey, 3600, async () => {
       const r = await pool.query(`
         SELECT * FROM ccee_cargas
         WHERE ${conditions.join(" AND ")}
-        ORDER BY mes_referencia DESC, sigla_parcela_carga ASC
+        ORDER BY agente ASC, mes_referencia DESC, sigla_parcela_carga ASC
       `, params);
-      return { mes: mesEfetivo, registros: r.rows };
+      return { mes: mesEfetivo, registros: r.rows, grupo: agentes };
     });
     return res.json(data);
   } catch (e) {
@@ -1736,28 +1776,37 @@ app.get("/inteligencia/:agente/curva-carga", async (req, res) => {
 });
 
 // GET /inteligencia/:agente/curva-carga-perfil — curva típica de consumo em pu por SIGLA_PERFIL_AGENTE
+// Query param opcional: ?grupo=true — inclui todos os agentes da mesma razão social
 app.get("/inteligencia/:agente/curva-carga-perfil", async (req, res) => {
   const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const grupo  = req.query.grupo === "true";
   try {
-    const data = await cache.cached(`curva-carga-perfil:${agente}`, 86400, async () => {
+    const agentes  = grupo ? await getGrupoAgentes(agente) : [agente];
+    const cacheKey = `curva-carga-perfil:${agentes.join(",")}`;
+    const data = await cache.cached(cacheKey, 86400, async () => {
       const r = await pool.query(`
-        SELECT sigla_perfil, hora, consumo_med AS consumo_medio, n_amostras
-        FROM ccee_curva_tipica_perfil WHERE agente = $1 ORDER BY sigla_perfil, hora
-      `, [agente]);
+        SELECT agente, sigla_perfil, hora, consumo_med AS consumo_medio, n_amostras
+        FROM ccee_curva_tipica_perfil WHERE agente = ANY($1) ORDER BY agente, sigla_perfil, hora
+      `, [agentes]);
       if (!r.rows.length) return [];
       const maxPorPerfil = {};
       for (const row of r.rows) {
-        const v = Number(row.consumo_medio);
-        if (!maxPorPerfil[row.sigla_perfil] || v > maxPorPerfil[row.sigla_perfil]) maxPorPerfil[row.sigla_perfil] = v;
+        const key = `${row.agente}|${row.sigla_perfil}`;
+        const v   = Number(row.consumo_medio);
+        if (!maxPorPerfil[key] || v > maxPorPerfil[key]) maxPorPerfil[key] = v;
       }
-      return r.rows.map(row => ({
-        sigla_perfil:  row.sigla_perfil,
-        hora:          Number(row.hora),
-        consumo_medio: Number(Number(row.consumo_medio).toFixed(4)),
-        pu:            maxPorPerfil[row.sigla_perfil] > 0
-                         ? Number((Number(row.consumo_medio) / maxPorPerfil[row.sigla_perfil]).toFixed(4)) : 0,
-        n_amostras:    Number(row.n_amostras),
-      }));
+      return r.rows.map(row => {
+        const key = `${row.agente}|${row.sigla_perfil}`;
+        return {
+          agente:        row.agente,
+          sigla_perfil:  row.sigla_perfil,
+          hora:          Number(row.hora),
+          consumo_medio: Number(Number(row.consumo_medio).toFixed(4)),
+          pu:            maxPorPerfil[key] > 0
+                           ? Number((Number(row.consumo_medio) / maxPorPerfil[key]).toFixed(4)) : 0,
+          n_amostras:    Number(row.n_amostras),
+        };
+      });
     });
     return res.json(data);
   } catch (e) {
