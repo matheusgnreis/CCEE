@@ -28,6 +28,7 @@ const TABELAS_ORDEM_DROP = [
   "ccee_geracao_horaria",
   "ccee_curva_tipica_perfil",
   "ccee_curva_tipica",
+  "ccee_modulacao_uc",
   "ccee_modulacao",
   "ccee_contrato_mensal_perfil",
   "ccee_consumo_mensal_perfil",
