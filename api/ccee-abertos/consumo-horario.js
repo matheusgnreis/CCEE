@@ -193,6 +193,7 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
 
   const agregado        = {};
   const agregadoPerfil  = {};
+  const agregadoUC      = {};  // por (nome_carga, periodo, submercado)
   let   encontrou       = false;
   let   siglasAmostra   = new Set();
   let   subBrutoAmostra = new Set();
@@ -245,6 +246,16 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
       agregadoPerfil[keyPerfil] = { sigla_perfil: sigla, mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
     }
     agregadoPerfil[keyPerfil].consumo_mwh += consumo;
+
+    // Agrega por unidade consumidora (nome_carga)
+    const nomeCarga = (row.NOME_CARGA || row.NOME_DA_CARGA || row.COD_PARCELA_CARGA || "").trim();
+    if (nomeCarga) {
+      const keyUC = `${nomeCarga}|${periodo}|${submercado}`;
+      if (!agregadoUC[keyUC]) {
+        agregadoUC[keyUC] = { nome_carga: nomeCarga, sigla_perfil: sigla, mes_referencia: mes, periodo, submercado, consumo_mwh: 0 };
+      }
+      agregadoUC[keyUC].consumo_mwh += consumo;
+    }
   }));
 
   console.log(`  Submercado bruto (amostra): ${[...subBrutoAmostra].join(", ")}`);
@@ -260,14 +271,19 @@ async function buscarConsumoHorario(siglaPerfilAgente, mes, razaoSocial = null) 
   const resultadoPerfil = Object.values(agregadoPerfil).sort((a, b) =>
     a.sigla_perfil.localeCompare(b.sigla_perfil) || a.periodo - b.periodo
   );
-  const subs = [...new Set(resultado.map(r => r.submercado))];
+  const resultadoUC = Object.values(agregadoUC).sort((a, b) =>
+    a.nome_carga.localeCompare(b.nome_carga) || a.periodo - b.periodo
+  );
+  const subs   = [...new Set(resultado.map(r => r.submercado))];
   const perfis = [...new Set(resultadoPerfil.map(r => r.sigla_perfil))];
+  const ucs    = [...new Set(resultadoUC.map(r => r.nome_carga))];
   console.log(`  Submercados no consumo: ${subs.join(", ") || "(nenhum)"}`);
   console.log(`  Perfis encontrados: ${perfis.join(", ") || "(nenhum)"}`);
+  console.log(`  UCs encontradas: ${ucs.length} (${ucs.slice(0, 3).join(", ")}${ucs.length > 3 ? "..." : ""})`);
   console.log(`  Período mín/máx: ${resultado[0]?.periodo} – ${resultado[resultado.length - 1]?.periodo}`);
-  console.log(`  ✅ ${resultado.length} períodos | ${resultadoPerfil.length} períodos por perfil`);
+  console.log(`  ✅ ${resultado.length} períodos | ${resultadoPerfil.length} por perfil | ${resultadoUC.length} por UC`);
 
-  return { resultado, resultadoPerfil };
+  return { resultado, resultadoPerfil, resultadoUC };
 }
 
 async function mesesDisponiveis() {

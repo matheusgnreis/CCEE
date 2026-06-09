@@ -162,6 +162,11 @@ export default function AgenteDashboard() {
 
   const [grupo,                 setGrupo]                 = useState([]);  // agentes com mesma razão social
 
+  const [ucLista,               setUcLista]               = useState([]);  // UCs com totais do mês
+  const [ucSelecionada,         setUcSelecionada]         = useState(null);
+  const [ucHorario,             setUcHorario]             = useState([]);
+  const [loadingUC,             setLoadingUC]             = useState(false);
+
   // Evita buscar o mesmo mês duas vezes (ex: quando dadosMes já foi setado
   // pelo primeiro acesso ao Power BI dentro do efeito do histórico)
   const fetchedMesRef = useRef(null);
@@ -280,6 +285,18 @@ export default function AgenteDashboard() {
       .catch(err => setError(`Cargas: ${err.message}`))
       .finally(() => setLoadingCargas(false));
   }, [agente, mesSelecionado, filtroEstados, filtroCidade, filtroRamo, filtroSub, grupo]);
+
+  // ── 3b. Consumo horário por UC — lista com totais do mês ──
+  useEffect(() => {
+    if (!agente || !mesSelecionado) return;
+    setUcLista([]);
+    setUcSelecionada(null);
+    setUcHorario([]);
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-horario/ucs?mes=${mesSelecionado}`)
+      .then(r => r.json())
+      .then(json => { if (Array.isArray(json)) setUcLista(json); })
+      .catch(() => {});
+  }, [agente, mesSelecionado]);
 
   // ── 4. Curvas de carga, geração típicas em pu e grupo (carrega uma vez por agente)
   useEffect(() => {
@@ -1153,6 +1170,90 @@ export default function AgenteDashboard() {
             )}
           </div>
         )}
+
+        {/* ── Consumo Horário por Unidade Consumidora ──────────── */}
+        {ucLista.length > 0 && (() => {
+          const handleUcClick = (nomeCarga) => {
+            if (ucSelecionada === nomeCarga) { setUcSelecionada(null); setUcHorario([]); return; }
+            setUcSelecionada(nomeCarga);
+            setLoadingUC(true);
+            fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-horario/por-uc?mes=${mesSelecionado}`)
+              .then(r => r.json())
+              .then(json => {
+                if (Array.isArray(json)) setUcHorario(json.filter(r => r.nome_carga === nomeCarga));
+              })
+              .catch(() => {})
+              .finally(() => setLoadingUC(false));
+          };
+
+          const fmtMwh = v => v != null ? Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) : "—";
+
+          // Agrega horário por hora do dia (0-23) para o gráfico
+          const horasMap = {};
+          for (const r of ucHorario) {
+            const hora = ((Number(r.periodo) - 1) % 24);
+            if (!horasMap[hora]) horasMap[hora] = { hora, consumo_mwh: 0 };
+            horasMap[hora].consumo_mwh += Number(r.consumo_mwh);
+          }
+          const horasData = Array.from({ length: 24 }, (_, h) => ({
+            horaLabel: `${String(h + 1).padStart(2, "0")}h`,
+            consumo_mwh: horasMap[h]?.consumo_mwh || 0,
+          }));
+
+          return (
+            <div style={s.chartBox}>
+              <div style={s.cargasHeader}>
+                <h2 style={s.chartTitle}>Consumo Horário por Unidade</h2>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>{mesSelecionado} · clique para ver curva horária</span>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={s.tabelaSimples}>
+                  <thead>
+                    <tr>
+                      {["Unidade Consumidora", "Perfil", "Consumo Total (MWh)"].map(h => (
+                        <th key={h} style={s.thSimples}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ucLista.map((uc, i) => (
+                      <tr key={uc.nome_carga}
+                        onClick={() => handleUcClick(uc.nome_carga)}
+                        style={{
+                          cursor: "pointer",
+                          background: ucSelecionada === uc.nome_carga ? "#eff6ff" : i % 2 === 0 ? "#fafbfc" : "#fff",
+                        }}>
+                        <td style={{ ...s.tdSimples, fontWeight: 600, color: "#2563eb" }}>{uc.nome_carga}</td>
+                        <td style={s.tdSimples}>{uc.sigla_perfil || "—"}</td>
+                        <td style={{ ...s.tdSimples, textAlign: "right" }}>{fmtMwh(uc.consumo_total_mwh)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {ucSelecionada && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "#374151" }}>
+                    Curva horária média · {ucSelecionada}
+                    {loadingUC && <span style={{ fontWeight: 400, color: "#94a3b8", marginLeft: 8 }}>Carregando...</span>}
+                  </div>
+                  {horasData.some(h => h.consumo_mwh > 0) && (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={horasData} margin={{ top: 4, right: 8, bottom: 4, left: 40 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                        <XAxis dataKey="horaLabel" tick={{ fontSize: 10 }} />
+                        <YAxis tick={{ fontSize: 10 }} unit=" MWh" width={55} />
+                        <Tooltip formatter={v => [fmtMwh(v) + " MWh", "Consumo"]} />
+                        <Bar dataKey="consumo_mwh" fill="#2563eb" radius={[2, 2, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ── Modulação horária ────────────────────────────────── */}
         {!loadingHist && (

@@ -1967,6 +1967,47 @@ app.get("/inteligencia/:agente/consumo-horario/csv", async (req, res) => {
   }
 });
 
+// GET /inteligencia/:agente/consumo-horario/por-uc?mes=YYYY-MM — consumo horário por unidade consumidora
+app.get("/inteligencia/:agente/consumo-horario/por-uc", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const mes    = req.query.mes;
+  if (!mes || !/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Parâmetro ?mes=YYYY-MM é obrigatório" });
+  try {
+    const { rows } = await pool.query(`
+      SELECT nome_carga, sigla_perfil, periodo, submercado, consumo_mwh
+      FROM ccee_consumo_horario_uc
+      WHERE agente = $1 AND mes_referencia = $2
+      ORDER BY nome_carga, submercado, periodo ASC
+    `, [agente, mes]);
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /inteligencia/:agente/consumo-horario/ucs?mes=YYYY-MM — lista UCs com totais no mês
+app.get("/inteligencia/:agente/consumo-horario/ucs", async (req, res) => {
+  const agente = normalizarAgente(decodeURIComponent(req.params.agente));
+  const mes    = req.query.mes;
+  if (!mes || !/^\d{4}-\d{2}$/.test(mes))
+    return res.status(400).json({ error: "Parâmetro ?mes=YYYY-MM é obrigatório" });
+  try {
+    const { rows } = await pool.query(`
+      SELECT nome_carga, sigla_perfil,
+             SUM(consumo_mwh) AS consumo_total_mwh,
+             COUNT(DISTINCT submercado) AS n_submercados
+      FROM ccee_consumo_horario_uc
+      WHERE agente = $1 AND mes_referencia = $2
+      GROUP BY nome_carga, sigla_perfil
+      ORDER BY consumo_total_mwh DESC
+    `, [agente, mes]);
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /inteligencia/:agente/refresh — força busca no Power BI
 app.post("/inteligencia/:agente/refresh", limitePowerBI, async (req, res) => {
   const agenteRaw = decodeURIComponent(req.params.agente);

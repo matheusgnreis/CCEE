@@ -50,6 +50,12 @@ const APENAS_UF     = (() => {                        // --apenas-uf MG  ou  --a
   const lista = (args[idx + 1] || "").toUpperCase().split(",").map(s => s.trim()).filter(Boolean);
   return lista.length ? lista : null;
 })();
+const APENAS_AGENTES = (() => {                       // --apenas-agentes "MONSANTO,MONSANTO SEMENTES"
+  const idx = args.indexOf("--apenas-agentes");
+  if (idx === -1) return null;
+  const lista = (args[idx + 1] || "").toUpperCase().split(",").map(s => s.trim()).filter(Boolean);
+  return lista.length ? lista : null;
+})();
 
 // Limite de tamanho do banco (MB). Lê de DB_MAX_MB no .env, padrão 4500 MB (~4,4 GB)
 // Seta para o tamanho INCLUÍDO no plano (sem o espaço extra).
@@ -531,6 +537,23 @@ async function salvarConsumoPerfil(agente, registros) {
   }
 }
 
+async function salvarConsumoUC(agente, registros) {
+  if (!registros.length) return;
+  const BATCH = 500;
+  for (let i = 0; i < registros.length; i += BATCH) {
+    const lote = registros.slice(i, i + BATCH);
+    await pool.query(`
+      INSERT INTO ccee_consumo_horario_uc (agente, nome_carga, mes_referencia, sigla_perfil, periodo, submercado, consumo_mwh)
+      SELECT * FROM UNNEST($1::text[],$2::text[],$3::char(7)[],$4::text[],$5::integer[],$6::text[],$7::numeric[])
+      ON CONFLICT (agente, nome_carga, mes_referencia, periodo, submercado) DO NOTHING
+    `, [
+      lote.map(() => agente), lote.map(r => r.nome_carga), lote.map(r => r.mes_referencia),
+      lote.map(r => r.sigla_perfil || ""), lote.map(r => r.periodo),
+      lote.map(r => r.submercado), lote.map(r => r.consumo_mwh),
+    ]);
+  }
+}
+
 async function salvarGeracaoHoraria(agente, registros) {
   if (!registros.length) return;
   const BATCH = 500;
@@ -788,6 +811,13 @@ async function main() {
     console.log(`\n  Filtro UF=${APENAS_UF.join(",")}: ${agentesAtivos.length} de ${antes} agentes têm carga no(s) estado(s)`);
   }
 
+  // Filtro por agente específico (ex: --apenas-agentes "MONSANTO,MONSANTO SEMENTES")
+  if (APENAS_AGENTES) {
+    const antes = agentesAtivos.length;
+    agentesAtivos = agentesAtivos.filter(a => APENAS_AGENTES.includes(a.agente.toUpperCase()));
+    console.log(`\n  Filtro agentes=${APENAS_AGENTES.join(",")}: ${agentesAtivos.length} de ${antes} agentes`);
+  }
+
   console.log(`\n  ${agentesAtivos.length} agentes para processar`);
 
   const ultimoMesDisp = mesesDisponiveis[mesesDisponiveis.length - 1] || "0000-00";
@@ -986,11 +1016,12 @@ async function main() {
 
     const agregado       = {};
     const agregadoPerfil = {};
+    const agregadoUC     = {};
 
     // Ping periódico para evitar que o pool caia ocioso durante downloads longos
     const pingInterval = setInterval(() => pool.query("SELECT 1").catch(() => {}), 30000);
     await withRetry(() => {
-      agentesDoMes.forEach(a => { agregado[a.agente] = {}; agregadoPerfil[a.agente] = {}; });
+      agentesDoMes.forEach(a => { agregado[a.agente] = {}; agregadoPerfil[a.agente] = {}; agregadoUC[a.agente] = {}; });
       return streamGzip(urlConsumo[mes], row => {
       const nome  = normalizarNome(row.NOME_EMPRESARIAL);
       const aKey  = nomeToAgenteKey.get(nome);
@@ -1014,6 +1045,13 @@ async function main() {
       agregado[aKey][key].consumo_mwh += consumo;
       if (!agregadoPerfil[aKey][keyPerfil]) agregadoPerfil[aKey][keyPerfil] = { mes_referencia: mes, sigla_perfil: sigla, periodo, submercado, consumo_mwh: 0 };
       agregadoPerfil[aKey][keyPerfil].consumo_mwh += consumo;
+
+      const nomeCarga = (row.NOME_CARGA || row.NOME_DA_CARGA || row.COD_PARCELA_CARGA || "").trim();
+      if (nomeCarga) {
+        const keyUC = `${nomeCarga}|${periodo}|${submercado}`;
+        if (!agregadoUC[aKey][keyUC]) agregadoUC[aKey][keyUC] = { mes_referencia: mes, nome_carga: nomeCarga, sigla_perfil: sigla, periodo, submercado, consumo_mwh: 0 };
+        agregadoUC[aKey][keyUC].consumo_mwh += consumo;
+      }
       });
     });
     clearInterval(pingInterval);
@@ -1021,11 +1059,13 @@ async function main() {
     for (const { agente } of agentesDoMes) {
       const regs      = Object.values(agregado[agente]);
       const regsPerfil = Object.values(agregadoPerfil[agente]);
+      const regsUC    = Object.values(agregadoUC[agente] || {});
       if (!regs.length) continue;
 
-      console.log(`    ${agente}: ${regs.length} períodos`);
+      console.log(`    ${agente}: ${regs.length} períodos | ${regsUC.length} por UC`);
       await salvarConsumo(agente, regs);
       await salvarConsumoPerfil(agente, regsPerfil);
+      if (regsUC.length) await salvarConsumoUC(agente, regsUC);
 
       // Atualiza curva típica com média ponderada incremental (não distorce histórico)
       await pool.query(`
