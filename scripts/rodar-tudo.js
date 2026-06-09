@@ -636,14 +636,12 @@ async function onboardarAgente(agente, razaoSocial, sigla, nomeToAgente) {
           const agenteKey = irmao.siglaPrimaria;
           await inserirAgente(agenteKey, { razao_social: razaoSocial, sigla: agenteKey, classe: "Consumidor Livre" });
           await salvarAgentePerfilMapping(agenteKey, irmao.codAgente, irmao.perfis);
-          if (nomeToAgente) nomeToAgente.set(razaoSocial, { agente: agenteKey, razao_social: razaoSocial, sigla: agenteKey });
           console.log(`    irmão "${agenteKey}" inserido com dados mínimos`);
           continue;
         }
         if (CLASSES_SKIP.has(meta.classe)) { console.log(`    irmão "${irmao.siglaPrimaria}": ${meta.classe} — pulado`); continue; }
         const agenteKey = meta.sigla || irmao.siglaPrimaria;
         await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || razaoSocial });
-        if (nomeToAgente) nomeToAgente.set(razaoSocial, { agente: agenteKey, razao_social: meta.razao_social || razaoSocial, sigla: meta.sigla });
         console.log(`    irmão onboardado: "${agenteKey}" (${meta.classe})`);
         await delay(DELAY_MS);
         await onboardarAgente(agenteKey, meta.razao_social || razaoSocial, meta.sigla, null);
@@ -1068,12 +1066,38 @@ async function main() {
     [...nomeToAgente.values()].map(a => [a.agente, a])
   ).values()].filter(a => !CLASSES_SKIP.has(a.classe));
 
+  // Inclui irmãos auto-inseridos durante onboarding (compartilham NOME_EMPRESARIAL)
+  // Eles não estão em nomeToAgente pois o map suporta só um agente por nome
+  const agentesNaLista = new Set(agentesAtivos.map(a => a.agente));
+  const { rows: irmaosExtras } = await pool.query(
+    `SELECT a.agente, a.razao_social, a.sigla, a.cnpj, a.classe
+       FROM ccee_agentes a
+      WHERE a.agente != ALL($1) AND NOT (a.classe = ANY($2))`,
+    [[...agentesNaLista], [...CLASSES_SKIP]]
+  );
+  // Só inclui irmãos cujo NOME_EMPRESARIAL aparece no CKAN (via razao_social em nomeToAgente)
+  const razoesSociaisConhecidas = new Set([...nomeToAgente.values()].map(m => normalizarNome(m.razao_social || "")));
+  for (const extra of irmaosExtras) {
+    if (razoesSociaisConhecidas.has(normalizarNome(extra.razao_social || ""))) {
+      agentesAtivos.push(extra);
+      agentesNaLista.add(extra.agente);
+    }
+  }
+  if (irmaosExtras.length) console.log(`  +${irmaosExtras.length} irmãos incluídos: ${irmaosExtras.map(a => a.agente).join(", ")}`);
+
   // Suporta múltiplos agentes por NOME_EMPRESARIAL (ex: MONSANTO e MONSANTO SEMENTES)
   const nomeToAgenteKeys = new Map(); // NOME_normalizado → agente_key[]
   for (const [nome, meta] of nomeToAgente) {
     const k = normalizarNome(nome);
     if (!nomeToAgenteKeys.has(k)) nomeToAgenteKeys.set(k, []);
     nomeToAgenteKeys.get(k).push(meta.agente);
+  }
+  // Adiciona irmãos ao mapa de streaming (pelo razao_social normalizado)
+  for (const extra of irmaosExtras) {
+    if (!razoesSociaisConhecidas.has(normalizarNome(extra.razao_social || ""))) continue;
+    const k = normalizarNome(extra.razao_social || extra.agente);
+    if (!nomeToAgenteKeys.has(k)) nomeToAgenteKeys.set(k, []);
+    if (!nomeToAgenteKeys.get(k).includes(extra.agente)) nomeToAgenteKeys.get(k).push(extra.agente);
   }
 
   // Filtro por UF (ex: --apenas-uf MG  ou  --apenas-uf PB,PE,CE,RN,BA,AL,SE,MA,PI)
