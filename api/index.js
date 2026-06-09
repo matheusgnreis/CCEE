@@ -3533,60 +3533,67 @@ app.get("/pld/horario/csv", async (req, res) => {
   }
 });
 
-// GET /pld/resumo — PLD horário via Power BI: dia atual + médias mês atual e anterior
+// GET /pld/resumo — PLD horário via CCEE dados abertos: dia atual + médias mês atual e anterior
+let _pldResumoCache = { data: null, ts: 0, dia: null };
+const PLD_RESUMO_TTL = 30 * 60 * 1000; // 30 min
+
 app.get("/pld/resumo", async (_req, res) => {
   try {
-    const hoje    = new Date();
-    const diaHoje = hoje.getDate();
-
-    // Data atual em BRT (UTC-3) — os timestamps do PBI usam "naive BRT" = UTC sem offset
-    const brtHoje = new Date(hoje.getTime() - 3 * 60 * 60 * 1000);
-    const hojeStr = `${brtHoje.getUTCFullYear()}-${String(brtHoje.getUTCMonth()+1).padStart(2,"0")}-${String(brtHoje.getUTCDate()).padStart(2,"0")}`;
-    const mesAtual  = hojeStr.slice(0, 7);
-    const prevDate  = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+    const agora   = new Date();
+    // Data atual em BRT (UTC-3)
+    const brt     = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
+    const diaHoje = brt.getUTCDate();
+    const hojeStr = `${brt.getUTCFullYear()}-${String(brt.getUTCMonth()+1).padStart(2,"0")}-${String(diaHoje).padStart(2,"0")}`;
+    const mesAtual   = hojeStr.slice(0, 7);
+    const prevDate   = new Date(brt.getUTCFullYear(), brt.getUTCMonth() - 1, 1);
     const mesAnterior = `${prevDate.getFullYear()}-${String(prevDate.getMonth()+1).padStart(2,"0")}`;
-    const diasPrevMes = new Date(hoje.getFullYear(), hoje.getMonth(), 0).getDate();
 
-    console.log(`[pld/resumo] hoje=${hojeStr} | mesAtual=${mesAtual} | mesAnt=${mesAnterior} | diaHoje=${diaHoje}`);
+    // Cache por dia (invalida quando muda o dia ou expira TTL)
+    if (
+      _pldResumoCache.data &&
+      _pldResumoCache.dia === hojeStr &&
+      Date.now() - _pldResumoCache.ts < PLD_RESUMO_TTL
+    ) {
+      return res.json(_pldResumoCache.data);
+    }
 
-    const registros = await buscarPldBi(diaHoje, diasPrevMes);
+    console.log(`[pld/resumo] hoje=${hojeStr} | mesAtual=${mesAtual} | mesAnt=${mesAnterior}`);
 
-    // Sub strings do Power BI: "se/co - sudeste", "s - sul", "ne - nordeste", "n - norte"
-    const seCO   = registros.filter(r => r.sub.includes("se/co"));
-    const rSul   = registros.filter(r => r.sub.includes("s - sul"));
-    const rNE    = registros.filter(r => r.sub.includes("ne - nordeste"));
-    const rNorte = registros.filter(r => r.sub.includes("n - norte"));
-    console.log(`[pld/resumo] total=${registros.length} | seco=${seCO.length} | sul=${rSul.length} | ne=${rNE.length} | norte=${rNorte.length}`);
+    // Busca mês atual e anterior em paralelo (CKAN dados abertos)
+    const [regAtual, regAnt] = await Promise.all([
+      buscarPldHorario(mesAtual),
+      buscarPldHorario(mesAnterior),
+    ]);
 
-    const dadosHoje   = seCO.filter(r => r.data === hojeStr);
-    const dadosMesAtu = seCO.filter(r => r.data.startsWith(mesAtual));
-    const dadosMesAnt = seCO.filter(r => r.data.startsWith(mesAnterior));
+    // Períodos do dia de hoje dentro do mês: dia 1 → periodos 1-24, dia 9 → 193-216
+    const periodoIni = (diaHoje - 1) * 24 + 1;
+    const periodoFim = diaHoje * 24;
 
-    const media = arr => arr.length ? arr.reduce((s, r) => s + r.pld, 0) / arr.length : null;
+    const filtraSub = (regs, sub) => regs.filter(r => r.submercado === sub);
+    const media = arr => arr.length ? arr.reduce((s, r) => s + r.pld_rs_mwh, 0) / arr.length : null;
 
-    const mediaHoje     = media(dadosHoje);
-    const mediaMesAtual = media(dadosMesAtu);
-    const mediaMesAnt   = media(dadosMesAnt);
-    const variacao      = mediaMesAtual != null && mediaMesAnt != null ? mediaMesAtual - mediaMesAnt : null;
+    const seAtual = filtraSub(regAtual, "SE");
+    const seAnt   = filtraSub(regAnt,   "SE");
 
-    const chartHoje = dadosHoje
-      .sort((a, b) => a.ts - b.ts)
-      .map(r => ({ hora: r.hora, pld: Number(r.pld.toFixed(2)) }));
+    const seHoje    = seAtual.filter(r => r.periodo >= periodoIni && r.periodo <= periodoFim);
+    const mediaHoje      = media(seHoje);
+    const mediaMesAtual  = media(seAtual);
+    const mediaMesAnt    = media(seAnt);
+    const variacao       = mediaMesAtual != null && mediaMesAnt != null ? mediaMesAtual - mediaMesAnt : null;
 
-    // Outros submercados — média do dia e do mês vigente, diferença vs SE/CO hoje
-    const outrosSubs = {
-      sul:      rSul,
-      nordeste: rNE,
-      norte:    rNorte,
-    };
+    const chartHoje = seHoje
+      .sort((a, b) => a.periodo - b.periodo)
+      .map(r => ({ hora: ((r.periodo - 1) % 24) + 1, pld: Number(r.pld_rs_mwh.toFixed(2)) }));
 
+    // subMap CKAN → chave de resposta
+    const outrosSubs = { sul: "S", nordeste: "NE", norte: "N" };
     const outros_submercados = {};
-    for (const [key, arr] of Object.entries(outrosSubs)) {
-      const mediaHojeArr = arr.filter(r => r.data === hojeStr);
-      const mediaMesArr  = arr.filter(r => r.data.startsWith(mesAtual));
-      const mHoje = media(mediaHojeArr);
-      const mMes  = media(mediaMesArr);
-      console.log(`[pld/resumo] ${key}: hoje=${mediaHojeArr.length}pts=${mHoje?.toFixed(2)} | mes=${mediaMesArr.length}pts=${mMes?.toFixed(2)}`);
+    for (const [key, sub] of Object.entries(outrosSubs)) {
+      const arrAtual = filtraSub(regAtual, sub);
+      const arrHoje  = arrAtual.filter(r => r.periodo >= periodoIni && r.periodo <= periodoFim);
+      const mHoje = media(arrHoje);
+      const mMes  = media(arrAtual);
+      console.log(`[pld/resumo] ${key}: hoje=${arrHoje.length}pts=${mHoje?.toFixed(2)} | mes=${arrAtual.length}pts=${mMes?.toFixed(2)}`);
       outros_submercados[key] = {
         media_hoje: mHoje,
         media_mes:  mMes,
@@ -3595,14 +3602,17 @@ app.get("/pld/resumo", async (_req, res) => {
       };
     }
 
-    return res.json({
-      submercado: "SE/CO",
-      hoje:         { data: hojeStr,     media: mediaHoje,     chart: chartHoje },
-      mes_atual:    { mes: mesAtual,     media: mediaMesAtual  },
-      mes_anterior: { mes: mesAnterior,  media: mediaMesAnt    },
+    const payload = {
+      submercado:   "SE/CO",
+      hoje:         { data: hojeStr,    media: mediaHoje,    chart: chartHoje },
+      mes_atual:    { mes: mesAtual,    media: mediaMesAtual },
+      mes_anterior: { mes: mesAnterior, media: mediaMesAnt   },
       variacao,
       outros_submercados,
-    });
+    };
+
+    _pldResumoCache = { data: payload, ts: Date.now(), dia: hojeStr };
+    return res.json(payload);
   } catch (e) {
     console.error("Erro em /pld/resumo:", e.message);
     return res.status(500).json({ error: e.message });
