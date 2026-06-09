@@ -188,16 +188,12 @@ async function descobrirAgentesNoCKAN(recursos) {
   const disponíveis = recursos.filter(r => r.mes >= PRIMEIRO_MES);
   if (!disponíveis.length) throw new Error("Nenhum recurso CKAN disponível");
 
-  // Quais meses streama para descoberta:
-  //   --todos-meses  → todos disponíveis (mais completo, mais lento)
-  //   --mes YYYY-MM  → só esse mês
-  //   default        → mais recente apenas
+  // Descoberta sempre usa só o mês mais recente (ou --mes se especificado)
+  // --todos-meses afeta apenas o streaming, não a descoberta
   let paraBuscar;
   if (MES_FIXO) {
     const r = disponíveis.find(r => r.mes === MES_FIXO);
     paraBuscar = r ? [r] : [];
-  } else if (TODOS_MESES) {
-    paraBuscar = disponíveis;
   } else {
     paraBuscar = [disponíveis[disponíveis.length - 1]];
   }
