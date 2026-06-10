@@ -161,6 +161,7 @@ export default function AgenteDashboard() {
   const [cvPerfisSelecionados,  setCvPerfisSelecionados]  = useState(new Set());
 
   const [grupo,                 setGrupo]                 = useState([]);  // agentes com mesma razão social
+  const [verGrupo,              setVerGrupo]              = useState(false); // mostrar dados do grupo todo
 
   const [ucLista,               setUcLista]               = useState([]);  // UCs com totais do mês
   const [ucSelecionada,         setUcSelecionada]         = useState(null);
@@ -266,7 +267,7 @@ export default function AgenteDashboard() {
     if (filtroCidade) params.set("cidade",     filtroCidade);
     if (filtroRamo)   params.set("ramo",       filtroRamo);
     if (filtroSub)    params.set("submercado", filtroSub);
-    if (grupo.length > 1) params.set("grupo", "true");
+    if (verGrupo) params.set("grupo", "true");
 
     setLoadingCargas(true);
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/cargas?${params}`)
@@ -284,7 +285,7 @@ export default function AgenteDashboard() {
       })
       .catch(err => setError(`Cargas: ${err.message}`))
       .finally(() => setLoadingCargas(false));
-  }, [agente, mesSelecionado, filtroEstados, filtroCidade, filtroRamo, filtroSub, grupo]);
+  }, [agente, mesSelecionado, filtroEstados, filtroCidade, filtroRamo, filtroSub, verGrupo]);
 
   // ── 3b. Consumo horário por UC — lista com totais do mês ──
   useEffect(() => {
@@ -308,8 +309,7 @@ export default function AgenteDashboard() {
       .then(rows => {
         if (!rows.error) {
           setGrupo(rows);
-          const isGrupo = rows.length > 1;
-          fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga-perfil${isGrupo ? "?grupo=true" : ""}`)
+          fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/curva-carga-perfil`)
             .then(r => r.json())
             .then(json => { if (!json.error) setCurvaCargaPerfil(json); })
             .catch(() => {});
@@ -358,7 +358,7 @@ export default function AgenteDashboard() {
   useEffect(() => {
     if (!agente || !mesSelecionado) return;
     setLoadingContab(true);
-    const qGrupo = grupo.length > 1 ? "&grupo=true" : "";
+    const qGrupo = verGrupo ? "&grupo=true" : "";
     fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/contabilizacao?mes=${mesSelecionado}${qGrupo}`)
       .then(r => r.json())
       .then(json => {
@@ -367,12 +367,12 @@ export default function AgenteDashboard() {
       })
       .catch(() => {})
       .finally(() => setLoadingContab(false));
-  }, [agente, mesSelecionado, grupo]);
+  }, [agente, mesSelecionado, verGrupo]);
 
   // ── 5a. Consumo mensal e contratos por perfil (histórico, uma vez por agente/grupo) ──
   useEffect(() => {
     if (!agente) return;
-    const q = grupo.length > 1 ? "?grupo=true" : "";
+    const q = verGrupo ? "?grupo=true" : "";
     setLoadingPerfisCV(true);
     Promise.all([
       fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/consumo-mensal-perfil${q}`).then(r => r.json()),
@@ -381,7 +381,7 @@ export default function AgenteDashboard() {
       if (Array.isArray(consumo))   setConsumoMensalPerfil(consumo);
       if (Array.isArray(contratos)) setContratosMensalPerfil(contratos);
     }).catch(() => {}).finally(() => setLoadingPerfisCV(false));
-  }, [agente, grupo]);
+  }, [agente, verGrupo]);
 
   // ── 5b. Histórico completo de encargos por agente (todos os meses) ──
   useEffect(() => {
@@ -433,7 +433,7 @@ export default function AgenteDashboard() {
     if (!agente || loadingHist) return;
 
     const fetchModulacao = () => {
-      const qGrupo = grupo.length > 1 ? "?grupo=true" : "";
+      const qGrupo = verGrupo ? "?grupo=true" : "";
       fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/modulacao${qGrupo}`)
         .then(r => r.json())
         .then(json => {
@@ -555,13 +555,24 @@ export default function AgenteDashboard() {
                     style={{
                       fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
                       textDecoration: "none",
-                      background: g.agente === agente ? "#2563eb" : "#eff6ff",
-                      color:      g.agente === agente ? "#fff"     : "#2563eb",
-                      border: `1px solid ${g.agente === agente ? "#2563eb" : "#bfdbfe"}`,
+                      background: !verGrupo && g.agente === agente ? "#2563eb" : "#eff6ff",
+                      color:      !verGrupo && g.agente === agente ? "#fff"     : "#2563eb",
+                      border: `1px solid ${!verGrupo && g.agente === agente ? "#2563eb" : "#bfdbfe"}`,
                     }}>
                     {g.agente}
                   </a>
                 ))}
+                <button
+                  onClick={() => setVerGrupo(v => !v)}
+                  style={{
+                    fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
+                    border: `1px solid ${verGrupo ? "#7c3aed" : "#ede9fe"}`,
+                    background: verGrupo ? "#7c3aed" : "#f5f3ff",
+                    color:      verGrupo ? "#fff"    : "#7c3aed",
+                    cursor: "pointer",
+                  }}>
+                  Grupo todo
+                </button>
               </div>
             )}
           </div>
