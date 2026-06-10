@@ -261,20 +261,36 @@ async function buscarMetaPowerBI(agente) {
   const dsr   = json?.results?.[0]?.result?.data?.dsr?.DS?.[0];
   const dm    = dsr?.PH?.[0]?.DM0;
   const dicts = dsr?.ValueDicts || {};
-  if (!dm?.length) return null;
+  if (!dm?.length) return [];
 
-  const C = dm[0].C || [];
   const d = (key, idx) => {
     if (typeof idx === "string") return idx;
     return dicts[key] ? (dicts[key][idx] ?? null) : null;
   };
-  return {
-    classe:       d("D0", C[0]) || null,
-    razao_social: d("D1", C[1]) || null,
-    sigla:        d("D2", C[2]) || null,
-    cnpj:         d("D3", C[3]) || null,
-    situacao:     d("D4", C[4]) || null,
-  };
+
+  // Decodifica todas as linhas respeitando o bitmask R (colunas repetidas da linha anterior)
+  const NUM_COLS = 6; // NM_CSSE, NM_RZOA_SOCI, SG_AGEN, CNPJ, DS_STAT_AGEN, Capital Social
+  const agentes = [];
+  let prevCols = null;
+  for (const row of dm) {
+    const R    = row.R || 0;
+    const rawC = row.C || [];
+    const cols = new Array(NUM_COLS);
+    let ci = 0;
+    for (let i = 0; i < NUM_COLS; i++) {
+      cols[i] = (prevCols && (R >> i) & 1) ? prevCols[i] : (rawC[ci++] ?? null);
+    }
+    prevCols = cols;
+    agentes.push({
+      classe:        d("D0", cols[0]) || null,
+      razao_social:  d("D1", cols[1]) || null,
+      sigla:         d("D2", cols[2]) || null,
+      cnpj:          d("D3", cols[3]) || null,
+      situacao:      d("D4", cols[4]) || null,
+      capital_social: typeof cols[5] === "number" ? cols[5] : null,
+    });
+  }
+  return agentes; // array — pode conter múltiplos agentes da mesma razão social
 }
 
 // ─── Fase 2: Inserir agente novo no banco ─────────────────────────────────────
@@ -628,11 +644,11 @@ async function onboardarAgente(agente, razaoSocial, sigla, nomeToAgente) {
           continue;
         }
         console.log(`    tentando onboarding do irmão "${irmao.siglaPrimaria}" (cod_agente=${irmao.codAgente})`);
-        let meta = null;
-        try { meta = await buscarMetaPowerBI(irmao.siglaPrimaria); } catch {}
+        let metas = [];
+        try { metas = await buscarMetaPowerBI(irmao.siglaPrimaria); } catch {}
+        const meta = metas[0] || null;
         if (!meta) {
           console.log(`    irmão "${irmao.siglaPrimaria}": não encontrado no Power BI`);
-          // Insere com dados mínimos para que o pipeline consiga processar
           const agenteKey = irmao.siglaPrimaria;
           await inserirAgente(agenteKey, { razao_social: razaoSocial, sigla: agenteKey, classe: "Consumidor Livre" });
           await salvarAgentePerfilMapping(agenteKey, irmao.codAgente, irmao.perfis);
@@ -1040,19 +1056,21 @@ async function main() {
       const nome = novosNomes[i];
       process.stdout.write(`  [${String(i + 1).padStart(3)}/${novosNomes.length}] ${nome.slice(0, 50).padEnd(52)} `);
 
-      let meta = null;
-      try { meta = await buscarMetaPowerBI(nome); } catch {}
+      let metas = [];
+      try { metas = await buscarMetaPowerBI(nome); } catch {}
 
-      if (!meta) { console.log("⚠  não encontrado no Power BI"); continue; }
-      if (CLASSES_SKIP.has(meta.classe)) { console.log(`⏭  ${meta.classe} — pulado`); continue; }
+      if (!metas.length) { console.log("⚠  não encontrado no Power BI"); continue; }
 
-      // Usa SG_AGEN (sigla) como chave do agente — igual ao que a API usa
-      const agenteKey = meta.sigla || nome;
-      console.log(`✅  ${meta.classe || "?"} | agente: ${agenteKey}`);
-      await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || nome });
-      nomeToAgente.set(nome, { agente: agenteKey, razao_social: meta.razao_social || nome, sigla: meta.sigla, cnpj: meta.cnpj, classe: meta.classe });
-
-      await onboardarAgente(agenteKey, meta.razao_social || nome, meta.sigla, nomeToAgente);
+      // Itera sobre TODOS os agentes retornados (ex: MONSANTO e MONSANTO SEMENTES)
+      for (const meta of metas) {
+        if (CLASSES_SKIP.has(meta.classe)) { console.log(`⏭  ${meta.classe} (${meta.sigla}) — pulado`); continue; }
+        const agenteKey = meta.sigla || nome;
+        console.log(`✅  ${meta.classe || "?"} | agente: ${agenteKey}`);
+        await inserirAgente(agenteKey, { ...meta, razao_social: meta.razao_social || nome });
+        nomeToAgente.set(nome, { agente: agenteKey, razao_social: meta.razao_social || nome, sigla: meta.sigla, cnpj: meta.cnpj, classe: meta.classe });
+        await onboardarAgente(agenteKey, meta.razao_social || nome, meta.sigla, null);
+        await delay(DELAY_MS);
+      }
       if (i < novosNomes.length - 1) await delay(DELAY_MS);
     }
   } else if (novosNomes.length > 0) {
@@ -1159,8 +1177,9 @@ async function main() {
             );
             if (existe.length) continue;
             process.stdout.write(`\n    → irmão novo "${irmao.siglaPrimaria}" (cod_agente=${irmao.codAgente}) detectado`);
-            let meta = null;
-            try { meta = await buscarMetaPowerBI(irmao.siglaPrimaria); } catch {}
+            let metas = [];
+            try { metas = await buscarMetaPowerBI(irmao.siglaPrimaria); } catch {}
+            const meta = metas[0] || null;
             const agenteKey = meta?.sigla || irmao.siglaPrimaria;
             if (!meta || CLASSES_SKIP.has(meta.classe)) {
               await inserirAgente(agenteKey, { razao_social: razao_social, sigla: agenteKey, classe: meta?.classe || "Consumidor Livre" });
