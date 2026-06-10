@@ -982,6 +982,33 @@ app.get("/inteligencia/:agente", limitePowerBI, async (req, res) => {
     if (req.query.refresh)
       return res.json(await fetchSalvarRetornar(agente, mes));
 
+    // Grupo: agrega SUM de todos os agentes da mesma razão social
+    if (req.query.grupo === "true") {
+      const agentes = await getGrupoAgentes(agente);
+      const { rows } = await pool.query(`
+        SELECT
+          $1::text AS agente, mes,
+          SUM(consumo)            AS consumo,
+          SUM(compra)             AS compra,
+          SUM(geracao)            AS geracao,
+          SUM(venda)              AS venda,
+          SUM(consumo_geracao)    AS consumo_geracao,
+          SUM(resultado)          AS resultado,
+          SUM(mcp)                AS mcp,
+          SUM(resultado_mcp)      AS resultado_mcp,
+          SUM(balanco_energetico) AS balanco_energetico,
+          SUM(mre_mais)           AS mre_mais,
+          SUM(mre_menos)          AS mre_menos
+        FROM ccee_dados
+        WHERE agente = ANY($2) AND mes = $3
+        GROUP BY mes
+      `, [agente, agentes, mes]);
+      if (!rows.length) return res.json({ mes, agente });
+      const row = rows[0];
+      row.mcp_rs_mwh = calcMcpRsMwh(row.mcp, row.consumo, row.mes, row.balanco_energetico);
+      return res.json(row);
+    }
+
     const r = await pool.query(`
       SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
       FROM ccee_dados d
@@ -1068,6 +1095,35 @@ app.get("/inteligencia/:agente/historico", async (req, res) => {
   const agente = normalizarAgente(agenteRaw);
 
   try {
+    // Grupo: agrega SUM por mês de todos os agentes da mesma razão social
+    if (req.query.grupo === "true") {
+      const agentes = await getGrupoAgentes(agente);
+      const { rows } = await pool.query(`
+        SELECT
+          $1::text AS agente, mes,
+          SUM(consumo)            AS consumo,
+          SUM(compra)             AS compra,
+          SUM(geracao)            AS geracao,
+          SUM(venda)              AS venda,
+          SUM(consumo_geracao)    AS consumo_geracao,
+          SUM(resultado)          AS resultado,
+          SUM(mcp)                AS mcp,
+          SUM(resultado_mcp)      AS resultado_mcp,
+          SUM(balanco_energetico) AS balanco_energetico,
+          SUM(mre_mais)           AS mre_mais,
+          SUM(mre_menos)          AS mre_menos
+        FROM ccee_dados
+        WHERE agente = ANY($2)
+        GROUP BY mes
+        ORDER BY mes ASC
+      `, [agente, agentes]);
+      const enriched = rows.map(row => ({
+        ...row,
+        mcp_rs_mwh: calcMcpRsMwh(row.mcp, row.consumo, row.mes, row.balanco_energetico),
+      }));
+      return res.json(enriched);
+    }
+
     const r = await pool.query(`
       SELECT d.*, a.razao_social, a.sigla, a.cnpj, a.classe, a.situacao, a.capital_social
       FROM ccee_dados d

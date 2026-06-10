@@ -103,6 +103,8 @@ export default function AgenteDashboard() {
 
   const [historico,      setHistorico]      = useState([]);
   const [dadosMes,       setDadosMes]       = useState(null);
+  const [historicoGrupo, setHistoricoGrupo] = useState([]);
+  const [dadosMesGrupo,  setDadosMesGrupo]  = useState(null);
   const [mesSelecionado, setMesSelecionado] = useState(null);
   const [loadingHist,    setLoadingHist]    = useState(true);
   const [loadingMes,     setLoadingMes]     = useState(false);
@@ -257,6 +259,25 @@ export default function AgenteDashboard() {
       .catch(err => setError(err.message))
       .finally(() => setLoadingMes(false));
   }, [agente, mesSelecionado, loadingHist]);
+
+  // ── 2b. Busca dados agregados do grupo quando verGrupo ou mês mudam ──
+  useEffect(() => {
+    if (!agente || !mesSelecionado || !verGrupo) return;
+    setDadosMesGrupo(null);
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}?mes=${mesSelecionado}&grupo=true`)
+      .then(r => r.json())
+      .then(json => { if (!json.error) setDadosMesGrupo(json); })
+      .catch(() => {});
+  }, [agente, mesSelecionado, verGrupo]);
+
+  useEffect(() => {
+    if (!agente || !verGrupo) return;
+    setHistoricoGrupo([]);
+    fetch(`${API_URL}/inteligencia/${encodeURIComponent(agente)}/historico?grupo=true`)
+      .then(r => r.json())
+      .then(json => { if (Array.isArray(json)) setHistoricoGrupo(json); })
+      .catch(() => {});
+  }, [agente, verGrupo]);
 
   // ── 3. Busca cargas quando o agente ou mês selecionado mudar ─────
   useEffect(() => {
@@ -492,8 +513,12 @@ export default function AgenteDashboard() {
     };
   }, [agente, loadingHist]);
 
+  // Quando "Grupo todo" está ativo, usa dados agregados; senão usa individuais
+  const dadosMesDisp  = verGrupo ? (dadosMesGrupo ?? dadosMes) : dadosMes;
+  const historicoDisp = (verGrupo && historicoGrupo.length) ? historicoGrupo : historico;
+
   // Metadados vêm do mês atual ou do primeiro registro do histórico
-  const meta = dadosMes ?? (historico.length > 0 ? historico[0] : null);
+  const meta = dadosMesDisp ?? (historicoDisp.length > 0 ? historicoDisp[0] : null);
 
   if (!agente) return <div style={s.center}>Carregando...</div>;
 
@@ -662,11 +687,11 @@ export default function AgenteDashboard() {
                 // Cards opcionais: visibilidade determinada pelo histórico (estável após carga)
                 // Evita layout shift — a decisão não muda a cada troca de mês
                 if (m.apenasComValor && !loadingHist) {
-                  const temNoHistorico = historico.some(h => h[m.key] != null && Number(h[m.key]) !== 0);
-                  const temNoDadosMes  = dadosMes?.[m.key] != null && Number(dadosMes[m.key]) !== 0;
+                  const temNoHistorico = historicoDisp.some(h => h[m.key] != null && Number(h[m.key]) !== 0);
+                  const temNoDadosMes  = dadosMesDisp?.[m.key] != null && Number(dadosMesDisp[m.key]) !== 0;
                   if (!temNoHistorico && !temNoDadosMes) return null;
                 }
-                const val      = dadosMes?.[m.key];
+                const val      = dadosMesDisp?.[m.key];
                 const negativo = !loadingMes
                   && ["mcp", "resultado", "resultado_mcp"].includes(m.key)
                   && Number(val) < 0;
@@ -698,10 +723,10 @@ export default function AgenteDashboard() {
             </div>
 
             {/* ── Gráficos históricos ───────────────────────────── */}
-            {historico.length > 0 && GRAFICOS.map(g => {
-              if (g.skipIfAllNull && !historico.some(d => d[g.skipIfAllNull] != null)) return null;
+            {historicoDisp.length > 0 && GRAFICOS.map(g => {
+              if (g.skipIfAllNull && !historicoDisp.some(d => d[g.skipIfAllNull] != null)) return null;
 
-              const valores = historico
+              const valores = historicoDisp
                 .flatMap(d => g.linhas.map(l => d[l.key]))
                 .filter(v => v != null && isFinite(Number(v)))
                 .map(Number)
@@ -725,7 +750,7 @@ export default function AgenteDashboard() {
               <div key={g.titulo} style={s.chartBox}>
                 <h2 style={s.chartTitle}>{g.titulo}</h2>
                 <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={historico} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <LineChart data={historicoDisp} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#9ca3af" }} />
                     <YAxis
