@@ -120,6 +120,9 @@ function normalizarNome(s) {
   return stripAccents((s || "").replace(/'/g, "").trim().toUpperCase());
 }
 
+// Converte string vazia / undefined para null (evita "invalid input syntax for type numeric" no PG)
+const n = v => (v === "" || v == null) ? null : v;
+
 async function streamGzip(url, onLinha) {
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_DL);
@@ -506,14 +509,14 @@ async function salvarContabilizacao(agente, registros) {
       lote.map(r => r.sigla_perfil_agente || null),
       lote.map(r => r.nome_empresarial || null),
       lote.map(r => r.cod_perf_agente != null ? Number(r.cod_perf_agente) : null),
-      lote.map(r => r.valor_tm_mcp), lote.map(r => r.compensacao_mre),
-      lote.map(r => r.valor_encargo), lote.map(r => r.valor_ajuste_exposicao),
-      lote.map(r => r.valor_ajuste_alivio_ret), lote.map(r => r.efeito_contrat_disp),
-      lote.map(r => r.efeito_contrat_cota_gf), lote.map(r => r.efeito_contrat_nuclear),
-      lote.map(r => r.ajuste_recontab), lote.map(r => r.ajuste_mcsd_ex),
-      lote.map(r => r.resultado_financeiro_er), lote.map(r => r.efeito_ccearq),
-      lote.map(r => r.efeito_contrat_itaipu), lote.map(r => r.efeito_repasse_risco_hidro),
-      lote.map(r => r.efeito_desloc_pld_cmo), lote.map(r => r.resultado_final),
+      lote.map(r => n(r.valor_tm_mcp)), lote.map(r => n(r.compensacao_mre)),
+      lote.map(r => n(r.valor_encargo)), lote.map(r => n(r.valor_ajuste_exposicao)),
+      lote.map(r => n(r.valor_ajuste_alivio_ret)), lote.map(r => n(r.efeito_contrat_disp)),
+      lote.map(r => n(r.efeito_contrat_cota_gf)), lote.map(r => n(r.efeito_contrat_nuclear)),
+      lote.map(r => n(r.ajuste_recontab)), lote.map(r => n(r.ajuste_mcsd_ex)),
+      lote.map(r => n(r.resultado_financeiro_er)), lote.map(r => n(r.efeito_ccearq)),
+      lote.map(r => n(r.efeito_contrat_itaipu)), lote.map(r => n(r.efeito_repasse_risco_hidro)),
+      lote.map(r => n(r.efeito_desloc_pld_cmo)), lote.map(r => n(r.resultado_final)),
     ]);
   }
   console.log(`    contabilização: ${filtrados.length} registros`);
