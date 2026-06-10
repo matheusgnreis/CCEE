@@ -1819,26 +1819,6 @@ export default function AgenteDashboard() {
                       <Bar dataKey="total" name="Encargos" fill="#6366f1" radius={[3, 3, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
-                  <div style={{ overflowX: "auto", marginTop: 16 }}>
-                    <table style={s.tabelaSimples}>
-                      <thead>
-                        <tr>
-                          <th style={s.thSimples}>Mês</th>
-                          <th style={{ ...s.thSimples, textAlign: "right" }}>Encargos (R$)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[...encargosHist].reverse().map((r, i) => (
-                          <tr key={r.mes} style={i % 2 === 0 ? { background: "#fafbfc" } : {}}>
-                            <td style={s.tdSimples}>{r.mes}</td>
-                            <td style={{ ...s.tdSimples, textAlign: "right", fontWeight: 600, color: r.total < 0 ? "#16a34a" : "#374151" }}>
-                              {r.total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
                 </>
               );
             })()}
