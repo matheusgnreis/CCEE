@@ -1026,13 +1026,20 @@ async function sincronizarPerfisLista() {
     porSigla = await buscarPerfisAtivosPorSigla();
   } catch (e) {
     console.warn(`  ⚠ Falha ao baixar lista_perfil_v1: ${e.message} — continuando sem sync`);
-    return new Map();
+    return { porSigla: new Map(), porNomeEmpresarial: new Map() };
   }
 
-  // Busca todos os agentes que já estão no banco
-  const { rows: agentes } = await pool.query(
-    "SELECT agente, sigla FROM ccee_agentes"
-  );
+  // Mapa auxiliar: NOME_EMPRESARIAL → [sigla_agente] — substitui streaming do gzip na descoberta
+  const porNomeEmpresarial = new Map();
+  for (const [sigla, info] of porSigla) {
+    const nome = info.nome_empresarial;
+    if (!nome) continue;
+    if (!porNomeEmpresarial.has(nome)) porNomeEmpresarial.set(nome, []);
+    if (!porNomeEmpresarial.get(nome).includes(sigla)) porNomeEmpresarial.get(nome).push(sigla);
+  }
+
+  // Sincroniza ccee_agente_perfis e cod_agente_ccee em ccee_agentes
+  const { rows: agentes } = await pool.query("SELECT agente, sigla FROM ccee_agentes");
 
   let atualizados = 0;
   let inseridos   = 0;
@@ -1041,6 +1048,12 @@ async function sincronizarPerfisLista() {
     const chave = (sigla || agente || "").trim();
     const info  = porSigla.get(chave);
     if (!info?.perfis.length) continue;
+
+    // Grava cod_agente_ccee diretamente em ccee_agentes
+    await pool.query(
+      "UPDATE ccee_agentes SET cod_agente_ccee = $1 WHERE agente = $2 AND (cod_agente_ccee IS NULL OR cod_agente_ccee != $1)",
+      [info.cod_agente, agente]
+    );
 
     for (const p of info.perfis) {
       const { rowCount } = await pool.query(`
@@ -1056,8 +1069,8 @@ async function sincronizarPerfisLista() {
   }
 
   console.log(`  ✅ ${atualizados} agentes sincronizados | ${inseridos} perfis inseridos/atualizados`);
-  console.log(`  📊 ${porSigla.size} agentes ativos no CCEE (lista_perfil_v1)`);
-  return porSigla;
+  console.log(`  📊 ${porSigla.size} agentes ativos | ${porNomeEmpresarial.size} empresas distintas`);
+  return { porSigla, porNomeEmpresarial };
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -1067,7 +1080,7 @@ async function main() {
   console.log("🚀 PIPELINE COMPLETO — CCEE Monitor");
   console.log("═".repeat(60));
 
-  // Garante que as tabelas novas existam (schema completo em criar-banco.js)
+  // Garante que as tabelas novas existam e aplica migrations de colunas (idempotente)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ccee_consumo_horario_uc (
       agente TEXT NOT NULL, nome_carga TEXT NOT NULL, mes_referencia CHAR(7) NOT NULL,
@@ -1097,12 +1110,15 @@ async function main() {
       PRIMARY KEY (agente, nome_carga, mes_referencia, submercado)
     )
   `);
+  // Migration: adiciona cod_agente_ccee em ccee_agentes se ainda não existir
+  await pool.query(`ALTER TABLE ccee_agentes ADD COLUMN IF NOT EXISTS cod_agente_ccee INTEGER`);
 
   // ── Fase 0: Sincronizar mapeamento agente → perfis via lista_perfil_v1 ──────
-  // Deve rodar antes de qualquer processamento de cargas para garantir filtros corretos.
-  await sincronizarPerfisLista();
+  // Também constrói porNomeEmpresarial (NOME_EMPRESARIAL → [sigla_agente]) para
+  // substituir o streaming do gzip na descoberta de agentes (fase 1).
+  const { porNomeEmpresarial } = await sincronizarPerfisLista();
 
-  // Carrega lista de recursos CKAN (consumo horário e geração horária)
+  // Carrega lista de recursos CKAN (URLs para fase 3 de streaming)
   process.stdout.write("\n  Carregando índice de recursos CKAN...");
   const [recursosCon, recursosGer] = await Promise.all([listarConsumo(), listarGeracao()]);
   console.log(` ${recursosCon.length} meses consumo | ${recursosGer.length} meses geração`);
@@ -1110,20 +1126,20 @@ async function main() {
   const urlConsumo = Object.fromEntries(recursosCon.map(r => [r.mes, r.url]));
   const urlGeracao = Object.fromEntries(recursosGer.map(r => [r.mes, r.url]));
 
-  // ── Fase 1: Descobrir agentes no CKAN ──────────────────────────────────────
-  console.log("\n[1/5] Descobrindo agentes no CKAN...");
-  const nomesNoCKAN = await descobrirAgentesNoCKAN(recursosCon);
+  // ── Fase 1: Descobrir agentes via lista_perfil (sem streaming de gzip) ──────
+  console.log("\n[1/5] Descobrindo agentes via lista_perfil_v1...");
 
-  // Agentes já no banco (por razao_social e por agente)
+  // Agentes já no banco
   const { rows: agentesBanco } = await pool.query(
     "SELECT agente, razao_social, sigla, cnpj, classe FROM ccee_agentes"
   );
-  const porNome  = new Map(agentesBanco.map(r => [
+  const porNome = new Map(agentesBanco.map(r => [
     normalizarNome(r.razao_social || r.agente), r
   ]));
-  const nomeToAgente = new Map(); // NOME_EMPRESARIAL (upper) → { agente, razao_social, sigla }
+  const nomeToAgente = new Map(); // NOME_EMPRESARIAL → { agente, razao_social, sigla }
 
-  // Mapeia nomes do CKAN para agentes do banco
+  // Usa lista_perfil como fonte de NOME_EMPRESARIAL (substitui streaming do gzip)
+  const nomesNoCKAN = [...porNomeEmpresarial.keys()];
   for (const nome of nomesNoCKAN) {
     const key = normalizarNome(nome);
     if (porNome.has(key)) {
@@ -1132,7 +1148,7 @@ async function main() {
   }
 
   const novosNomes = nomesNoCKAN.filter(n => !nomeToAgente.has(n));
-  console.log(`  ${nomesNoCKAN.length} total | ${nomeToAgente.size} já no banco | ${novosNomes.length} novos`);
+  console.log(`  ${nomesNoCKAN.length} empresas | ${nomeToAgente.size} já no banco | ${novosNomes.length} novas`);
 
   // ── Fase 2: Onboarding de novos agentes ───────────────────────────────────
   if (novosNomes.length > 0 && !SEM_POWERBI) {

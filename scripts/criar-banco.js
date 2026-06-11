@@ -59,17 +59,20 @@ async function criarTabelas(client) {
   // ── ccee_agentes ─────────────────────────────────────────────────────────────
   await q(`
     CREATE TABLE ${ifnot} ccee_agentes (
-      agente         TEXT        NOT NULL,
-      razao_social   TEXT,
-      sigla          TEXT,
-      cnpj           TEXT,
-      classe         TEXT,
-      situacao       TEXT,
-      capital_social NUMERIC,
-      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      agente          TEXT        NOT NULL,
+      cod_agente_ccee INTEGER,
+      razao_social    TEXT,
+      sigla           TEXT,
+      cnpj            TEXT,
+      classe          TEXT,
+      situacao        TEXT,
+      capital_social  NUMERIC,
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (agente)
     )
   `);
+  // Migration para bancos existentes (ADD COLUMN IF NOT EXISTS é idempotente)
+  await q(`ALTER TABLE ccee_agentes ADD COLUMN IF NOT EXISTS cod_agente_ccee INTEGER`);
 
   // ── ccee_dados ───────────────────────────────────────────────────────────────
   await q(`
