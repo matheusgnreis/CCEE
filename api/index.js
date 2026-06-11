@@ -1247,6 +1247,18 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
     const params     = [agentes];
     let   idx        = 2;
 
+    // Se ccee_agente_perfis tiver mapeamento para estes agentes, filtra também por
+    // cod_perf_agente para corrigir cargas salvas com agente errado (irmãos de NOME_EMPRESARIAL)
+    const { rows: perfisKnown } = await pool.query(
+      "SELECT cod_perf_agente FROM ccee_agente_perfis WHERE agente = ANY($1)",
+      [agentes]
+    );
+    if (perfisKnown.length > 0) {
+      const codigos = perfisKnown.map(r => r.cod_perf_agente);
+      conditions.push(`(cod_perf_agente = ANY($${idx++}) OR cod_perf_agente IS NULL)`);
+      params.push(codigos);
+    }
+
     if (mesEfetivo) { conditions.push(`mes_referencia = $${idx++}`); params.push(mesEfetivo); }
 
     if (estado) {
