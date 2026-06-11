@@ -617,24 +617,49 @@ async function onboardarAgente(agente, razaoSocial, sigla, nomeToAgente) {
   console.log(`\n  ► Onboarding: ${agente}`);
   try {
     const anos = Array.from({ length: new Date().getFullYear() - PRIMEIRO_ANO_CONTAB + 1 }, (_, i) => PRIMEIRO_ANO_CONTAB + i);
-    // Contabilização primeiro: popula ccee_agente_perfis com o mapeamento CODIGO_AGENTE → perfis,
-    // que será usado por salvarCargas para filtrar corretamente os registros da empresa
+
+    // [1/4] Contabilização + usinas em paralelo
+    process.stdout.write(`    [1/4] contabilização + usinas...`);
     const [contab, usinas] = await Promise.allSettled([
       buscarContabilizacao(razaoSocial || agente, { anos }),
       buscarUsinas(razaoSocial || agente),
     ]);
     let irmaos = null;
-    if (contab.status === "fulfilled") irmaos = await salvarContabilizacao(agente, contab.value);
-    // Cargas depois: salvarCargas já consulta ccee_agente_perfis para filtrar por perfil
+    if (contab.status === "fulfilled") {
+      irmaos = await salvarContabilizacao(agente, contab.value);
+      process.stdout.write(` ${contab.value.length} registros`);
+    } else {
+      process.stdout.write(` ⚠ ${contab.reason?.message?.slice(0, 50)}`);
+    }
+    console.log();
+
+    // [2/4] Cargas
+    process.stdout.write(`    [2/4] cargas...`);
     try {
       const cargas = await buscarCargas(sigla, { razaoSocial });
       await salvarCargas(agente, cargas);
+      process.stdout.write(` ${cargas.length} registros`);
     } catch (e) {
-      console.warn(`    cargas: ${e.message}`);
+      process.stdout.write(` ⚠ ${e.message.slice(0, 50)}`);
     }
-    if (usinas.status === "fulfilled") await salvarUsinas(agente, usinas.value);
+    console.log();
 
-    // Auto-onboarding de agentes irmãos: outros CODIGO_AGENTE que compartilham a mesma razão social
+    // [3/4] Usinas
+    process.stdout.write(`    [3/4] usinas...`);
+    if (usinas.status === "fulfilled") {
+      await salvarUsinas(agente, usinas.value);
+      process.stdout.write(` ${usinas.value.length} registros`);
+    } else {
+      process.stdout.write(` ⚠ ${usinas.reason?.message?.slice(0, 50)}`);
+    }
+    console.log();
+
+    // [4/4] Auto-onboarding de agentes irmãos
+    if (irmaos && nomeToAgente && !SEM_POWERBI) {
+      process.stdout.write(`    [4/4] irmãos...`);
+    } else {
+      console.log(`    [4/4] irmãos: nenhum`);
+    }
     if (irmaos && nomeToAgente && !SEM_POWERBI) {
       for (const irmao of irmaos) {
         if (!irmao.siglaPrimaria) continue;
@@ -1491,16 +1516,19 @@ async function main() {
     });
     clearInterval(pingInterval);
 
-    for (const { agente } of agentesDoMes) {
+    for (let ai = 0; ai < agentesDoMes.length; ai++) {
+      const { agente } = agentesDoMes[ai];
       const regs      = Object.values(agregado[agente]);
       const regsPerfil = Object.values(agregadoPerfil[agente]);
       const regsUC    = Object.values(agregadoUC[agente] || {});
-      if (!regs.length) continue;
+      if (!regs.length) { console.log(`    [${ai+1}/${agentesDoMes.length}] ${agente}: sem dados`); continue; }
 
-      console.log(`    ${agente}: ${regs.length} períodos | ${regsUC.length} por UC`);
+      process.stdout.write(`    [${ai+1}/${agentesDoMes.length}] ${agente}: ${regs.length} períodos | ${regsUC.length} UCs`);
+      process.stdout.write(` → consumo...`);
       await salvarConsumo(agente, regs);
       await salvarConsumoPerfil(agente, regsPerfil);
       if (regsUC.length) await salvarConsumoUC(agente, regsUC);
+      process.stdout.write(` curva...`);
 
       // Atualiza curva típica com média ponderada incremental (não distorce histórico)
       await pool.query(`
@@ -1535,12 +1563,14 @@ async function main() {
 
       // Calcula modulação se ainda não foi feita
       if (!modOkSet.has(`${agente}|${mes}`)) {
+        process.stdout.write(` modulação...`);
         await calcularModulacao(agente, [mes]);
         modOkSet.add(`${agente}|${mes}`);
       }
 
       // Calcula modulação por UC usando dados em memória (pldMapa já cacheado por calcularModulacao)
       if (regsUC.length) {
+        process.stdout.write(` mod-UC...`);
         try {
           const pldMapa = await getPldMapa(mes);
           const modUC   = calcularModulacaoUC(regsUC, pldMapa);
@@ -1549,6 +1579,7 @@ async function main() {
           console.warn(`    Modulação UC ${mes}: ${e.message}`);
         }
       }
+      console.log(` ✓`);
 
       // Descarta dados brutos (curva típica e modulação já salvos)
       // Com --salvar-horario, mantém os dados para consulta futura (banco maior)
