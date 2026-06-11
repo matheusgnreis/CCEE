@@ -206,11 +206,15 @@ async function descobrirAgentesNoCKAN(recursos) {
 
   const nomes = new Set();
   for (const recurso of paraBuscar) {
-    console.log(`\n  Descobrindo agentes em ${recurso.mes}...`);
+    console.log(`\n  Descobrindo agentes em ${recurso.mes} (baixando arquivo gzip)...`);
+    let linhas = 0;
     await withRetry(() => streamGzip(recurso.url, row => {
       const nome = (row.NOME_EMPRESARIAL || "").trim();
       if (nome) nomes.add(nome);
+      linhas++;
+      if (linhas % 500000 === 0) process.stdout.write(`\r    ${(linhas / 1e6).toFixed(1)}M linhas lidas, ${nomes.size} agentes encontrados...`);
     }));
+    process.stdout.write(`\r    `); // limpa linha de progresso
   }
 
   console.log(`  ${nomes.size} agentes distintos nos ${paraBuscar.length} meses verificados`);
@@ -1098,8 +1102,10 @@ async function main() {
   // Deve rodar antes de qualquer processamento de cargas para garantir filtros corretos.
   await sincronizarPerfisLista();
 
-  // Carrega CKAN resources
+  // Carrega lista de recursos CKAN (consumo horário e geração horária)
+  process.stdout.write("\n  Carregando índice de recursos CKAN...");
   const [recursosCon, recursosGer] = await Promise.all([listarConsumo(), listarGeracao()]);
+  console.log(` ${recursosCon.length} meses consumo | ${recursosGer.length} meses geração`);
   const mesesDisponiveis = recursosCon.map(r => r.mes).filter(m => m >= PRIMEIRO_MES);
   const urlConsumo = Object.fromEntries(recursosCon.map(r => [r.mes, r.url]));
   const urlGeracao = Object.fromEntries(recursosGer.map(r => [r.mes, r.url]));
