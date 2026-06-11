@@ -23,6 +23,7 @@ const { buscarContratosPerfil }         = require("../api/ccee-abertos/contratos
 const { buscarHistoricoPowerBI }        = require("../api/powerbi-batch");
 const { buscarUsinas }                  = require("../api/ccee-abertos/geracao");
 const { buscarCargas }                  = require("../api/ccee-abertos/cargas");
+const { buscarPerfisAtivosPorSigla }    = require("../api/ccee-abertos/lista-perfil");
 const { buscarPldHorarioMapa }          = require("../api/ccee-abertos/pld-horario");
 const { listarRecursos: listarConsumo } = require("../api/ccee-abertos/consumo-horario");
 const { buscarGeracaoHoraria, listarRecursos: listarGeracao } = require("../api/ccee-abertos/geracao-horaria");
@@ -984,6 +985,52 @@ async function calcularModulacaoGeracao(agente, meses, siglasUsinas) {
   }
 }
 
+// ─── Sincroniza ccee_agente_perfis a partir da lista_perfil_v1 ───────────────
+// Roda antes do loop principal para garantir mapeamento agente → perfis correto,
+// independente de a contabilização já ter sido processada.
+// Retorna o Map<sigla_agente, { cod_agente, nome_empresarial, cnpj, perfis[] }>
+// para uso opcional como fonte de discovery.
+async function sincronizarPerfisLista() {
+  console.log("\n[0/5] Sincronizando ccee_agente_perfis via lista_perfil_v1...");
+  let porSigla;
+  try {
+    porSigla = await buscarPerfisAtivosPorSigla();
+  } catch (e) {
+    console.warn(`  ⚠ Falha ao baixar lista_perfil_v1: ${e.message} — continuando sem sync`);
+    return new Map();
+  }
+
+  // Busca todos os agentes que já estão no banco
+  const { rows: agentes } = await pool.query(
+    "SELECT agente, sigla FROM ccee_agentes"
+  );
+
+  let atualizados = 0;
+  let inseridos   = 0;
+
+  for (const { agente, sigla } of agentes) {
+    const chave = (sigla || agente || "").trim();
+    const info  = porSigla.get(chave);
+    if (!info?.perfis.length) continue;
+
+    for (const p of info.perfis) {
+      const { rowCount } = await pool.query(`
+        INSERT INTO ccee_agente_perfis (agente, cod_agente_ccee, cod_perf_agente, sigla_perfil_agente)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (agente, cod_perf_agente) DO UPDATE
+          SET cod_agente_ccee     = EXCLUDED.cod_agente_ccee,
+              sigla_perfil_agente = EXCLUDED.sigla_perfil_agente
+      `, [agente, info.cod_agente, p.cod_perf_agente, p.sigla_perfil_agente]);
+      if (rowCount > 0) inseridos++;
+    }
+    atualizados++;
+  }
+
+  console.log(`  ✅ ${atualizados} agentes sincronizados | ${inseridos} perfis inseridos/atualizados`);
+  console.log(`  📊 ${porSigla.size} agentes ativos no CCEE (lista_perfil_v1)`);
+  return porSigla;
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1021,6 +1068,10 @@ async function main() {
       PRIMARY KEY (agente, nome_carga, mes_referencia, submercado)
     )
   `);
+
+  // ── Fase 0: Sincronizar mapeamento agente → perfis via lista_perfil_v1 ──────
+  // Deve rodar antes de qualquer processamento de cargas para garantir filtros corretos.
+  await sincronizarPerfisLista();
 
   // Carrega CKAN resources
   const [recursosCon, recursosGer] = await Promise.all([listarConsumo(), listarGeracao()]);
