@@ -1038,37 +1038,53 @@ async function sincronizarPerfisLista() {
     if (!porNomeEmpresarial.get(nome).includes(sigla)) porNomeEmpresarial.get(nome).push(sigla);
   }
 
-  // Sincroniza ccee_agente_perfis e cod_agente_ccee em ccee_agentes
+  // Sincroniza ccee_agente_perfis e cod_agente_ccee em ccee_agentes — batch único
   const { rows: agentes } = await pool.query("SELECT agente, sigla FROM ccee_agentes");
 
-  let atualizados = 0;
-  let inseridos   = 0;
+  // Monta linhas a upsert
+  const perfisRows   = []; // { agente, cod_agente, cod_perf_agente, sigla_perfil_agente }
+  const agentUpdates = []; // { agente, cod_agente }
 
   for (const { agente, sigla } of agentes) {
     const chave = (sigla || agente || "").trim();
     const info  = porSigla.get(chave);
     if (!info?.perfis.length) continue;
-
-    // Grava cod_agente_ccee diretamente em ccee_agentes
-    await pool.query(
-      "UPDATE ccee_agentes SET cod_agente_ccee = $1 WHERE agente = $2 AND (cod_agente_ccee IS NULL OR cod_agente_ccee != $1)",
-      [info.cod_agente, agente]
-    );
-
+    agentUpdates.push({ agente, cod_agente: info.cod_agente });
     for (const p of info.perfis) {
-      const { rowCount } = await pool.query(`
-        INSERT INTO ccee_agente_perfis (agente, cod_agente_ccee, cod_perf_agente, sigla_perfil_agente)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (agente, cod_perf_agente) DO UPDATE
-          SET cod_agente_ccee     = EXCLUDED.cod_agente_ccee,
-              sigla_perfil_agente = EXCLUDED.sigla_perfil_agente
-      `, [agente, info.cod_agente, p.cod_perf_agente, p.sigla_perfil_agente]);
-      if (rowCount > 0) inseridos++;
+      perfisRows.push({ agente, cod_agente: info.cod_agente, cod_perf_agente: p.cod_perf_agente, sigla_perfil_agente: p.sigla_perfil_agente });
     }
-    atualizados++;
   }
 
-  console.log(`  ✅ ${atualizados} agentes sincronizados | ${inseridos} perfis inseridos/atualizados`);
+  // UPDATE em lote: ccee_agentes.cod_agente_ccee
+  if (agentUpdates.length) {
+    const vals   = agentUpdates.map((r, i) => `($${i * 2 + 1}::text, $${i * 2 + 2}::int)`).join(", ");
+    const params = agentUpdates.flatMap(r => [r.agente, r.cod_agente]);
+    await pool.query(
+      `UPDATE ccee_agentes AS a SET cod_agente_ccee = v.cod
+       FROM (VALUES ${vals}) AS v(agente, cod)
+       WHERE a.agente = v.agente AND (a.cod_agente_ccee IS NULL OR a.cod_agente_ccee != v.cod)`,
+      params
+    );
+  }
+
+  // INSERT em lote: ccee_agente_perfis (chunks de 500 para não explodir o limite de params)
+  const CHUNK = 500;
+  let inseridos = 0;
+  for (let i = 0; i < perfisRows.length; i += CHUNK) {
+    const chunk  = perfisRows.slice(i, i + CHUNK);
+    const vals   = chunk.map((_, j) => `($${j * 4 + 1}, $${j * 4 + 2}, $${j * 4 + 3}, $${j * 4 + 4})`).join(", ");
+    const params = chunk.flatMap(r => [r.agente, r.cod_agente, r.cod_perf_agente, r.sigla_perfil_agente]);
+    const { rowCount } = await pool.query(`
+      INSERT INTO ccee_agente_perfis (agente, cod_agente_ccee, cod_perf_agente, sigla_perfil_agente)
+      VALUES ${vals}
+      ON CONFLICT (agente, cod_perf_agente) DO UPDATE
+        SET cod_agente_ccee     = EXCLUDED.cod_agente_ccee,
+            sigla_perfil_agente = EXCLUDED.sigla_perfil_agente
+    `, params);
+    inseridos += rowCount ?? chunk.length;
+  }
+
+  console.log(`  ✅ ${agentUpdates.length} agentes sincronizados | ${inseridos} perfis inseridos/atualizados`);
   console.log(`  📊 ${porSigla.size} agentes ativos | ${porNomeEmpresarial.size} empresas distintas`);
   return { porSigla, porNomeEmpresarial };
 }
