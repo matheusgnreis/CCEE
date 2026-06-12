@@ -206,6 +206,9 @@ export default function Home() {
                     {item.razao_social && (
                       <span style={s.dropRazao}>{item.razao_social}</span>
                     )}
+                    {item.externo && (
+                      <span style={{ fontSize: 10, color: "#9ca3af", marginLeft: 6 }}>CCEE</span>
+                    )}
                   </li>
                 ))}
               </ul>

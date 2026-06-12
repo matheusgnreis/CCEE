@@ -16,6 +16,7 @@ const { buscarMesRecente }        = require("./ccee-abertos/mcp");
 const { buscarDesligamento }      = require("./ccee-abertos/desligamento");
 const { buscarConsumoHorario, listarRecursos: listarRecursosConsumo } = require("./ccee-abertos/consumo-horario");
 const { buscarPldHorario, buscarPldHorarioMapa, anosDisponiveis: anosDisponiveisPld } = require("./ccee-abertos/pld-horario");
+const { buscarPerfisNoCKAN } = require("./ccee-abertos/lista-perfil");
 const { normalizarMes } = require("./ccee-abertos/utils");
 const { decodificarBitmaskDSR, extrairSerieDSR, extrairSerieGeracao, mergeHistorico } = require("./powerbi-utils");
 const cron                        = require("node-cron");
@@ -904,26 +905,36 @@ app.get("/health", async (_req, res) => {
 });
 
 // GET /agentes/busca?q= — autocomplete de agentes por nome ou razão social
+// Fallback: quando não encontra nada no banco, consulta lista_perfil CCEE por NOME_EMPRESARIAL
 app.get("/agentes/busca", async (req, res) => {
   const q = (req.query.q || "").trim();
   if (q.length < 2) return res.json([]);
   try {
-    const data = await cache.cached(`busca:${q.toLowerCase()}`, 600, async () => {
-      const { rows } = await pool.query(
-        `SELECT agente, razao_social, sigla, classe
-           FROM ccee_agentes
-          WHERE agente ILIKE $1 OR razao_social ILIKE $1
-          ORDER BY
-            CASE WHEN agente ILIKE $2 THEN 0
-                 WHEN razao_social ILIKE $2 THEN 1
-                 ELSE 2 END,
-            agente
-          LIMIT 10`,
-        [`%${q}%`, `${q}%`]
-      );
-      return rows;
-    });
-    res.json(data);
+    const { rows } = await pool.query(
+      `SELECT agente, razao_social, sigla, classe
+         FROM ccee_agentes
+        WHERE agente ILIKE $1 OR razao_social ILIKE $1
+        ORDER BY
+          CASE WHEN agente ILIKE $2 THEN 0
+               WHEN razao_social ILIKE $2 THEN 1
+               ELSE 2 END,
+          agente
+        LIMIT 10`,
+      [`%${q}%`, `${q}%`]
+    );
+
+    if (rows.length > 0) return res.json(rows);
+
+    // Nada no banco — consulta lista_perfil CCEE por NOME_EMPRESARIAL (parcial)
+    const externos = await buscarPerfisNoCKAN(q);
+    const resultado = externos.map(e => ({
+      agente:       e.agente,
+      razao_social: e.razao_social,
+      sigla:        e.agente,
+      classe:       null,
+      externo:      true, // indica que não está no banco local ainda
+    }));
+    return res.json(resultado);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1223,7 +1234,17 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
           : await pool.query("SELECT razao_social FROM ccee_agentes WHERE agente = $1", [agente]);
         const razaoSocial = metaAgente.rows[0]?.razao_social || null;
         const registros   = await buscarCargas(agente, { razaoSocial });
-        if (registros.length > 0) await salvarCargas(agente, agente, registros);
+        if (registros.length > 0) {
+          const { rows: pm } = await pool.query(
+            "SELECT cod_perf_agente FROM ccee_agente_perfis WHERE agente = $1", [agente]
+          );
+          let filtradas = registros;
+          if (pm.length > 0) {
+            const codsOk = new Set(pm.map(r => String(r.cod_perf_agente)));
+            filtradas = registros.filter(r => r.cod_perf_agente == null || codsOk.has(String(r.cod_perf_agente)));
+          }
+          await salvarCargas(agente, agente, filtradas.length ? filtradas : registros);
+        }
       }
     }
 
@@ -1247,16 +1268,19 @@ app.get("/inteligencia/:agente/cargas", async (req, res) => {
     const params     = [agentes];
     let   idx        = 2;
 
-    // Se ccee_agente_perfis tiver mapeamento para estes agentes, filtra também por
-    // cod_perf_agente para corrigir cargas salvas com agente errado (irmãos de NOME_EMPRESARIAL)
-    const { rows: perfisKnown } = await pool.query(
-      "SELECT cod_perf_agente FROM ccee_agente_perfis WHERE agente = ANY($1)",
+    // Filtra por propriedade real do perfil: cada carga aparece só para o agente
+    // que a "possui" em ccee_agente_perfis, evitando duplicatas em modo grupo.
+    const { rows: hasPerfilMap } = await pool.query(
+      "SELECT 1 FROM ccee_agente_perfis WHERE agente = ANY($1) LIMIT 1",
       [agentes]
     );
-    if (perfisKnown.length > 0) {
-      const codigos = perfisKnown.map(r => r.cod_perf_agente);
-      conditions.push(`(cod_perf_agente = ANY($${idx++}) OR cod_perf_agente IS NULL)`);
-      params.push(codigos);
+    if (hasPerfilMap.length > 0) {
+      conditions.push(`(
+        cod_perf_agente IN (
+          SELECT p.cod_perf_agente FROM ccee_agente_perfis p WHERE p.agente = ccee_cargas.agente
+        )
+        OR cod_perf_agente IS NULL
+      )`);
     }
 
     if (mesEfetivo) { conditions.push(`mes_referencia = $${idx++}`); params.push(mesEfetivo); }
@@ -1536,7 +1560,17 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
       console.log(`[contabilizacao] Buscando dados para ${agente} (${razaoSocial})...`);
       try {
         const registros = await buscarContabilizacao(razaoSocial);
-        if (registros.length) await salvarContabilizacao(agente, registros);
+        if (registros.length) {
+          const { rows: pm } = await pool.query(
+            "SELECT cod_perf_agente FROM ccee_agente_perfis WHERE agente = $1", [agente]
+          );
+          let filtrados = registros;
+          if (pm.length > 0) {
+            const codsOk = new Set(pm.map(r => String(r.cod_perf_agente)));
+            filtrados = registros.filter(r => r.cod_perf_agente == null || codsOk.has(String(r.cod_perf_agente)));
+          }
+          await salvarContabilizacao(agente, filtrados.length ? filtrados : registros);
+        }
       } catch (err) {
         console.warn(`[contabilizacao] Erro ao buscar: ${err.message}`);
       }
@@ -1556,27 +1590,46 @@ app.get("/inteligencia/:agente/contabilizacao", async (req, res) => {
     let agentesContab = [agente];
     if (isGrupoContab) agentesContab = await getGrupoAgentes(agente);
 
-    let where, params;
-    if (isGrupoContab) {
-      where  = mesContab ? "WHERE agente = ANY($1) AND mes_referencia = $2" : "WHERE agente = ANY($1)";
-      params = mesContab ? [agentesContab, mesContab] : [agentesContab];
-    } else {
-      where  = mesContab ? "WHERE agente = $1 AND mes_referencia = $2" : "WHERE agente = $1";
-      params = mesContab ? [agente, mesContab] : [agente];
-    }
+    const cols = `c.agente, c.mes_referencia, c.sigla_perfil_agente, c.cod_perf_agente,
+               c.valor_tm_mcp, c.compensacao_mre, c.valor_encargo, c.valor_ajuste_exposicao,
+               c.valor_ajuste_alivio_ret, c.efeito_contrat_disp, c.efeito_contrat_cota_gf,
+               c.efeito_contrat_nuclear, c.ajuste_recontab, c.ajuste_mcsd_ex,
+               c.resultado_financeiro_er, c.efeito_ccearq, c.efeito_contrat_itaipu,
+               c.efeito_repasse_risco_hidro, c.efeito_desloc_pld_cmo, c.resultado_final`;
 
     const data = await cache.cached(`contab:${isGrupoContab?"grupo:":""}${agente}:${mesContab||"all"}`, 3600, async () => {
-      const r = await pool.query(`
-        SELECT agente, mes_referencia, sigla_perfil_agente, cod_perf_agente,
-               valor_tm_mcp, compensacao_mre, valor_encargo, valor_ajuste_exposicao,
-               valor_ajuste_alivio_ret, efeito_contrat_disp, efeito_contrat_cota_gf,
-               efeito_contrat_nuclear, ajuste_recontab, ajuste_mcsd_ex,
-               resultado_financeiro_er, efeito_ccearq, efeito_contrat_itaipu,
-               efeito_repasse_risco_hidro, efeito_desloc_pld_cmo, resultado_final
-        FROM ccee_contabilizacao
-        ${where}
-        ORDER BY mes_referencia DESC, agente ASC, sigla_perfil_agente ASC
-      `, params);
+      let sql, params;
+      if (isGrupoContab) {
+        // Deduplicates: cada sigla_perfil_agente aparece uma vez,
+        // priorizando o agente que a "possui" em ccee_agente_perfis
+        const mesWhere = mesContab ? "AND c.mes_referencia = $2" : "";
+        params = mesContab ? [agentesContab, mesContab] : [agentesContab];
+        sql = `
+          SELECT DISTINCT ON (c.sigla_perfil_agente) ${cols}
+          FROM ccee_contabilizacao c
+          LEFT JOIN ccee_agente_perfis p
+            ON p.cod_perf_agente = c.cod_perf_agente AND p.agente = c.agente
+          WHERE c.agente = ANY($1) ${mesWhere}
+          ORDER BY c.sigla_perfil_agente, (p.agente IS NOT NULL) DESC, c.agente ASC
+        `;
+      } else {
+        // Agente único: só mostra perfis que pertencem a este agente (via ccee_agente_perfis).
+        // Se o agente ainda não tem mapeamento, mostra todos (fallback seguro).
+        const mesWhere = mesContab ? "AND c.mes_referencia = $2" : "";
+        params = mesContab ? [agente, mesContab] : [agente];
+        sql = `
+          SELECT ${cols}
+          FROM ccee_contabilizacao c
+          WHERE c.agente = $1 ${mesWhere}
+            AND (
+              c.cod_perf_agente IN (SELECT cod_perf_agente FROM ccee_agente_perfis WHERE agente = $1)
+              OR c.cod_perf_agente IS NULL
+              OR NOT EXISTS (SELECT 1 FROM ccee_agente_perfis WHERE agente = $1)
+            )
+          ORDER BY c.mes_referencia DESC, c.sigla_perfil_agente ASC
+        `;
+      }
+      const r = await pool.query(sql, params);
       return r.rows;
     });
     return res.json(data);

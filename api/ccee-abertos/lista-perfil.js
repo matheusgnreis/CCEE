@@ -76,4 +76,66 @@ async function buscarPerfisAtivosPorSigla() {
   return mapa;
 }
 
-module.exports = { buscarPerfisAtivos, buscarPerfisAtivosPorSigla };
+/**
+ * Busca agentes na lista_perfil_v1 pelo NOME_EMPRESARIAL (parcial, case-insensitive).
+ * Usa o parâmetro `q` do CKAN datastore_search para full-text search.
+ * Retorna resultados únicos por SIGLA_AGENTE, apenas perfis ATIVOS.
+ * @param {string} termo
+ * @returns {Promise<Array<{ agente: string, razao_social: string, cod_agente: number, perfis: number[] }>>}
+ */
+async function buscarPerfisNoCKAN(termo) {
+  const DATASET_IDS = await getIds();
+  const anoAtual    = new Date().getFullYear();
+  let anoAlvo       = anoAtual;
+  while (anoAlvo >= 2025 && !DATASET_IDS[anoAlvo]) anoAlvo--;
+  const id = DATASET_IDS[anoAlvo];
+  if (!id) return [];
+
+  const { fetchPagina } = require("./utils");
+
+  // CKAN q com campo específico faz substring search
+  const params = new URLSearchParams({
+    resource_id: id,
+    limit:       50,
+    offset:      0,
+    q:           JSON.stringify({ NOME_EMPRESARIAL: termo }),
+    filters:     JSON.stringify({ STATUS_PERFIL: "ATIVO" }),
+  });
+
+  let records = [];
+  try {
+    const url      = `https://dadosabertos.ccee.org.br/api/3/action/datastore_search?${params}`;
+    const ctrl     = new AbortController();
+    const timer    = setTimeout(() => ctrl.abort(), 10000);
+    const fetch    = require("node-fetch");
+    const res      = await fetch(url, { signal: ctrl.signal, headers: { "User-Agent": "CCEEMonitor/1.0" } });
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const json = await res.json();
+    if (!json.success) return [];
+    records = json.result?.records || [];
+  } catch {
+    return [];
+  }
+
+  // Agrupa por SIGLA_AGENTE, deduplica
+  const porSigla = new Map();
+  for (const r of records) {
+    const sigla = (r.SIGLA_AGENTE || "").trim();
+    if (!sigla) continue;
+    if (!porSigla.has(sigla)) {
+      porSigla.set(sigla, {
+        agente:       sigla,
+        razao_social: (r.NOME_EMPRESARIAL || "").trim(),
+        cod_agente:   parseInt(r.COD_AGENTE, 10) || null,
+        perfis:       [],
+      });
+    }
+    const cod = parseInt(r.COD_PERF_AGENTE, 10);
+    if (!isNaN(cod)) porSigla.get(sigla).perfis.push(cod);
+  }
+
+  return [...porSigla.values()];
+}
+
+module.exports = { buscarPerfisAtivos, buscarPerfisAtivosPorSigla, buscarPerfisNoCKAN };

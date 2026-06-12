@@ -337,6 +337,11 @@ async function salvarAgentePerfilMapping(agente, codAgente, perfis) {
 
 async function salvarCargas(agente, registros) {
   if (!registros.length) return;
+  const pn = v => {
+    if (v == null) return null;
+    const n = Number(String(v).replace("%", "").replace(",", ".").trim());
+    return isNaN(n) ? null : n;
+  };
 
   // Filtra pelas siglas de perfil já mapeadas para este agente (evita misturar com outros agentes da mesma razão social)
   const { rows: perfilRows } = await pool.query(
@@ -382,10 +387,10 @@ async function salvarCargas(agente, registros) {
       lote.map(r => r.estado_uf || null),
       lote.map(r => r.ramo_atividade || null),
       lote.map(r => r.submercado || null),
-      lote.map(r => r.capacidade_carga ?? null),
-      lote.map(r => r.consumo_acl ?? null),
-      lote.map(r => r.consumo_cativo_parc_livre ?? null),
-      lote.map(r => r.consumo_total ?? null),
+      lote.map(r => pn(r.capacidade_carga)),
+      lote.map(r => pn(r.consumo_acl)),
+      lote.map(r => pn(r.consumo_cativo_parc_livre)),
+      lote.map(r => pn(r.consumo_total)),
     ]);
   }
   console.log(`    cargas: ${filtrados.length} registros`);
@@ -393,6 +398,11 @@ async function salvarCargas(agente, registros) {
 
 async function salvarUsinas(agente, registros) {
   if (!registros.length) return;
+  const pn = v => {
+    if (v == null) return null;
+    const n = Number(String(v).replace("%", "").replace(",", ".").trim());
+    return isNaN(n) ? null : n;
+  };
   const BATCH = 200;
   for (let i = 0; i < registros.length; i += BATCH) {
     const lote = registros.slice(i, i + BATCH);
@@ -424,10 +434,10 @@ async function salvarUsinas(agente, registros) {
       lote.map(r => r.caracteristica_parcela || null),
       lote.map(r => r.participante_mre || null),
       lote.map(r => r.participante_regime_cotas || null),
-      lote.map(r => r.percentual_desconto_usina ?? null),
-      lote.map(r => r.cap_t ?? null),
-      lote.map(r => r.geracao_centro_gravidade ?? null),
-      lote.map(r => r.gf_centro_gravidade ?? null),
+      lote.map(r => pn(r.percentual_desconto_usina)),
+      lote.map(r => pn(r.cap_t)),
+      lote.map(r => pn(r.geracao_centro_gravidade)),
+      lote.map(r => pn(r.gf_centro_gravidade)),
     ]);
   }
   console.log(`    usinas: ${registros.length} registros`);
@@ -1220,22 +1230,12 @@ async function main() {
   }
   if (irmaosExtras.length) console.log(`  +${irmaosExtras.length} irmãos incluídos: ${irmaosExtras.map(a => a.agente).join(", ")}`);
 
-  // Suporta múltiplos agentes por NOME_EMPRESARIAL (ex: MONSANTO e MONSANTO SEMENTES)
-  const nomeToAgenteKeys = new Map(); // NOME_normalizado → agente_key[]
-  for (const [nome, meta] of nomeToAgente) {
-    const k = normalizarNome(nome);
-    if (!nomeToAgenteKeys.has(k)) nomeToAgenteKeys.set(k, []);
-    nomeToAgenteKeys.get(k).push(meta.agente);
-  }
-  // Adiciona irmãos ao mapa de streaming (pelo razao_social normalizado)
-  for (const extra of irmaosExtras) {
-    if (!razoesSociaisConhecidas.has(normalizarNome(extra.razao_social || ""))) continue;
-    const k = normalizarNome(extra.razao_social || extra.agente);
-    if (!nomeToAgenteKeys.has(k)) nomeToAgenteKeys.set(k, []);
-    if (!nomeToAgenteKeys.get(k).includes(extra.agente)) nomeToAgenteKeys.get(k).push(extra.agente);
-  }
+  // Snapshot completo para fases 2.5/2.6 (contabilização + consumo mensal perfil).
+  // Esses dados não dependem de UF — devem rodar para TODOS os agentes, não só os do filtro.
+  const agentesParaContab = [...agentesAtivos];
 
   // Filtro por UF (ex: --apenas-uf MG  ou  --apenas-uf PB,PE,CE,RN,BA,AL,SE,MA,PI)
+  // Aplica SOMENTE a agentesAtivos, usado nas fases de streaming/modulação (3+).
   if (APENAS_UF) {
     const { rows: comUF } = await pool.query(
       "SELECT DISTINCT agente FROM ccee_cargas WHERE agente = ANY($1) AND estado_uf = ANY($2)",
@@ -1262,11 +1262,11 @@ async function main() {
   if (SEM_CONTAB) {
     console.log(`\n[2.5/4] Contabilização pulada (--sem-contab)`);
   } else {
-  console.log(`\n[2.5/4] Atualizando contabilização (${agentesAtivos.length} agentes)`);
+  console.log(`\n[2.5/4] Atualizando contabilização (${agentesParaContab.length} agentes)`);
   let contabAtualizados = 0;
-  const totalContab = agentesAtivos.filter(a => a.razao_social).length;
+  const totalContab = agentesParaContab.filter(a => a.razao_social).length;
   let contabIdx = 0;
-  for (const { agente, razao_social } of agentesAtivos) {
+  for (const { agente, razao_social } of agentesParaContab) {
     if (!razao_social) continue;
     contabIdx++;
     const { rows: contabMax } = await pool.query(
@@ -1326,9 +1326,9 @@ async function main() {
   } else {
   console.log(`\n[2.6/4] Atualizando consumo mensal e contratos por perfil`);
   let perfAtualizados = 0;
-  const totalPerf = agentesAtivos.filter(a => a.razao_social).length;
+  const totalPerf = agentesParaContab.filter(a => a.razao_social).length;
   let perfIdx = 0;
-  for (const { agente, razao_social } of agentesAtivos) {
+  for (const { agente, razao_social } of agentesParaContab) {
     if (!razao_social) continue;
     perfIdx++;
     const { rows: mmCmp } = await pool.query(
@@ -1477,24 +1477,19 @@ async function main() {
     if (!agentesDoMes.length) continue;
 
     console.log(`\n  📥 ${mes} (${agentesDoMes.length} agentes)`);
-    const agentesSet = new Set(agentesDoMes.map(a => a.agente));
-
-    // Carrega mapeamento de perfis: sigla_upper → { siglas, siglaToInfo: { cod_perf_agente, cod_agente_ccee } }
-    const perfisPorAgente = {};
-    for (const { agente } of agentesDoMes) {
-      const { rows: pRows } = await pool.query(
-        "SELECT sigla_perfil_agente, cod_perf_agente, cod_agente_ccee FROM ccee_agente_perfis WHERE agente = $1",
-        [agente]
-      );
-      if (pRows.length > 0) {
-        perfisPorAgente[agente] = {
-          siglas:      new Set(pRows.map(r => r.sigla_perfil_agente.trim().toUpperCase())),
-          siglaToInfo: new Map(pRows.map(r => [r.sigla_perfil_agente.trim().toUpperCase(), {
-            cod_perf_agente: r.cod_perf_agente,
-            cod_agente_ccee: r.cod_agente_ccee,
-          }])),
-        };
-      }
+    // Routing: cod_perf_agente (primary) e sigla_perfil_agente (fallback) → { aKey, cod_perf_agente, cod_agente_ccee }
+    const { rows: allPerfis } = await pool.query(
+      `SELECT agente, sigla_perfil_agente, cod_perf_agente, cod_agente_ccee
+         FROM ccee_agente_perfis WHERE agente = ANY($1)`,
+      [agentesDoMes.map(a => a.agente)]
+    );
+    const codPerfToAgent = new Map();
+    const siglaToAgent   = new Map();
+    for (const r of allPerfis) {
+      const sigla = (r.sigla_perfil_agente || "").trim().toUpperCase();
+      const entry = { aKey: r.agente, cod_perf_agente: r.cod_perf_agente, cod_agente_ccee: r.cod_agente_ccee };
+      if (r.cod_perf_agente != null) codPerfToAgent.set(r.cod_perf_agente, entry);
+      if (sigla) siglaToAgent.set(sigla, entry);
     }
 
     const agregado       = {};
@@ -1506,22 +1501,12 @@ async function main() {
     await withRetry(() => {
       agentesDoMes.forEach(a => { agregado[a.agente] = {}; agregadoPerfil[a.agente] = {}; agregadoUC[a.agente] = {}; });
       return streamGzip(urlConsumo[mes], row => {
-      const nome  = normalizarNome(row.NOME_EMPRESARIAL);
-      const aKeysAll = nomeToAgenteKeys.get(nome);
-      if (!aKeysAll) return;
-
-      const sigla = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
-
-      // Encontra qual agente é dono deste perfil (suporte a múltiplos agentes por NOME_EMPRESARIAL)
-      let aKey = null;
-      let perfCodes = null;
-      for (const k of aKeysAll) {
-        if (!agentesSet.has(k)) continue;
-        const pi = perfisPorAgente[k];
-        if (!pi) { if (!aKey) aKey = k; continue; } // sem mapeamento ainda → candidato fallback
-        if (pi.siglas.has(sigla)) { aKey = k; perfCodes = pi.siglaToInfo.get(sigla); break; }
-      }
-      if (!aKey) return;
+      const codPerf = parseInt(row.CODIGO_PERFIL_AGENTE, 10);
+      const sigla   = (row.SIGLA_PERFIL_AGENTE || "").trim().toUpperCase();
+      const entry   = (!isNaN(codPerf) && codPerfToAgent.get(codPerf)) || siglaToAgent.get(sigla);
+      if (!entry) return;
+      const aKey      = entry.aKey;
+      const perfCodes = entry;
 
       const codPerfil  = perfCodes?.cod_perf_agente ?? null;
       const codAgente  = perfCodes?.cod_agente_ccee ?? null;
